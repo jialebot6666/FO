@@ -16,8 +16,14 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 
 - 构建 + 测试（一条命令）：`cd fo && ./gradlew build`
 - JDK：21（`/home/user/jdks/jdk-21.0.12.1+1/bin/`）
-- 产物：`fo/build/libs/fo-V2.3.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
+- 产物：`fo/build/libs/FO-V2.3.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
+
+## 命名规范（硬性）
+
+- 插件名称统一大写 **FO**：构建产物文件名（`FO-V<版本>.jar`）、mod 显示名（`fabric.mod.json` 的 `name`）一律大写 FO。
+- **构建产物名与 mod 版本号统一到版本体系**：产物文件名 = `FO-<mod版本>.jar`；升版时同步修改 `fo/gradle/libs.versions.toml` 的 `mod-version`（如 V2.3 → V2.4），产物名自动跟随，不得出现产物名与版本体系脱节。
+- mod id（`fabric.mod.json` 的 `id`）按 Fabric 硬性规范保持小写 `fo`；Java 包名 `com.fo.addon` 保持小写（Java 惯例）。
 
 ## 详细执行流程
 

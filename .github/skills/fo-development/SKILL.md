@@ -18,7 +18,8 @@ license: CC0-1.0
 1. **每次改动完成后，必须立即创建一个对应的 Git commit**（信息包含模块名 + 改动摘要），以便追踪和回滚。
 2. **每次改动后，必须编写或更新相关单元测试**，并在交付前运行 `cd fo && ./gradlew build`，确保所有测试和验证全部通过。
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律中文；不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。新增/修改 UI 文本时必须自查是否中文。
-4. **交付**：把 `fo/build/libs/fo-V2.3.jar`（文件名 = `fo-<mod版本>.jar`，mod 版本见 `fo/gradle/libs.versions.toml` 的 `mod-version`，每次升版同步改）通过 `present_files` 交给用户。
+4. **命名规范（FO 大写 + 版本体系统一）**：插件名称统一大写 **FO**——构建产物文件名（`FO-V<版本>.jar`）、mod 显示名一律大写 FO；**构建产物名与 mod 版本号必须统一到版本体系**：产物 = `FO-<mod版本>.jar`，升版时同步修改 `fo/gradle/libs.versions.toml` 的 `mod-version`，不得脱节；mod id 按 Fabric 规范保持小写 `fo`，Java 包名 `com.fo.addon` 保持小写。
+5. **交付**：把 `fo/build/libs/FO-V2.3.jar`（文件名 = `FO-<mod版本>.jar`）通过 `present_files` 交给用户。
 
 ## 工作流
 
@@ -27,7 +28,7 @@ license: CC0-1.0
 3. **补测试**：为行为变更写/更新断言（尤其是判定类逻辑，必须覆盖新行为）。
 4. **验证**：`cd fo && ./gradlew build` 全绿（BUILD SUCCESSFUL + 全部测试 0 failures）。
 5. **提交**：`git add` 相关文件 → commit（仓库根）。
-6. **归档 jar**：把 `fo/build/libs/fo-V2.3.jar` 复制到 `releases/fo-V<版本号>-<commit短哈希>.jar`（版本号按交付顺延 V2.x → V2.y），并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。
+6. **归档 jar**：把 `fo/build/libs/FO-V2.3.jar` 复制到 `releases/FO-V<版本号>-<commit短哈希>.jar`（版本号按交付顺延 V2.x → V2.y），并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。
 7. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
 
 ## 用户偏好（历史沉淀）
