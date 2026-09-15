@@ -112,6 +112,40 @@ public class AutoLog extends Module {
         .build()
     );
 
+    private final Setting<Boolean> logHealth = sgGeneral.add(new BoolSetting.Builder()
+        .name("生命值下线")
+        .description("生命值低于或等于设定值时自动下线.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Double> healthThreshold = sgGeneral.add(new DoubleSetting.Builder()
+        .name("生命值阈值")
+        .description("生命值低于或等于此值时自动下线 (0 表示不检查).")
+        .defaultValue(6)
+        .min(0)
+        .sliderRange(0, 20)
+        .visible(logHealth::get)
+        .build()
+    );
+
+    private final Setting<Boolean> logTotem = sgGeneral.add(new BoolSetting.Builder()
+        .name("图腾下线")
+        .description("背包与副手的不死图腾少于设定数量时自动下线.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> totemThreshold = sgGeneral.add(new IntSetting.Builder()
+        .name("图腾数量阈值")
+        .description("不死图腾少于此数量时自动下线.")
+        .defaultValue(3)
+        .range(0, 37)
+        .sliderRange(0, 37)
+        .visible(logTotem::get)
+        .build()
+    );
+
     private final Setting<Boolean> serverNotResponding = sgGeneral.add(new BoolSetting.Builder()
         .name("服务器无响应下线")
         .description("服务器一段时间无响应时自动下线.")
@@ -211,6 +245,25 @@ public class AutoLog extends Module {
         if (logOnY.get() && mc.player.getY() < yLevel.get()) {
             logOut("Y=" + String.format("%.1f", mc.player.getY()) + " 低于设定高度 " + yLevel.get() + "，自动下线.", true);
             return;
+        }
+
+        // 生命值过低
+        if (logHealth.get() && healthThreshold.get() > 0) {
+            float health = mc.player.getHealth();
+            if (health <= healthThreshold.get()) {
+                logOut("生命值 " + String.format("%.1f", health) + " 低于或等于 " + healthThreshold.get() + "，自动下线.", true);
+                return;
+            }
+        }
+
+        // 图腾不足 (背包 + 副手)
+        if (logTotem.get()) {
+            int totems = mc.player.getInventory().count(Items.TOTEM_OF_UNDYING)
+                + (mc.player.getOffHandStack().getItem() == Items.TOTEM_OF_UNDYING ? 1 : 0);
+            if (totems < totemThreshold.get()) {
+                logOut("不死图腾 " + totems + " 个少于设定 " + totemThreshold.get() + "，自动下线.", true);
+                return;
+            }
         }
 
         // 护甲耐久过低
