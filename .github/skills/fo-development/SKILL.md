@@ -27,7 +27,8 @@ license: CC0-1.0
 3. **补测试**：为行为变更写/更新断言（尤其是判定类逻辑，必须覆盖新行为）。
 4. **验证**：`cd fo && ./gradlew build` 全绿（BUILD SUCCESSFUL + 全部测试 0 failures）。
 5. **提交**：`git add` 相关文件 → commit（仓库根）。
-6. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
+6. **归档 jar**：把 `fo/build/libs/fo-0.1.0.jar` 复制到 `releases/fo-V<版本号>-<commit短哈希>.jar`（版本号按交付顺延 V2.x → V2.y），并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。
+7. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
 
 ## 用户偏好（历史沉淀）
 
