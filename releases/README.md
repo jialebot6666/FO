@@ -1,7 +1,8 @@
 # FO 版本归档
 
-每个修复/功能版本交付前，把 `fo/build/libs/fo-0.1.0.jar` 复制为
-`fo-V<版本号>-<commit短哈希>.jar` 并提交到本目录，保证版本留存。
+每个修复/功能版本交付前，把构建产物（`fo/build/libs/fo-<mod版本>.jar`，当前
+`fo-V2.3.jar`）复制为 `fo-V<版本号>-<commit短哈希>.jar` 并提交到本目录，
+保证版本留存。mod 版本号在 `fo/gradle/libs.versions.toml` 的 `mod-version`，升版时同步改。
 
 ## 版本清单
 

@@ -16,7 +16,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 
 - 构建 + 测试（一条命令）：`cd fo && ./gradlew build`
 - JDK：21（`/home/user/jdks/jdk-21.0.12.1+1/bin/`）
-- 产物：`fo/build/libs/fo-0.1.0.jar`
+- 产物：`fo/build/libs/fo-V2.3.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 
 ## 详细执行流程
