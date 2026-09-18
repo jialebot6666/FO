@@ -1,0 +1,5 @@
+accessWidener	v1	named
+
+# GrimV3 sequence 补偿
+accessible method net/minecraft/client/world/ClientWorld getPendingUpdateManager ()Lnet/minecraft/client/network/PendingUpdateManager;
+accessible field net/minecraft/client/network/PendingUpdateManager sequence I

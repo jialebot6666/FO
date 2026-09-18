@@ -11,6 +11,10 @@ base {
     group = mavenGroup
 }
 
+loom {
+    accessWidenerPath = file("src/main/resources/fo.accesswidener")
+}
+
 repositories {
     maven {
         name = "meteor-maven"

@@ -1,6 +1,7 @@
 package com.fo.addon;
 
 import com.fo.addon.modules.AutoLog;
+import com.fo.addon.modules.AutoMineSand;
 import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
@@ -24,6 +25,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoTree());
         Modules.get().add(new AutoTrash());
         Modules.get().add(new AutoLog());
+        Modules.get().add(new AutoMineSand());
     }
 
     @Override

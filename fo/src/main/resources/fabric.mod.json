@@ -12,6 +12,7 @@
   },
   "icon": "assets/template/icon.png",
   "environment": "client",
+  "accessWidener": "fo.accesswidener",
   "entrypoints": {
     "meteor": [
       "com.fo.addon.AddonTemplate"
