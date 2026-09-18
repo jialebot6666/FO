@@ -119,11 +119,11 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> healthThreshold = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> healthThreshold = sgGeneral.add(new IntSetting.Builder()
         .name("生命值阈值")
         .description("生命值低于或等于此值时自动下线 (0 表示不检查).")
         .defaultValue(6)
-        .min(0)
+        .range(0, 20)
         .sliderRange(0, 20)
         .visible(logHealth::get)
         .build()
