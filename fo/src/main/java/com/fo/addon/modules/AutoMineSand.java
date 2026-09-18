@@ -1,516 +1,318 @@
 package com.fo.addon.modules;
 
-import com.fo.addon.AddonTemplate;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
-import com.fo.addon.utils.FakeBlockManager;
-import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.events.packets.PacketEvent;
-import meteordevelopment.meteorclient.events.game.GameLeftEvent;
+import meteordevelopment.meteorclient.pathing.BaritoneUtils;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.world.BlockUtils;
+import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ShulkerBoxBlock;
-import net.minecraft.item.BlockItem;
+import net.minecraft.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
 import net.minecraft.item.Item;
-import net.minecraft.item.Items;
 import net.minecraft.item.ItemStack;
-import net.minecraft.registry.Registries;
-import net.minecraft.screen.GenericContainerScreenHandler;
-import net.minecraft.screen.ShulkerBoxScreenHandler;
+import net.minecraft.item.Items;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
-import net.minecraft.network.packet.s2c.play.PlayerActionResponseS2CPacket;
-import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.hit.BlockHitResult;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 /**
  * FO 自动挖沙
- *
- * Baritone 寻路 + 目标方块挖掘 + 补给盒(FO补给)自动补给 + 存沙进潜影盒。
- * Nuker 模式通过 FakeBlockManager 的 GrimV3 sequence 补偿实现范围群挖。
- * 兼容 Meteor AutoEat：吃东西时暂停挖掘。
+ * - Baritone 模式：调 Baritone mineProcess 自动寻路挖沙（默认）
+ * - Nuker 模式：范围极速包挖（独立开关）
+ * - FO补给盒：命名潜影盒，自动补铲子/金萝卜/图腾
+ * - 存沙：背包满自动存到附近其他潜影盒
  */
 public class AutoMineSand extends Module {
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgSupply = settings.createGroup("补给盒");
-    private final SettingGroup sgNuker = settings.createGroup("Nuker 核爆");
+    private final SettingGroup sgSupply = settings.createGroup("FO补给盒");
+    private final SettingGroup sgStore = settings.createGroup("存沙");
 
-    // ===== 通用 =====
-    public final Setting<List<Block>> targetBlocks = sgGeneral.add(new BlockListSetting.Builder()
-            .name("目标方块")
-            .description("要挖的方块（默认沙子/红沙/沙砾）.")
-            .defaultValue(List.of(Blocks.SAND, Blocks.RED_SAND, Blocks.GRAVEL))
-            .build()
+    private final Setting<Integer> searchRadius = sgGeneral.add(new IntSetting.Builder()
+        .name("搜索半径").description("搜索沙子/潜影盒的半径")
+        .defaultValue(32).min(4).max(200).sliderMin(8).sliderMax(64).build());
+
+    private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
+        .name("操作延迟").description("状态机 tick 间隔")
+        .defaultValue(5).min(0).max(40).sliderMin(0).sliderMax(20).build());
+
+    private final Setting<Boolean> nukerMode = sgGeneral.add(new BoolSetting.Builder()
+        .name("核爆挖掘(Nuker)").description("开启后范围极速挖沙，关闭则用 Baritone 寻路挖")
+        .defaultValue(false).build());
+
+    private final Setting<Integer> nukerRange = sgGeneral.add(new IntSetting.Builder()
+        .name("核爆范围").description("Nuker 模式下最大挖掘半径")
+        .defaultValue(4).min(1).max(6).sliderMin(1).sliderMax(6).build());
+
+    private final Setting<String> supplyBoxName = sgSupply.add(new StringSetting.Builder()
+        .name("补给盒关键词").description("潜影盒命名包含此关键词即识别为 FO 补给盒")
+        .defaultValue("FO补给").build());
+
+    private final Setting<Integer> shovelMinDurability = sgSupply.add(new IntSetting.Builder()
+        .name("铲子最低耐久").description("耐久低于此值自动换新铲")
+        .defaultValue(10).min(1).max(100).sliderMin(1).sliderMax(100).build());
+
+    private final Setting<Integer> foodTarget = sgSupply.add(new IntSetting.Builder()
+        .name("金萝卜目标数量").description("从补给盒补到多少")
+        .defaultValue(64).min(8).max(64).sliderMin(8).sliderMax(64).build());
+
+    private final Setting<Integer> totemTarget = sgSupply.add(new IntSetting.Builder()
+        .name("图腾目标数量").description("从补给盒补到多少个")
+        .defaultValue(3).min(1).max(10).sliderMin(1).sliderMax(10).build());
+
+    private final Setting<Boolean> autoStore = sgStore.add(new BoolSetting.Builder()
+        .name("自动存沙").description("背包满自动存到附近潜影盒")
+        .defaultValue(true).build());
+
+    private final Setting<Integer> storeEmptySlots = sgStore.add(new IntSetting.Builder()
+        .name("背包空槽阈值").description("空槽位少于此值触发存沙")
+        .defaultValue(2).min(0).max(9).sliderMin(0).sliderMax(9).build());
+
+    private enum State { MINING, GOING_SUPPLY, OPEN_SUPPLY, GOING_STORE, OPEN_STORE }
+
+    private State state = State.MINING;
+    private int tickTimer = 0;
+    private int shulkerWaitTimer = 0;
+    private boolean waitingShulkerOpen = false;
+    private BlockPos storeBoxPos = null;
+
+    private static final List<Item> SHOVELS = Arrays.asList(
+        Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
+        Items.STONE_SHOVEL, Items.WOODEN_SHOVEL
     );
-
-    public final Setting<Integer> scanRange = sgGeneral.add(new IntSetting.Builder()
-            .name("扫描范围")
-            .description("周围多少格内扫描目标方块.")
-            .defaultValue(8).min(1).sliderRange(1, 32)
-            .build()
-    );
-
-    public final Setting<Integer> reachDist = sgGeneral.add(new IntSetting.Builder()
-            .name("到达距离")
-            .description("走到离目标多近开始挖.")
-            .defaultValue(3).min(1).sliderRange(1, 6)
-            .build()
-    );
-
-    // ===== Nuker =====
-    public final Setting<Boolean> nukerMode = sgNuker.add(new BoolSetting.Builder()
-            .name("Nuker 核爆模式")
-            .description("到位置后范围群挖（GrimV3 sequence 补偿）.")
-            .defaultValue(false)
-            .build()
-    );
-
-    public final Setting<Integer> nukerRadius = sgNuker.add(new IntSetting.Builder()
-            .name("核爆半径")
-            .description("Nuker 模式下一次挖多大范围.")
-            .defaultValue(4).min(1).sliderRange(1, 6)
-            .visible(nukerMode::get)
-            .build()
-    );
-
-    public final Setting<Integer> nukerDelay = sgNuker.add(new IntSetting.Builder()
-            .name("核爆间隔 tick")
-            .description("每挖一个方块间隔多少 tick（GrimV3 安全）.")
-            .defaultValue(2).min(1).sliderRange(1, 10)
-            .visible(nukerMode::get)
-            .build()
-    );
-
-    // ===== 补给盒 =====
-    public final Setting<String> supplyBoxName = sgSupply.add(new StringSetting.Builder()
-            .name("补给盒名称")
-            .description("补给潜影盒的命名关键词（含此名即视为补给盒）.")
-            .defaultValue("FO补给")
-            .build()
-    );
-
-    public final Setting<Integer> shovelDurability = sgSupply.add(new IntSetting.Builder()
-            .name("铲子耐久阈值")
-            .description("铲子剩余耐久低于此值时去补给盒换新铲.")
-            .defaultValue(10).min(0).sliderRange(0, 200)
-            .build()
-    );
-
-    public final Setting<Integer> foodMin = sgSupply.add(new IntSetting.Builder()
-            .name("食物下限")
-            .description("背包金萝卜/食物少于此数量时去补给.")
-            .defaultValue(1).min(0).sliderRange(0, 64)
-            .build()
-    );
-
-    public final Setting<Integer> foodTarget = sgSupply.add(new IntSetting.Builder()
-            .name("食物补给目标")
-            .description("补给后快捷栏/背包里食物达到此数量.")
-            .defaultValue(64).min(1).sliderRange(1, 64)
-            .build()
-    );
-
-    public final Setting<Integer> totemMin = sgSupply.add(new IntSetting.Builder()
-            .name("图腾下限")
-            .description("图腾少于此数量时去补给.")
-            .defaultValue(3).min(0).sliderRange(0, 37)
-            .build()
-    );
-
-    public final Setting<Integer> supplyRadius = sgSupply.add(new IntSetting.Builder()
-            .name("补给盒搜索半径")
-            .description("周围多少格内找补给盒.")
-            .defaultValue(16).min(2).sliderRange(2, 32)
-            .build()
-    );
-
-    // ===== 状态 =====
-    private enum State {
-        IDLE, SCAN, WALK, MINE, SUPPLY, STORE
-    }
-
-    private State state = State.IDLE;
-    private int stateTick = 0;
-    private BlockPos currentTarget = null;
-    private BlockPos supplyBoxPos = null;
-    private BlockPos storageBoxPos = null;
-    private int nukerTick = 0;
-    private int shulkerInteractionTick = 0;
-    private boolean waitingForShulkerOpen = false;
 
     public AutoMineSand() {
-        super(AddonTemplate.CATEGORY, "FO 自动挖沙", "Baritone 寻路挖沙 + 补给盒自动补给 + 存沙进潜影盒.");
+        super(com.fo.addon.AddonTemplate.CATEGORY, "FO 自动挖沙", "自动寻路挖沙 + FO补给盒自动补铲/食物/图腾 + 存沙");
     }
 
     @Override
     public void onActivate() {
-        state = State.SCAN;
-        stateTick = 0;
-        currentTarget = null;
-        supplyBoxPos = null;
-        storageBoxPos = null;
-        nukerTick = 0;
-        waitingForShulkerOpen = false;
-        Debug.chat("[FO 自动挖沙] 已启动");
+        if (!BaritoneUtils.IS_AVAILABLE) {
+            error("Baritone 不可用！");
+            toggle();
+            return;
+        }
+        state = State.MINING;
+        tickTimer = 0;
+        shulkerWaitTimer = 0;
+        waitingShulkerOpen = false;
+        storeBoxPos = null;
+        info("FO 自动挖沙已启动");
     }
 
     @Override
     public void onDeactivate() {
         PathManagers.get().stop();
-        if (mc.currentScreen != null && mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen) {
-            mc.player.closeHandledScreen();
-        }
-        state = State.IDLE;
+        info("FO 自动挖沙已停止");
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
-        stateTick++;
+        if (mc.player.isUsingItem()) return;
 
-        // AutoEat 正在吃 → 暂停挖沙
-        if (mc.player.isUsingItem()) {
-            PathManagers.get().stop();
-            return;
-        }
-
-        // 有 GUI 打开 → 等待 GUI 逻辑处理，不挖
-        if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen) {
-            handleShulkerScreen();
-            return;
-        }
-
-        // 补给检查
-        if (needSupply()) {
-            goSupply();
-            return;
-        }
-
-        // 背包满了要存沙
-        if (isInventoryFull()) {
-            goStore();
-            return;
-        }
+        if (tickTimer > 0) { tickTimer--; return; }
 
         switch (state) {
-            case SCAN -> {
-                currentTarget = findNearestTarget();
-                if (currentTarget != null) {
-                    state = State.WALK;
-                    stateTick = 0;
-                } else {
-                    // 没找到，扩大扫描或等
-                    PathManagers.get().stop();
-                }
-            }
-            case WALK -> {
-                if (currentTarget == null) { state = State.SCAN; return; }
-                double dist = mc.player.getBlockPos().getSquaredDistance(currentTarget);
-                if (dist <= reachDist.get() * reachDist.get()) {
-                    PathManagers.get().stop();
-                    state = State.MINE;
-                    stateTick = 0;
-                } else {
-                    if (stateTick < 6 || !PathManagers.get().isPathing()) {
-                        PathManagers.get().moveTo(currentTarget, false);
-                    }
-                }
-            }
-            case MINE -> {
-                if (currentTarget == null || !isTargetBlock(currentTarget)) {
-                    state = State.SCAN;
-                    return;
-                }
-                mineTarget(currentTarget);
-                if (!nukerMode.get()) {
-                    // 单挖模式：挖完这个，找下一个
-                    state = State.SCAN;
-                }
-            }
-            case SUPPLY -> handleSupply();
-            case STORE -> handleStore();
-            default -> {}
+            case MINING -> tickMining();
+            case GOING_SUPPLY -> tickGoingSupply();
+            case OPEN_SUPPLY -> tickOpenSupply();
+            case GOING_STORE -> tickGoingStore();
+            case OPEN_STORE -> tickOpenStore();
         }
+
+        tickTimer = delay.get();
     }
 
-    @EventHandler
-    private void onPacket(PacketEvent.Receive event) {
-        if (event.packet instanceof PlayerActionResponseS2CPacket ack) {
-            FakeBlockManager.onAck(ack.sequence());
-        }
-    }
+    private void tickMining() {
+        if (needNewShovel()) { goToSupply("铲子耐久不足"); return; }
+        if (foodCount() < 1) { goToSupply("金萝卜不足"); return; }
+        if (totemCount() < totemTarget.get()) { goToSupply("图腾不足"); return; }
+        if (autoStore.get() && emptySlots() <= storeEmptySlots.get()) { goToStore(); return; }
 
-    // ===== 挖目标 =====
-    private void mineTarget(BlockPos pos) {
         if (nukerMode.get()) {
-            // Nuker: 扫半径内所有目标方块，逐个发补偿包
-            nukerTick++;
-            if (nukerTick < nukerDelay.get()) return;
-            nukerTick = 0;
-            List<BlockPos> near = findTargetsAround(pos, nukerRadius.get());
-            if (near.isEmpty()) {
-                state = State.SCAN;
-                return;
-            }
-            BlockPos target = near.get(0);
-            Direction dir = Direction.getFacing(mc.player.getEyePos().subtract(Vec3d.ofCenter(target)));
-            FakeBlockManager.addFakeCompensate(target);
-            mc.interactionManager.attackBlock(target, dir);
-            mc.interactionManager.updateBlockBreakingProgress(target, dir);
+            nukerMine();
         } else {
-            // 单挖
-            Direction dir = Direction.getFacing(mc.player.getEyePos().subtract(Vec3d.ofCenter(pos)));
-            mc.interactionManager.attackBlock(pos, dir);
-            mc.interactionManager.updateBlockBreakingProgress(pos, dir);
+            PathManagers.get().mine(Blocks.SAND, Blocks.RED_SAND);
         }
     }
 
-    // ===== 扫描目标 =====
-    private BlockPos findNearestTarget() {
+    private void nukerMine() {
         BlockPos center = mc.player.getBlockPos();
-        int r = scanRange.get();
-        BlockPos best = null;
-        double bestDist = Double.MAX_VALUE;
+        int r = nukerRange.get();
         for (int x = -r; x <= r; x++)
-            for (int y = -4; y <= 4; y++)
+            for (int y = -r; y <= r; y++)
                 for (int z = -r; z <= r; z++) {
                     BlockPos p = center.add(x, y, z);
-                    if (isTargetBlock(p)) {
-                        double d = center.getSquaredDistance(p);
-                        if (d < bestDist) { bestDist = d; best = p; }
+                    BlockState s = mc.world.getBlockState(p);
+                    if (s.getBlock() == Blocks.SAND || s.getBlock() == Blocks.RED_SAND) {
+                        BlockUtils.breakBlock(p, true);
                     }
                 }
-        return best;
     }
 
-    private List<BlockPos> findTargetsAround(BlockPos center, int radius) {
-        List<BlockPos> list = new ArrayList<>();
-        for (int x = -radius; x <= radius; x++)
-            for (int y = -radius; y <= radius; y++)
-                for (int z = -radius; z <= radius; z++) {
-                    BlockPos p = center.add(x, y, z);
-                    if (isTargetBlock(p)) list.add(p);
-                }
-        return list;
+    private void goToSupply(String reason) {
+        BlockPos supply = findNamedShulker(supplyBoxName.get());
+        if (supply == null) {
+            error("未找到命名含\"" + supplyBoxName.get() + "\"的补给盒！");
+            state = State.MINING;
+            return;
+        }
+        info("前往补给盒: " + reason);
+        PathManagers.get().stop();
+        state = State.GOING_SUPPLY;
+        PathManagers.get().moveTo(supply, false);
     }
 
-    private boolean isTargetBlock(BlockPos p) {
-        BlockState s = mc.world.getBlockState(p);
-        return targetBlocks.get().contains(s.getBlock());
+    private void tickGoingSupply() {
+        BlockPos supply = findNamedShulker(supplyBoxName.get());
+        if (supply == null) { state = State.MINING; return; }
+        if (mc.player.getBlockPos().isWithinDistance(supply, 3)) {
+            PathManagers.get().stop();
+            state = State.OPEN_SUPPLY;
+            waitingShulkerOpen = true;
+            shulkerWaitTimer = 0;
+            openShulker(supply);
+        }
     }
 
-    private boolean isInventoryFull() {
-        int empty = 0;
+    private void tickOpenSupply() {
+        if (mc.currentScreen instanceof ShulkerBoxScreen) { doSupply(); return; }
+        if (waitingShulkerOpen) {
+            shulkerWaitTimer++;
+            if (shulkerWaitTimer > 40) { waitingShulkerOpen = false; state = State.MINING; }
+            return;
+        }
+        closeScreen();
+        state = State.MINING;
+    }
+
+    private void doSupply() {
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        int moved = 0;
+        if (needNewShovel()) {
+            int slot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
+            if (slot != -1) { quickMove(slot); moved++; }
+        }
+        if (foodCount() < foodTarget.get()) {
+            int slot = findShulkerItemExact(handler, Items.GOLDEN_CARROT);
+            if (slot != -1) { quickMove(slot); moved++; }
+        }
+        if (totemCount() < totemTarget.get()) {
+            int slot = findShulkerItemExact(handler, Items.TOTEM_OF_UNDYING);
+            if (slot != -1) { quickMove(slot); moved++; }
+        }
+        if (moved == 0) { closeScreen(); state = State.MINING; }
+    }
+
+    private void goToStore() {
+        BlockPos box = findOtherShulker();
+        if (box == null) { error("未找到存沙潜影盒！"); state = State.MINING; return; }
+        storeBoxPos = box;
+        info("前往存沙潜影盒");
+        PathManagers.get().stop();
+        state = State.GOING_STORE;
+        PathManagers.get().moveTo(box, false);
+    }
+
+    private void tickGoingStore() {
+        if (storeBoxPos == null) { state = State.MINING; return; }
+        if (mc.player.getBlockPos().isWithinDistance(storeBoxPos, 3)) {
+            PathManagers.get().stop();
+            state = State.OPEN_STORE;
+            waitingShulkerOpen = true;
+            shulkerWaitTimer = 0;
+            openShulker(storeBoxPos);
+        }
+    }
+
+    private void tickOpenStore() {
+        if (mc.currentScreen instanceof ShulkerBoxScreen) { doStore(); return; }
+        if (waitingShulkerOpen) {
+            shulkerWaitTimer++;
+            if (shulkerWaitTimer > 40) { waitingShulkerOpen = false; state = State.MINING; }
+            return;
+        }
+        closeScreen();
+        state = State.MINING;
+    }
+
+    private void doStore() {
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        int moved = 0;
         for (int i = 9; i < 36; i++) {
-            if (mc.player.getInventory().getStack(i).isEmpty()) empty++;
-        }
-        return empty <= 1;
-    }
-
-    // ===== 补给盒 =====
-    private boolean needSupply() {
-        // 铲子耐久
-        ItemStack main = mc.player.getMainHandStack();
-        if (main.isDamageable() && main.getMaxDamage() - main.getDamage() <= shovelDurability.get()) return true;
-        // 食物
-        int food = countInInventory(Items.GOLDEN_CARROT);
-        if (food < foodMin.get()) return true;
-        // 图腾
-        int totems = countInInventory(Items.TOTEM_OF_UNDYING) +
-                (mc.player.getOffHandStack().getItem() == Items.TOTEM_OF_UNDYING ? 1 : 0);
-        return totems < totemMin.get();
-    }
-
-    private void goSupply() {
-        if (supplyBoxPos == null || !isSupplyBox(supplyBoxPos)) {
-            supplyBoxPos = findNamedShulker(supplyBoxName.get());
-        }
-        if (supplyBoxPos == null) {
-            Debug.chat("[FO 自动挖沙] 找不到补给盒（命名含 " + supplyBoxName.get() + "）");
-            return;
-        }
-        state = State.SUPPLY;
-        stateTick = 0;
-    }
-
-    private void handleSupply() {
-        if (supplyBoxPos == null) { state = State.SCAN; return; }
-        double dist = mc.player.getBlockPos().getSquaredDistance(supplyBoxPos);
-        if (dist > 4) {
-            if (stateTick < 6 || !PathManagers.get().isPathing()) {
-                PathManagers.get().moveTo(supplyBoxPos, false);
-            }
-            return;
-        }
-        // 到了，打开补给盒
-        PathManagers.get().stop();
-        if (!waitingForShulkerOpen) {
-            Direction face = Direction.getFacing(mc.player.getEyePos().subtract(Vec3d.ofCenter(supplyBoxPos)));
-            mc.interactionManager.interactBlock(mc.player, mc.player.getActiveHand(),
-                    new BlockHitResult(Vec3d.ofCenter(supplyBoxPos), face, supplyBoxPos, false));
-            waitingForShulkerOpen = true;
-            shulkerInteractionTick = 0;
-        }
-        // GUI 打开后由 onTick 顶部 handleShulkerScreen 处理
-    }
-
-    // ===== 存沙 =====
-    private void goStore() {
-        if (storageBoxPos == null || !isOtherShulker(storageBoxPos)) {
-            storageBoxPos = findOtherShulker();
-        }
-        if (storageBoxPos == null) {
-            Debug.chat("[FO 自动挖沙] 附近没有可存沙的潜影盒");
-            state = State.SCAN;
-            return;
-        }
-        state = State.STORE;
-        stateTick = 0;
-    }
-
-    private void handleStore() {
-        if (storageBoxPos == null) { state = State.SCAN; return; }
-        double dist = mc.player.getBlockPos().getSquaredDistance(storageBoxPos);
-        if (dist > 4) {
-            if (stateTick < 6 || !PathManagers.get().isPathing()) {
-                PathManagers.get().moveTo(storageBoxPos, false);
-            }
-            return;
-        }
-        PathManagers.get().stop();
-        if (!waitingForShulkerOpen) {
-            Direction face = Direction.getFacing(mc.player.getEyePos().subtract(Vec3d.ofCenter(storageBoxPos)));
-            mc.interactionManager.interactBlock(mc.player, mc.player.getActiveHand(),
-                    new BlockHitResult(Vec3d.ofCenter(storageBoxPos), face, storageBoxPos, false));
-            waitingForShulkerOpen = true;
-            shulkerInteractionTick = 0;
-        }
-    }
-
-    // ===== 潜影盒 GUI 处理 =====
-    private void handleShulkerScreen() {
-        shulkerInteractionTick++;
-        ScreenHandler sh = mc.player.currentScreenHandler;
-        if (sh == null) { waitingForShulkerOpen = false; return; }
-
-        if (state == State.SUPPLY) {
-            // 从补给盒拿：铲子、食物（进快捷栏）、图腾
-            boolean didSomething = takeFromSupply(sh);
-            if (!didSomething || shulkerInteractionTick > 40) {
-                mc.player.closeHandledScreen();
-                waitingForShulkerOpen = false;
-                state = State.SCAN;
-                stateTick = 0;
-            }
-        } else if (state == State.STORE) {
-            // 把背包里的沙子 shift 进潜影盒
-            boolean didSomething = storeSand(sh);
-            if (!didSomething || shulkerInteractionTick > 40) {
-                mc.player.closeHandledScreen();
-                waitingForShulkerOpen = false;
-                storageBoxPos = null;
-                state = State.SCAN;
-                stateTick = 0;
-            }
-        }
-    }
-
-    /** 从补给盒拿需要的补给品 */
-    private boolean takeFromSupply(ScreenHandler sh) {
-        // 找补给盒里的铲子/金萝卜/图腾
-        for (int boxSlot = 0; boxSlot < 27; boxSlot++) {
-            ItemStack s = sh.getSlot(boxSlot).getStack();
-            if (s.isEmpty()) continue;
-            Item item = s.getItem();
-
-            // 铲子耐久不够 → 拿新铲
-            ItemStack main = mc.player.getMainHandStack();
-            if (item instanceof net.minecraft.item.ShovelItem &&
-                (main.isEmpty() || main.getMaxDamage() - main.getDamage() <= shovelDurability.get())) {
-                mc.interactionManager.clickSlot(sh.syncId, boxSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                return true;
-            }
-            // 金萝卜不够 → 补到快捷栏
-            if (item == Items.GOLDEN_CARROT) {
-                int have = countInInventory(Items.GOLDEN_CARROT);
-                if (have < foodTarget.get()) {
-                    mc.interactionManager.clickSlot(sh.syncId, boxSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                    return true;
-                }
-            }
-            // 图腾不够 → 补
-            if (item == Items.TOTEM_OF_UNDYING) {
-                int have = countInInventory(Items.TOTEM_OF_UNDYING) +
-                        (mc.player.getOffHandStack().getItem() == Items.TOTEM_OF_UNDYING ? 1 : 0);
-                if (have < totemMin.get()) {
-                    mc.interactionManager.clickSlot(sh.syncId, boxSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /** 把背包里的沙子 shift 进潜影盒 */
-    private boolean storeSand(ScreenHandler sh) {
-        // 玩家背包槽位在潜影盒 GUI 里是 27-62
-        for (int slot = 27; slot < sh.slots.size(); slot++) {
-            ItemStack s = sh.getSlot(slot).getStack();
-            if (s.isEmpty()) continue;
-            Item item = s.getItem();
-            if (item == Items.SAND || item == Items.RED_SAND || item == Items.GRAVEL) {
-                mc.interactionManager.clickSlot(sh.syncId, slot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // ===== 工具 =====
-    private int countInInventory(Item item) {
-        int n = 0;
-        for (int i = 0; i < mc.player.getInventory().size(); i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.getItem() == item) n += s.getCount();
+            if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
+                int screenSlot = i + 27;
+                if (screenSlot < handler.slots.size()) {
+                    quickMove(screenSlot);
+                    moved++;
+                    if (moved >= 27) break;
+                }
+            }
         }
-        return n;
+        if (moved == 0) { closeScreen(); state = State.MINING; }
     }
 
-    private boolean isSupplyBox(BlockPos pos) {
-        BlockState s = mc.world.getBlockState(pos);
-        if (!(s.getBlock() instanceof ShulkerBoxBlock)) return false;
-        var be = mc.world.getBlockEntity(pos);
-        if (be instanceof net.minecraft.block.entity.ShulkerBoxBlockEntity shulker) {
-            var name = shulker.getCustomName();
-            return name != null && name.getString().contains(supplyBoxName.get());
-        }
-        return false;
+    private boolean needNewShovel() {
+        FindItemResult r = InvUtils.find(itemStack -> SHOVELS.contains(itemStack.getItem()));
+        if (!r.found()) return true;
+        ItemStack s = mc.player.getInventory().getStack(r.slot());
+        if (!s.isDamageable()) return false;
+        return (s.getMaxDamage() - s.getDamage()) <= shovelMinDurability.get();
     }
 
-    private boolean isOtherShulker(BlockPos pos) {
-        BlockState s = mc.world.getBlockState(pos);
-        return s.getBlock() instanceof ShulkerBoxBlock;
+    private int foodCount() {
+        int c = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.getItem() == Items.GOLDEN_CARROT) c += s.getCount();
+        }
+        return c;
+    }
+
+    private int totemCount() {
+        int c = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.getItem() == Items.TOTEM_OF_UNDYING) c += s.getCount();
+        }
+        return c;
+    }
+
+    private int emptySlots() {
+        int c = 0;
+        for (int i = 9; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).isEmpty()) c++;
+        }
+        return c;
     }
 
     private BlockPos findNamedShulker(String nameContains) {
         BlockPos c = mc.player.getBlockPos();
-        int r = supplyRadius.get();
+        int r = searchRadius.get();
         for (int x = -r; x <= r; x++)
             for (int y = -r; y <= r; y++)
                 for (int z = -r; z <= r; z++) {
                     BlockPos p = c.add(x, y, z);
                     BlockState s = mc.world.getBlockState(p);
-                    if (s.getBlock() instanceof ShulkerBoxBlock && mc.world.getBlockEntity(p) instanceof net.minecraft.block.entity.ShulkerBoxBlockEntity be) {
+                    if (s.getBlock() instanceof ShulkerBoxBlock &&
+                        mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
                         var n = be.getCustomName();
                         if (n != null && n.getString().contains(nameContains)) return p;
                     }
@@ -520,16 +322,58 @@ public class AutoMineSand extends Module {
 
     private BlockPos findOtherShulker() {
         BlockPos c = mc.player.getBlockPos();
-        int r = supplyRadius.get();
+        int r = searchRadius.get();
         for (int x = -r; x <= r; x++)
             for (int y = -r; y <= r; y++)
                 for (int z = -r; z <= r; z++) {
                     BlockPos p = c.add(x, y, z);
                     BlockState s = mc.world.getBlockState(p);
-                    if (s.getBlock() instanceof ShulkerBoxBlock && !(mc.world.getBlockEntity(p) instanceof net.minecraft.block.entity.ShulkerBoxBlockEntity be && be.getCustomName() != null && be.getCustomName().getString().contains(supplyBoxName.get()))) {
-                        return p;
+                    if (s.getBlock() instanceof ShulkerBoxBlock) {
+                        if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
+                            var n = be.getCustomName();
+                            if (n == null || !n.getString().contains(supplyBoxName.get())) return p;
+                        } else {
+                            return p;
+                        }
                     }
                 }
         return null;
+    }
+
+    private int findShulkerItem(ScreenHandler handler, List<Item> items, int minDurability) {
+        for (int i = 0; i < 27; i++) {
+            if (i >= handler.slots.size()) break;
+            ItemStack s = handler.getSlot(i).getStack();
+            if (s.isEmpty()) continue;
+            if (items.contains(s.getItem())) {
+                if (!s.isDamageable() || (s.getMaxDamage() - s.getDamage()) > minDurability) return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findShulkerItemExact(ScreenHandler handler, Item item) {
+        for (int i = 0; i < 27; i++) {
+            if (i >= handler.slots.size()) break;
+            ItemStack s = handler.getSlot(i).getStack();
+            if (!s.isEmpty() && s.getItem() == item) return i;
+        }
+        return -1;
+    }
+
+    private void quickMove(int slot) {
+        mc.interactionManager.clickSlot(
+            mc.player.currentScreenHandler.syncId, slot, 0,
+            SlotActionType.QUICK_MOVE, mc.player);
+    }
+
+    private void openShulker(BlockPos pos) {
+        if (!mc.player.getBlockPos().isWithinDistance(pos, 5)) return;
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos, false);
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
+    }
+
+    private void closeScreen() {
+        if (mc.currentScreen instanceof HandledScreen) mc.player.closeHandledScreen();
     }
 }
