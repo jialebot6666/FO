@@ -380,7 +380,11 @@ public class AutoMineSand extends Module {
 
     private void goToStore() {
         BlockPos box = findOtherShulker();
-        if (box == null) { error("未找到存沙潜影盒！"); state = State.MINING; return; }
+        if (box == null) {
+            info("所有存沙潜影盒都已满，模块停止");
+            toggle();
+            return;
+        }
         storeBoxPos = box;
         info("前往存沙潜影盒");
         PathManagers.get().stop();
@@ -428,11 +432,12 @@ public class AutoMineSand extends Module {
             if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
                 storeStuckTicks++;
                 if (storeStuckTicks > 20) {
-                    info("存沙盒已满，模块停止");
+                    if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
+                    info("存沙盒已满，寻找下一个");
                     storeStuckSlot = -1;
                     storeStuckTicks = 0;
                     closeScreen();
-                    toggle();
+                    goToStore();
                 }
                 return;
             }
