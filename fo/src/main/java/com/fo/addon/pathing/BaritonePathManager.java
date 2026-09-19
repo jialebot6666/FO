@@ -102,12 +102,12 @@ public class BaritonePathManager implements IPathManager {
         try {
             Class<?> api = Class.forName("baritone.api.BaritoneAPI");
             Object settings = api.getMethod("getSettings").invoke(null);
+            // blocksToDisallowBreaking 是 Setting<Block[]>，直接改它的 value 字段
             java.lang.reflect.Field f = settings.getClass().getField("blocksToDisallowBreaking");
             Object setting = f.get(settings);
-            java.lang.reflect.Method setValue = setting.getClass().getMethod("value", java.lang.Object[].class);
+            java.lang.reflect.Field valueField = setting.getClass().getField("value");
             if (protect) {
-                java.util.List<Block> list = new java.util.ArrayList<>();
-                for (net.minecraft.block.Block b : new net.minecraft.block.Block[]{
+                Block[] shulkers = new Block[]{
                     net.minecraft.block.Blocks.SHULKER_BOX,
                     net.minecraft.block.Blocks.WHITE_SHULKER_BOX,
                     net.minecraft.block.Blocks.ORANGE_SHULKER_BOX,
@@ -125,11 +125,13 @@ public class BaritonePathManager implements IPathManager {
                     net.minecraft.block.Blocks.GREEN_SHULKER_BOX,
                     net.minecraft.block.Blocks.RED_SHULKER_BOX,
                     net.minecraft.block.Blocks.BLACK_SHULKER_BOX
-                }) list.add(b);
-                setValue.invoke(setting, (Object) list.toArray());
+                };
+                valueField.set(setting, shulkers);
             } else {
-                setValue.invoke(setting, (Object) new java.util.ArrayList<>().toArray());
+                valueField.set(setting, new Block[0]);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }
