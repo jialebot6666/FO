@@ -355,13 +355,8 @@ public class AutoMineSand extends Module {
 
         BlockIterator.after(() -> {
             if (candidates.isEmpty()) {
-                // reach 内没沙了，Baritone 走过去
-                if (!PathManagers.get().isPathing()) {
-                    BlockPos nearest = findNearestSand(searchRadius.get());
-                    if (nearest != null) {
-                        PathManagers.get().moveTo(nearest, false);
-                    }
-                }
+                // reach 内没沙了，Baritone 挖掘模式边走边挖（路上顺便挖沙）
+                PathManagers.get().mine(Blocks.SAND, Blocks.RED_SAND);
                 return;
             }
 
