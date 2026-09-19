@@ -431,16 +431,39 @@ public class AutoMineSand extends Module {
     private void doSupply() {
         ScreenHandler handler = mc.player.currentScreenHandler;
         // 等上次点的槽位同步完
-        if (supplyStuckSlot >= 0 && supplyStuckSlot < 27) {
-            ItemStack s = handler.getSlot(supplyStuckSlot).getStack();
-            if (!s.isEmpty()) return; // 还没拿走，等服务器
+        if (supplyStuckSlot >= 0) {
+            // supplyStuckSlot >= 27 表示点的是玩家背包槽位（放回旧铲子）
+            // < 27 表示点的是补给盒槽位（拿新物资）
+            int checkSlot = supplyStuckSlot;
+            ItemStack s = handler.getSlot(checkSlot).getStack();
+            if (!s.isEmpty()) return;
             supplyStuckSlot = -1;
         }
         int moved = 0;
+        // 先把背包里没耐久的铲子放回补给盒
         if (needNewShovel()) {
-            int slot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
-            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
+            int oldShovelScreenSlot = findWornOutShovelInPlayer(handler);
+            if (oldShovelScreenSlot != -1) {
+                quickMove(oldShovelScreenSlot);
+                supplyStuckSlot = oldShovelScreenSlot;
+                moved++;
+            } else {
+                // 旧铲子已清掉，拿新的
+                int slot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
+                if (slot != -1) {
+                    quickMove(slot);
+                    supplyStuckSlot = slot;
+                    moved++;
+                } else {
+                    // 补给盒里也没有够耐久的铲子
+                    error("补给盒里没有够耐久的铲子了，模块停止");
+                    closeScreen();
+                    toggle();
+                    return;
+                }
+            }
         }
+        if (moved > 0) { return; } // 这 tick 只处理铲子
         if (foodCount() < foodTarget.get()) {
             int slot = findShulkerItemExact(handler, Items.GOLDEN_CARROT);
             if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
@@ -450,6 +473,21 @@ public class AutoMineSand extends Module {
             if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
         }
         if (moved == 0) { closeScreen(); state = State.MINING; }
+    }
+
+    /** 在玩家背包(界面槽位27-62)找没耐久的铲子，返回界面槽位 */
+    private int findWornOutShovelInPlayer(ScreenHandler handler) {
+        int rows = 3;
+        for (int s = rows * 9; s <= rows * 9 + 35; s++) {
+            if (s >= handler.slots.size()) break;
+            ItemStack stack = handler.getSlot(s).getStack();
+            if (!stack.isEmpty() && SHOVELS.contains(stack.getItem())) {
+                if (stack.isDamageable() && (stack.getMaxDamage() - stack.getDamage()) <= shovelMinDurability.get()) {
+                    return s;
+                }
+            }
+        }
+        return -1;
     }
 
     private void goToStore() {
