@@ -428,12 +428,11 @@ public class AutoMineSand extends Module {
             if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
                 storeStuckTicks++;
                 if (storeStuckTicks > 20) {
-                    if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
-                    info("存沙盒已满");
+                    info("存沙盒已满，模块停止");
                     storeStuckSlot = -1;
                     storeStuckTicks = 0;
                     closeScreen();
-                    goToStore();
+                    toggle();
                 }
                 return;
             }
