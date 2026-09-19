@@ -2,17 +2,21 @@ package com.fo.addon.modules;
 
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
+import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.pathing.BaritoneUtils;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
+import meteordevelopment.orbit.EventPriority;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -28,6 +32,7 @@ import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
@@ -61,6 +66,14 @@ public class AutoMineSand extends Module {
     private final Setting<Integer> nukerRange = sgGeneral.add(new IntSetting.Builder()
         .name("核爆范围").description("Nuker 模式下最大挖掘半径")
         .defaultValue(4).min(1).max(6).sliderMin(1).sliderMax(6).build());
+
+    private final Setting<Integer> nukerClickDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("核爆点击延迟").description("Nuker 模式下每次挖掘之间的 tick 间隔（8=400ms）")
+        .defaultValue(8).min(0).max(20).sliderMin(0).sliderMax(20).build());
+
+    private final Setting<Boolean> nukerRotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("核爆自动转头").description("Nuker 模式下自动转头看向目标方块（Grim 安全）")
+        .defaultValue(true).build());
 
     private final Setting<String> supplyBoxName = sgSupply.add(new StringSetting.Builder()
         .name("补给盒关键词").description("潜影盒命名包含此关键词即识别为 FO 补给盒")
@@ -108,6 +121,7 @@ public class AutoMineSand extends Module {
     private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
     private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
     private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
+    private int nukerClickTimer = 0;      // Nuker 点击延迟计数器
     private int storeTickCounter = 0;     // 存沙等服务器同步 tick
     private int storeStuckSlot = -1;       // 上次 shift 点击的沙槽(界面槽位)
     private int storeStuckTicks = 0;      // 卡住检测计数
@@ -297,43 +311,89 @@ public class AutoMineSand extends Module {
     }
 
     /**
-     * Nuker 模式：参考 SlimefunHelper
-     * - 只挖原版 reach(4.5格) 内的沙块
-     * - 每 4 tick 才刷新一个目标，不会瞬间挖一堆
-     * - 用 attackBlock + updateBlockBreakingProgress 正常挖掘
-     * - reach 内没沙了，Baritone 自动走到最近沙块旁
+     * Nuker 模式：照搬 LeavesHack NukerPlus 逻辑
+     * - BlockIterator 严格遍历，squaredDistance 到方块中心校验距离
+     * - clickDelay 控制点击间隔（默认 8 tick = 400ms）
+     * - 自动转头看向目标方块
+     * - reach 内没沙了，Baritone 走到最近沙块
      */
     private void nukerTick() {
-        nukerTickCounter++;
-        // 每 tick 都更新当前挖掘进度（保持挖的过程）
+        // 点击延迟计数
+        if (nukerClickTimer > 0) {
+            nukerClickTimer--;
+        }
+
+        // 继续挖当前目标
         if (nukerTarget != null) {
             BlockState s = mc.world.getBlockState(nukerTarget);
-            // 已挖掉 或 超出 reach → 放弃当前目标
             if (s.isAir() || !isSand(s.getBlock()) || !isWithinReach(nukerTarget)) {
                 nukerTarget = null;
             } else {
-                // 继续挖这个方块
                 mc.interactionManager.updateBlockBreakingProgress(nukerTarget, Direction.UP);
                 return;
             }
         }
-        // 每 4 tick 才找新目标
-        if (nukerTickCounter % 4 != 0) return;
 
-        // 在 reach 范围内找最近的沙块
-        BlockPos target = findReachableSand();
-        if (target != null) {
-            nukerTarget = target;
-            mc.interactionManager.attackBlock(target, Direction.UP);
-        } else {
-            // reach 内没沙了，Baritone 走到最近的沙块旁边（走路中不重复发）
-            if (!PathManagers.get().isPathing()) {
-                BlockPos nearest = findNearestSand(searchRadius.get());
-                if (nearest != null) {
-                    PathManagers.get().moveTo(nearest, false);
+        // 点击延迟未到，不找新目标
+        if (nukerClickTimer > 0) return;
+
+        // 用 BlockIterator 严格遍历 reach 范围
+        double range = nukerRange.get();
+        double rangeSq = range * range;
+        Vec3d eye = mc.player.getEyePos();
+        BlockPos center = mc.player.getBlockPos();
+        List<BlockPos> candidates = new ArrayList<>();
+
+        BlockIterator.register((int) Math.ceil(range) + 1, (int) Math.ceil(range) + 1, (blockPos, blockState) -> {
+            if (!isSand(blockState.getBlock())) return;
+            double dist = Utils.squaredDistance(
+                eye.x, eye.y, eye.z,
+                blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5);
+            if (dist > rangeSq) return;
+            candidates.add(blockPos.toImmutable());
+        });
+
+        BlockIterator.after(() -> {
+            if (candidates.isEmpty()) {
+                // reach 内没沙了，Baritone 走过去
+                if (!PathManagers.get().isPathing()) {
+                    BlockPos nearest = findNearestSand(searchRadius.get());
+                    if (nearest != null) {
+                        PathManagers.get().moveTo(nearest, false);
+                    }
                 }
+                return;
             }
-        }
+
+            // 找最近的沙块
+            candidates.sort(Comparator.comparingDouble(p ->
+                Utils.squaredDistance(eye.x, eye.y, eye.z, p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
+
+            BlockPos target = candidates.get(0);
+            nukerTarget = target;
+
+            // 自动转头
+            if (nukerRotate.get()) {
+                Vec3d targetCenter = Vec3d.ofCenter(target);
+                double dx = targetCenter.x - eye.x;
+                double dy = targetCenter.y - eye.y;
+                double dz = targetCenter.z - eye.z;
+                double distXZ = Math.sqrt(dx * dx + dz * dz);
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                float pitch = (float) -Math.toDegrees(Math.atan2(dy, distXZ));
+                mc.player.setYaw(yaw);
+                mc.player.setPitch(pitch);
+            }
+
+            mc.player.swingHand(Hand.MAIN_HAND);
+            mc.interactionManager.attackBlock(target, Direction.UP);
+            nukerClickTimer = nukerClickDelay.get();
+        });
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    private void onBlockBreakingCooldown(BlockBreakingCooldownEvent event) {
+        if (nukerMode.get()) event.cooldown = 0;
     }
 
     /** 检查方块是否在原版 reach 范围内（从眼睛算） */
