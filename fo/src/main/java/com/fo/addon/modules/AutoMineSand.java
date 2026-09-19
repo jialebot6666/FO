@@ -109,7 +109,7 @@ public class AutoMineSand extends Module {
     private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
     private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
     private int storeTickCounter = 0;     // 存沙等服务器同步 tick
-    private final Set<Integer> pendingStoreSlots = new HashSet<>(); // 已点但未确认移走的背包槽位
+    private int storeStuckSlot = -1;       // 上次 shift 点击的沙槽(界面槽位)
     private int storeStuckTicks = 0;      // 卡住检测计数
 
     private static final List<Item> SHOVELS = Arrays.asList(
@@ -135,7 +135,7 @@ public class AutoMineSand extends Module {
         storeBoxPos = null;
         fullStoreBoxes.clear();
         storeTickCounter = 0;
-        pendingStoreSlots.clear();
+        storeStuckSlot = -1;
         storeStuckTicks = 0;
         PathManagers.get().protectShulkerBoxes(true);
         info("FO 自动挖沙已启动");
@@ -392,49 +392,46 @@ public class AutoMineSand extends Module {
     }
 
     private void doStore() {
-        ScreenHandler handler = mc.player.currentScreenHandler;
-        // 等所有待确认槽位都空了，才继续移下一批
-        if (!pendingStoreSlots.isEmpty()) {
-            boolean allCleared = true;
-            for (int slot : pendingStoreSlots) {
-                ItemStack s = mc.player.getInventory().getStack(slot);
-                if (!s.isEmpty()) { allCleared = false; break; }
-            }
-            if (!allCleared) {
+        ScreenHandler sh = mc.player.currentScreenHandler;
+        if (sh == null) return;
+        int rows = 3; // 潜影盒固定 3 行
+        int playerFirst = rows * 9;   // 27
+        int playerLast = rows * 9 + 35; // 62
+
+        // 卡住检测：上次点的槽位还是沙=盒子满了
+        if (storeStuckSlot >= playerFirst && storeStuckSlot <= playerLast) {
+            ItemStack s = sh.getSlot(storeStuckSlot).getStack();
+            if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
                 storeStuckTicks++;
-                if (storeStuckTicks > 15) {
-                    // 服务器太久没确认，可能盒子满了
+                if (storeStuckTicks > 20) {
                     if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
-                    info("存沙盒已满或响应超时");
-                    pendingStoreSlots.clear();
+                    info("存沙盒已满");
+                    storeStuckSlot = -1;
                     storeStuckTicks = 0;
                     closeScreen();
                     goToStore();
                 }
                 return;
             }
-            pendingStoreSlots.clear();
+            storeStuckSlot = -1;
             storeStuckTicks = 0;
         }
-        // 找背包里的沙，一批最多移 9 组
-        int moved = 0;
-        for (int i = 9; i < 36; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
-                int screenSlot = i + 27;
-                if (screenSlot < handler.slots.size()) {
-                    quickMove(screenSlot);
-                    pendingStoreSlots.add(i);
-                    moved++;
-                    if (moved >= 9) return;
-                }
+        // 从服务器同步的界面状态找沙，一次只移一组
+        for (int s = playerFirst; s <= playerLast; s++) {
+            ItemStack stack = sh.getSlot(s).getStack();
+            if (!stack.isEmpty() && (stack.getItem() == Items.SAND || stack.getItem() == Items.RED_SAND)) {
+                quickMove(s);
+                storeStuckSlot = s;
+                storeStuckTicks = 0;
+                return;
             }
         }
-        if (moved == 0 && pendingStoreSlots.isEmpty()) {
-            closeScreen();
-            state = State.MINING;
-            info("存沙完成");
-        }
+        // 没沙了，存完
+        storeStuckSlot = -1;
+        storeStuckTicks = 0;
+        closeScreen();
+        state = State.MINING;
+        info("存沙完成");
     }
 
     private boolean needNewShovel() {
