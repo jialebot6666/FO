@@ -105,7 +105,9 @@ public class AutoMineSand extends Module {
     private int shulkerWaitTimer = 0;
     private boolean waitingShulkerOpen = false;
     private BlockPos storeBoxPos = null;
-    private final Set<BlockPos> fullStoreBoxes = new HashSet<>(); // 存满的盒子不再高亮
+    private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
+    private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
+    private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -191,24 +193,90 @@ public class AutoMineSand extends Module {
         if (autoStore.get() && emptySlots() <= storeEmptySlots.get()) { goToStore(); return; }
 
         if (nukerMode.get()) {
-            nukerMine();
+            nukerTick();
         } else {
             PathManagers.get().mine(Blocks.SAND, Blocks.RED_SAND);
         }
     }
 
-    private void nukerMine() {
-        BlockPos center = mc.player.getBlockPos();
-        int r = nukerRange.get();
-        for (int x = -r; x <= r; x++)
-            for (int y = -r; y <= r; y++)
-                for (int z = -r; z <= r; z++) {
-                    BlockPos p = center.add(x, y, z);
+    /**
+     * Nuker 模式：参考 SlimefunHelper
+     * - 只挖原版 reach(4.5格) 内的沙块
+     * - 每 4 tick 才刷新一个目标，不会瞬间挖一堆
+     * - 用 attackBlock + updateBlockBreakingProgress 正常挖掘
+     * - reach 内没沙了，Baritone 自动走到最近沙块旁
+     */
+    private void nukerTick() {
+        nukerTickCounter++;
+        // 每 tick 都更新当前挖掘进度（保持挖的过程）
+        if (nukerTarget != null) {
+            BlockState s = mc.world.getBlockState(nukerTarget);
+            if (s.isAir() || !isSand(s.getBlock())) {
+                nukerTarget = null; // 已挖掉
+            } else {
+                // 继续挖这个方块
+                mc.interactionManager.updateBlockBreakingProgress(nukerTarget, Direction.UP);
+                return;
+            }
+        }
+        // 每 4 tick 才找新目标
+        if (nukerTickCounter % 4 != 0) return;
+
+        // 在 reach 范围内找最近的沙块
+        BlockPos target = findReachableSand();
+        if (target != null) {
+            nukerTarget = target;
+            mc.interactionManager.attackBlock(target, Direction.UP);
+        } else {
+            // reach 内没沙了，Baritone 走到最近的沙块旁边
+            BlockPos nearest = findNearestSand(searchRadius.get());
+            if (nearest != null) {
+                PathManagers.get().moveTo(nearest, false);
+            }
+        }
+    }
+
+    private boolean isSand(Block b) {
+        return b == Blocks.SAND || b == Blocks.RED_SAND;
+    }
+
+    /** 在原版 reach(4.5格) 内找沙块 */
+    private BlockPos findReachableSand() {
+        Vec3d eye = mc.player.getEyePos();
+        double reach = mc.player.getAttributeValue(net.minecraft.entity.attribute.EntityAttributes.BLOCK_INTERACTION_RANGE);
+        BlockPos c = mc.player.getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int x = -4; x <= 4; x++)
+            for (int y = -4; y <= 4; y++)
+                for (int z = -4; z <= 4; z++) {
+                    BlockPos p = c.add(x, y, z);
                     BlockState s = mc.world.getBlockState(p);
-                    if (s.getBlock() == Blocks.SAND || s.getBlock() == Blocks.RED_SAND) {
-                        BlockUtils.breakBlock(p, true);
+                    if (!isSand(s.getBlock())) continue;
+                    double dist = eye.squaredDistanceTo(Vec3d.ofCenter(p));
+                    if (dist <= reach * reach && dist < bestDist) {
+                        bestDist = dist;
+                        best = p;
                     }
                 }
+        return best;
+    }
+
+    /** 在大范围内找最近沙块（用于 Baritone 走过去） */
+    private BlockPos findNearestSand(int radius) {
+        BlockPos c = mc.player.getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int x = -radius; x <= radius; x++)
+            for (int y = -radius; y <= radius; y++)
+                for (int z = -radius; z <= radius; z++) {
+                    BlockPos p = c.add(x, y, z);
+                    if (isSand(mc.world.getBlockState(p).getBlock())) {
+                        double d = c.getSquaredDistance(p);
+                        if (d < bestDist) { bestDist = d; best = p; }
+                    }
+                }
+        return best;
     }
 
     private void goToSupply(String reason) {
