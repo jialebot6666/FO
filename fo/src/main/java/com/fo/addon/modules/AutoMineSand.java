@@ -219,8 +219,9 @@ public class AutoMineSand extends Module {
         // 每 tick 都更新当前挖掘进度（保持挖的过程）
         if (nukerTarget != null) {
             BlockState s = mc.world.getBlockState(nukerTarget);
-            if (s.isAir() || !isSand(s.getBlock())) {
-                nukerTarget = null; // 已挖掉
+            // 已挖掉 或 超出 reach → 放弃当前目标
+            if (s.isAir() || !isSand(s.getBlock()) || !isWithinReach(nukerTarget)) {
+                nukerTarget = null;
             } else {
                 // 继续挖这个方块
                 mc.interactionManager.updateBlockBreakingProgress(nukerTarget, Direction.UP);
@@ -236,12 +237,21 @@ public class AutoMineSand extends Module {
             nukerTarget = target;
             mc.interactionManager.attackBlock(target, Direction.UP);
         } else {
-            // reach 内没沙了，Baritone 走到最近的沙块旁边
-            BlockPos nearest = findNearestSand(searchRadius.get());
-            if (nearest != null) {
-                PathManagers.get().moveTo(nearest, false);
+            // reach 内没沙了，Baritone 走到最近的沙块旁边（走路中不重复发）
+            if (!PathManagers.get().isPathing()) {
+                BlockPos nearest = findNearestSand(searchRadius.get());
+                if (nearest != null) {
+                    PathManagers.get().moveTo(nearest, false);
+                }
             }
         }
+    }
+
+    /** 检查方块是否在原版 reach 范围内（从眼睛算） */
+    private boolean isWithinReach(BlockPos pos) {
+        Vec3d eye = mc.player.getEyePos();
+        double reach = mc.player.getAttributeValue(net.minecraft.entity.attribute.EntityAttributes.BLOCK_INTERACTION_RANGE);
+        return eye.squaredDistanceTo(Vec3d.ofCenter(pos)) <= reach * reach;
     }
 
     private boolean isSand(Block b) {
