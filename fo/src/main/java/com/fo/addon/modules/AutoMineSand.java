@@ -202,24 +202,20 @@ public class AutoMineSand extends Module {
 
     /** INIT_SCAN：逐个打开附近潜影盒同步名字，开完后识别补给盒和存沙盒 */
     private void tickInitScan() {
-        // 开着潜影盒 → 关一下，继续下一个
+        // 开着潜影盒 → 等几tick让BlockEntity同步名字，然后关闭
         if (mc.currentScreen instanceof ShulkerBoxScreen) {
-            if (!waitingShulkerOpen) {
+            shulkerWaitTimer++;
+            if (shulkerWaitTimer >= 10) { // 等10tick让服务器同步潜影盒数据
                 closeScreen();
                 initScanIndex++;
                 shulkerWaitTimer = 0;
-                waitingShulkerOpen = true; // 等关闭
-            }
-            shulkerWaitTimer++;
-            if (shulkerWaitTimer > 20) {
-                waitingShulkerOpen = false;
-                shulkerWaitTimer = 0;
+                waitingShulkerOpen = true;
             }
             return;
         }
         if (waitingShulkerOpen) {
             shulkerWaitTimer++;
-            if (shulkerWaitTimer > 10) {
+            if (shulkerWaitTimer >= 5) { // 关完等5tick再开下一个
                 waitingShulkerOpen = false;
                 shulkerWaitTimer = 0;
             }
@@ -232,9 +228,7 @@ public class AutoMineSand extends Module {
         }
         BlockPos box = initScanBoxes.get(initScanIndex);
         if (mc.player.getBlockPos().isWithinDistance(box, 3)) {
-            // 走到了，打开
             openShulker(box);
-            waitingShulkerOpen = true;
             shulkerWaitTimer = 0;
         } else {
             PathManagers.get().moveTo(box, false);
