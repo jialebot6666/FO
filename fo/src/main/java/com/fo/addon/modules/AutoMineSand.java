@@ -111,6 +111,8 @@ public class AutoMineSand extends Module {
     private int storeTickCounter = 0;     // 存沙等服务器同步 tick
     private int storeStuckSlot = -1;       // 上次 shift 点击的沙槽(界面槽位)
     private int storeStuckTicks = 0;      // 卡住检测计数
+    private int supplyStuckSlot = -1;      // 补给时上次点的槽位
+    private BlockPos supplyBoxPos = null;  // 缓存补给盒位置
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -133,12 +135,28 @@ public class AutoMineSand extends Module {
         shulkerWaitTimer = 0;
         waitingShulkerOpen = false;
         storeBoxPos = null;
+        supplyBoxPos = null;
         fullStoreBoxes.clear();
         storeTickCounter = 0;
         storeStuckSlot = -1;
         storeStuckTicks = 0;
+        supplyStuckSlot = -1;
         PathManagers.get().protectShulkerBoxes(true);
-        info("FO 自动挖沙已启动");
+
+        // 启动时检查附近有没有潜影盒
+        supplyBoxPos = findNamedShulker(supplyBoxName.get());
+        if (supplyBoxPos == null) {
+            error("未找到命名为「" + supplyBoxName.get() + "」的补给潜影盒，模块停止");
+            toggle();
+            return;
+        }
+        BlockPos store = findOtherShulker();
+        if (store == null) {
+            error("未找到存沙潜影盒（非「" + supplyBoxName.get() + "」的潜影盒），模块停止");
+            toggle();
+            return;
+        }
+        info("FO 自动挖沙已启动（补给盒: " + supplyBoxPos.toShortString() + "）");
     }
 
     @Override
@@ -301,7 +319,7 @@ public class AutoMineSand extends Module {
     }
 
     private void goToSupply(String reason) {
-        BlockPos supply = findNamedShulker(supplyBoxName.get());
+        BlockPos supply = supplyBoxPos != null ? supplyBoxPos : findNamedShulker(supplyBoxName.get());
         if (supply == null) {
             error("未找到命名含\"" + supplyBoxName.get() + "\"的补给盒！");
             state = State.MINING;
@@ -314,7 +332,7 @@ public class AutoMineSand extends Module {
     }
 
     private void tickGoingSupply() {
-        BlockPos supply = findNamedShulker(supplyBoxName.get());
+        BlockPos supply = supplyBoxPos != null ? supplyBoxPos : findNamedShulker(supplyBoxName.get());
         if (supply == null) { state = State.MINING; return; }
         if (mc.player.getBlockPos().isWithinDistance(supply, 3)) {
             PathManagers.get().stop();
@@ -338,18 +356,24 @@ public class AutoMineSand extends Module {
 
     private void doSupply() {
         ScreenHandler handler = mc.player.currentScreenHandler;
+        // 等上次点的槽位同步完
+        if (supplyStuckSlot >= 0 && supplyStuckSlot < 27) {
+            ItemStack s = handler.getSlot(supplyStuckSlot).getStack();
+            if (!s.isEmpty()) return; // 还没拿走，等服务器
+            supplyStuckSlot = -1;
+        }
         int moved = 0;
         if (needNewShovel()) {
             int slot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
-            if (slot != -1) { quickMove(slot); moved++; }
+            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
         }
         if (foodCount() < foodTarget.get()) {
             int slot = findShulkerItemExact(handler, Items.GOLDEN_CARROT);
-            if (slot != -1) { quickMove(slot); moved++; }
+            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
         }
         if (totemCount() < totemTarget.get()) {
             int slot = findShulkerItemExact(handler, Items.TOTEM_OF_UNDYING);
-            if (slot != -1) { quickMove(slot); moved++; }
+            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
         }
         if (moved == 0) { closeScreen(); state = State.MINING; }
     }
