@@ -88,11 +88,11 @@ public class AutoMineSand extends Module {
 
     private final Setting<SettingColor> supplyBoxColor = sgStore.add(new ColorSetting.Builder()
         .name("补给盒高亮颜色").description("FO补给盒的高亮框颜色")
-        .defaultValue(SettingColor.GREEN).build());
+        .defaultValue(new SettingColor(0, 255, 0, 77)).build());
 
     private final Setting<SettingColor> storeBoxColor = sgStore.add(new ColorSetting.Builder()
         .name("存沙盒高亮颜色").description("存沙潜影盒的高亮框颜色")
-        .defaultValue(SettingColor.YELLOW).build());
+        .defaultValue(new SettingColor(255, 255, 0, 77)).build());
 
     private final Setting<Boolean> highlightBoxes = sgStore.add(new BoolSetting.Builder()
         .name("高亮潜影盒").description("在世界中高亮补给盒和存沙盒")
@@ -108,6 +108,9 @@ public class AutoMineSand extends Module {
     private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
     private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
     private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
+    private int storeTickCounter = 0;     // 存沙等服务器同步 tick
+    private int lastStoreSlot = -1;       // 上次 shift 点击的沙槽
+    private int storeStuckTicks = 0;      // 卡住检测计数
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -131,12 +134,17 @@ public class AutoMineSand extends Module {
         waitingShulkerOpen = false;
         storeBoxPos = null;
         fullStoreBoxes.clear();
+        storeTickCounter = 0;
+        lastStoreSlot = -1;
+        storeStuckTicks = 0;
+        PathManagers.get().protectShulkerBoxes(true);
         info("FO 自动挖沙已启动");
     }
 
     @Override
     public void onDeactivate() {
         PathManagers.get().stop();
+        PathManagers.get().protectShulkerBoxes(false);
         info("FO 自动挖沙已停止");
     }
 
@@ -355,7 +363,12 @@ public class AutoMineSand extends Module {
     }
 
     private void tickOpenStore() {
-        if (mc.currentScreen instanceof ShulkerBoxScreen) { doStore(); return; }
+        if (mc.currentScreen instanceof ShulkerBoxScreen) {
+            storeTickCounter++;
+            if (storeTickCounter < 3) return; // 等服务器同步潜影盒内容
+            doStore();
+            return;
+        }
         if (waitingShulkerOpen) {
             shulkerWaitTimer++;
             if (shulkerWaitTimer > 40) { waitingShulkerOpen = false; state = State.MINING; }
@@ -367,32 +380,42 @@ public class AutoMineSand extends Module {
 
     private void doStore() {
         ScreenHandler handler = mc.player.currentScreenHandler;
-        // 先检查盒子是否已满（27格全满）
-        boolean boxFull = true;
-        for (int i = 0; i < 27; i++) {
-            if (i >= handler.slots.size()) break;
-            if (handler.getSlot(i).getStack().isEmpty()) { boxFull = false; break; }
+        // 卡住检测：上次点的槽位还有沙=盒子满了
+        if (lastStoreSlot >= 0 && lastStoreSlot < 36) {
+            ItemStack s = mc.player.getInventory().getStack(lastStoreSlot);
+            if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
+                storeStuckTicks++;
+                if (storeStuckTicks > 20) {
+                    // 盒子满了
+                    if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
+                    info("存沙盒已满");
+                    lastStoreSlot = -1;
+                    storeStuckTicks = 0;
+                    closeScreen();
+                    goToStore();
+                }
+                return; // 等服务器同步
+            }
         }
-        if (boxFull && storeBoxPos != null) {
-            fullStoreBoxes.add(storeBoxPos.toImmutable());
-            closeScreen();
-            info("存沙盒已满，寻找下一个");
-            goToStore();
-            return;
-        }
-        int moved = 0;
+        // 找背包里第一个沙
         for (int i = 9; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
             if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
                 int screenSlot = i + 27;
                 if (screenSlot < handler.slots.size()) {
                     quickMove(screenSlot);
-                    moved++;
-                    if (moved >= 27) break;
+                    lastStoreSlot = i;
+                    storeStuckTicks = 0;
                 }
+                return; // 每 tick 只移一组
             }
         }
-        if (moved == 0) { closeScreen(); state = State.MINING; }
+        // 没沙了，存完
+        lastStoreSlot = -1;
+        storeStuckTicks = 0;
+        closeScreen();
+        state = State.MINING;
+        info("存沙完成");
     }
 
     private boolean needNewShovel() {

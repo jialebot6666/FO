@@ -96,4 +96,40 @@ public class BaritonePathManager implements IPathManager {
         } catch (ReflectiveOperationException ignored) {
         }
     }
+
+    /** 设置 Baritone 保护潜影盒不被挖 */
+    public void protectShulkerBoxes(boolean protect) {
+        try {
+            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
+            Object settings = api.getMethod("getSettings").invoke(null);
+            java.lang.reflect.Field f = settings.getClass().getField("blocksToDisallowBreaking");
+            Object setting = f.get(settings);
+            java.lang.reflect.Method setValue = setting.getClass().getMethod("value", java.lang.Object[].class);
+            if (protect) {
+                java.util.List<Block> list = new java.util.ArrayList<>();
+                for (net.minecraft.block.Block b : new net.minecraft.block.Block[]{
+                    net.minecraft.block.Blocks.SHULKER_BOX,
+                    net.minecraft.block.Blocks.WHITE_SHULKER_BOX,
+                    net.minecraft.block.Blocks.ORANGE_SHULKER_BOX,
+                    net.minecraft.block.Blocks.MAGENTA_SHULKER_BOX,
+                    net.minecraft.block.Blocks.LIGHT_BLUE_SHULKER_BOX,
+                    net.minecraft.block.Blocks.YELLOW_SHULKER_BOX,
+                    net.minecraft.block.Blocks.LIME_SHULKER_BOX,
+                    net.minecraft.block.Blocks.PINK_SHULKER_BOX,
+                    net.minecraft.block.Blocks.GRAY_SHULKER_BOX,
+                    net.minecraft.block.Blocks.LIGHT_GRAY_SHULKER_BOX,
+                    net.minecraft.block.Blocks.CYAN_SHULKER_BOX,
+                    net.minecraft.block.Blocks.PURPLE_SHULKER_BOX,
+                    net.minecraft.block.Blocks.BLUE_SHULKER_BOX,
+                    net.minecraft.block.Blocks.BROWN_SHULKER_BOX,
+                    net.minecraft.block.Blocks.GREEN_SHULKER_BOX,
+                    net.minecraft.block.Blocks.RED_SHULKER_BOX,
+                    net.minecraft.block.Blocks.BLACK_SHULKER_BOX
+                }) list.add(b);
+                setValue.invoke(setting, (Object) list.toArray());
+            } else {
+                setValue.invoke(setting, (Object) new java.util.ArrayList<>().toArray());
+            }
+        } catch (Exception ignored) {}
+    }
 }

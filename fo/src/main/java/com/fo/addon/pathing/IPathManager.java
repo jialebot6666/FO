@@ -11,4 +11,6 @@ public interface IPathManager {
     void moveTo(BlockPos pos, boolean ignoreY);
 
     void mine(Block... blocks);
+
+    void protectShulkerBoxes(boolean protect);
 }

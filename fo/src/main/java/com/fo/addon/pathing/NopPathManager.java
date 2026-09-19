@@ -20,4 +20,8 @@ public class NopPathManager implements IPathManager {
     @Override
     public void mine(Block... blocks) {
     }
+
+    @Override
+    public void protectShulkerBoxes(boolean protect) {
+    }
 }
