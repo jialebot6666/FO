@@ -153,7 +153,10 @@ public class AutoMineSand extends Module {
         if (mc.player == null || mc.world == null) return;
         if (mc.player.isUsingItem()) return;
 
-        if (tickTimer > 0) { tickTimer--; return; }
+        // 开着潜影盒时跳过 delay，每 tick 都处理存取
+        boolean inShulker = mc.currentScreen instanceof ShulkerBoxScreen;
+
+        if (!inShulker && tickTimer > 0) { tickTimer--; return; }
 
         switch (state) {
             case MINING -> tickMining();
@@ -163,7 +166,7 @@ public class AutoMineSand extends Module {
             case OPEN_STORE -> tickOpenStore();
         }
 
-        tickTimer = delay.get();
+        if (!inShulker) tickTimer = delay.get();
     }
 
     @EventHandler
@@ -395,8 +398,7 @@ public class AutoMineSand extends Module {
             ItemStack s = mc.player.getInventory().getStack(lastStoreSlot);
             if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
                 storeStuckTicks++;
-                if (storeStuckTicks > 20) {
-                    // 盒子满了
+                if (storeStuckTicks > 10) {
                     if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
                     info("存沙盒已满");
                     lastStoreSlot = -1;
@@ -404,10 +406,11 @@ public class AutoMineSand extends Module {
                     closeScreen();
                     goToStore();
                 }
-                return; // 等服务器同步
+                return;
             }
         }
-        // 找背包里第一个沙
+        // 每 tick 最多移 9 组沙
+        int moved = 0;
         for (int i = 9; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
             if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
@@ -416,16 +419,19 @@ public class AutoMineSand extends Module {
                     quickMove(screenSlot);
                     lastStoreSlot = i;
                     storeStuckTicks = 0;
+                    moved++;
+                    if (moved >= 9) return; // 每 tick 最多 9 组
                 }
-                return; // 每 tick 只移一组
             }
         }
-        // 没沙了，存完
-        lastStoreSlot = -1;
-        storeStuckTicks = 0;
-        closeScreen();
-        state = State.MINING;
-        info("存沙完成");
+        if (moved == 0) {
+            // 没沙了，存完
+            lastStoreSlot = -1;
+            storeStuckTicks = 0;
+            closeScreen();
+            state = State.MINING;
+            info("存沙完成");
+        }
     }
 
     private boolean needNewShovel() {
