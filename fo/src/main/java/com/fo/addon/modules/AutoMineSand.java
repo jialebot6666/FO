@@ -98,7 +98,7 @@ public class AutoMineSand extends Module {
         .name("高亮潜影盒").description("在世界中高亮补给盒和存沙盒")
         .defaultValue(true).build());
 
-    private enum State { MINING, GOING_SUPPLY, OPEN_SUPPLY, GOING_STORE, OPEN_STORE }
+    private enum State { MINING, INIT_SCAN, GOING_SUPPLY, OPEN_SUPPLY, GOING_STORE, OPEN_STORE }
 
     private State state = State.MINING;
     private int tickTimer = 0;
@@ -113,6 +113,8 @@ public class AutoMineSand extends Module {
     private int storeStuckTicks = 0;      // 卡住检测计数
     private int supplyStuckSlot = -1;      // 补给时上次点的槽位
     private BlockPos supplyBoxPos = null;  // 缓存补给盒位置
+    private final java.util.List<BlockPos> initScanBoxes = new java.util.ArrayList<>(); // 待扫描的盒子
+    private int initScanIndex = 0;         // 扫描到第几个
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -130,7 +132,7 @@ public class AutoMineSand extends Module {
             toggle();
             return;
         }
-        state = State.MINING;
+        state = State.INIT_SCAN;
         tickTimer = 0;
         shulkerWaitTimer = 0;
         waitingShulkerOpen = false;
@@ -141,22 +143,18 @@ public class AutoMineSand extends Module {
         storeStuckSlot = -1;
         storeStuckTicks = 0;
         supplyStuckSlot = -1;
+        initScanBoxes.clear();
+        initScanIndex = 0;
         PathManagers.get().protectShulkerBoxes(true);
 
-        // 启动时检查附近有没有潜影盒
-        supplyBoxPos = findNamedShulker(supplyBoxName.get());
-        if (supplyBoxPos == null) {
-            error("未找到命名为「" + supplyBoxName.get() + "」的补给潜影盒，模块停止");
+        // 收集附近所有潜影盒，准备逐个打开同步名字
+        collectNearbyShulkers(initScanBoxes);
+        if (initScanBoxes.isEmpty()) {
+            error("附近 32 格内没有潜影盒，模块停止");
             toggle();
             return;
         }
-        BlockPos store = findOtherShulker();
-        if (store == null) {
-            error("未找到存沙潜影盒（非「" + supplyBoxName.get() + "」的潜影盒），模块停止");
-            toggle();
-            return;
-        }
-        info("FO 自动挖沙已启动（补给盒: " + supplyBoxPos.toShortString() + "）");
+        info("FO 自动挖沙启动：正在扫描附近 " + initScanBoxes.size() + " 个潜影盒...");
     }
 
     @Override
@@ -178,6 +176,7 @@ public class AutoMineSand extends Module {
 
         switch (state) {
             case MINING -> tickMining();
+            case INIT_SCAN -> tickInitScan();
             case GOING_SUPPLY -> tickGoingSupply();
             case OPEN_SUPPLY -> tickOpenSupply();
             case GOING_STORE -> tickGoingStore();
@@ -185,6 +184,81 @@ public class AutoMineSand extends Module {
         }
 
         if (!inShulker) tickTimer = delay.get();
+    }
+
+    /** 收集附近所有潜影盒位置 */
+    private void collectNearbyShulkers(java.util.List<BlockPos> out) {
+        BlockPos c = mc.player.getBlockPos();
+        int r = searchRadius.get();
+        for (int x = -r; x <= r; x++)
+            for (int y = -r; y <= r; y++)
+                for (int z = -r; z <= r; z++) {
+                    BlockPos p = c.add(x, y, z);
+                    if (mc.world.getBlockState(p).getBlock() instanceof ShulkerBoxBlock) {
+                        out.add(p.toImmutable());
+                    }
+                }
+    }
+
+    /** INIT_SCAN：逐个打开附近潜影盒同步名字，开完后识别补给盒和存沙盒 */
+    private void tickInitScan() {
+        // 开着潜影盒 → 关一下，继续下一个
+        if (mc.currentScreen instanceof ShulkerBoxScreen) {
+            if (!waitingShulkerOpen) {
+                closeScreen();
+                initScanIndex++;
+                shulkerWaitTimer = 0;
+                waitingShulkerOpen = true; // 等关闭
+            }
+            shulkerWaitTimer++;
+            if (shulkerWaitTimer > 20) {
+                waitingShulkerOpen = false;
+                shulkerWaitTimer = 0;
+            }
+            return;
+        }
+        if (waitingShulkerOpen) {
+            shulkerWaitTimer++;
+            if (shulkerWaitTimer > 10) {
+                waitingShulkerOpen = false;
+                shulkerWaitTimer = 0;
+            }
+            return;
+        }
+        // 扫完了所有盒子，开始识别
+        if (initScanIndex >= initScanBoxes.size()) {
+            finishInitScan();
+            return;
+        }
+        BlockPos box = initScanBoxes.get(initScanIndex);
+        if (mc.player.getBlockPos().isWithinDistance(box, 3)) {
+            // 走到了，打开
+            openShulker(box);
+            waitingShulkerOpen = true;
+            shulkerWaitTimer = 0;
+        } else {
+            PathManagers.get().moveTo(box, false);
+        }
+    }
+
+    /** 扫描完所有盒子，识别补给盒和存沙盒 */
+    private void finishInitScan() {
+        PathManagers.get().stop();
+        supplyBoxPos = findNamedShulker(supplyBoxName.get());
+        if (supplyBoxPos == null) {
+            error("扫描后仍未找到命名「" + supplyBoxName.get() + "」的补给盒，模块停止");
+            toggle();
+            return;
+        }
+        info("补给盒: " + supplyBoxPos.toShortString());
+        BlockPos store = findOtherShulker();
+        if (store == null) {
+            error("未找到存沙潜影盒，模块停止");
+            toggle();
+            return;
+        }
+        info("FO 自动挖沙已启动");
+        state = State.MINING;
     }
 
     @EventHandler
