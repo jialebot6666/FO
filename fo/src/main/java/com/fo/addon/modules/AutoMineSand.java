@@ -2,12 +2,15 @@ package com.fo.addon.modules;
 
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.pathing.BaritoneUtils;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
@@ -83,6 +86,18 @@ public class AutoMineSand extends Module {
         .name("背包空槽阈值").description("空槽位少于此值触发存沙")
         .defaultValue(2).min(0).max(9).sliderMin(0).sliderMax(9).build());
 
+    private final Setting<SettingColor> supplyBoxColor = sgStore.add(new ColorSetting.Builder()
+        .name("补给盒高亮颜色").description("FO补给盒的高亮框颜色")
+        .defaultValue(SettingColor.GREEN).build());
+
+    private final Setting<SettingColor> storeBoxColor = sgStore.add(new ColorSetting.Builder()
+        .name("存沙盒高亮颜色").description("存沙潜影盒的高亮框颜色")
+        .defaultValue(SettingColor.YELLOW).build());
+
+    private final Setting<Boolean> highlightBoxes = sgStore.add(new BoolSetting.Builder()
+        .name("高亮潜影盒").description("在世界中高亮补给盒和存沙盒")
+        .defaultValue(true).build());
+
     private enum State { MINING, GOING_SUPPLY, OPEN_SUPPLY, GOING_STORE, OPEN_STORE }
 
     private State state = State.MINING;
@@ -90,6 +105,7 @@ public class AutoMineSand extends Module {
     private int shulkerWaitTimer = 0;
     private boolean waitingShulkerOpen = false;
     private BlockPos storeBoxPos = null;
+    private final Set<BlockPos> fullStoreBoxes = new HashSet<>(); // 存满的盒子不再高亮
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -112,6 +128,7 @@ public class AutoMineSand extends Module {
         shulkerWaitTimer = 0;
         waitingShulkerOpen = false;
         storeBoxPos = null;
+        fullStoreBoxes.clear();
         info("FO 自动挖沙已启动");
     }
 
@@ -137,6 +154,34 @@ public class AutoMineSand extends Module {
         }
 
         tickTimer = delay.get();
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!highlightBoxes.get() || mc.player == null || mc.world == null) return;
+        BlockPos c = mc.player.getBlockPos();
+        int r = searchRadius.get();
+        for (int x = -r; x <= r; x++)
+            for (int y = -r; y <= r; y++)
+                for (int z = -r; z <= r; z++) {
+                    BlockPos p = c.add(x, y, z);
+                    BlockState s = mc.world.getBlockState(p);
+                    if (!(s.getBlock() instanceof ShulkerBoxBlock)) continue;
+                    boolean isSupply = false;
+                    if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
+                        var n = be.getCustomName();
+                        if (n != null && n.getString().contains(supplyBoxName.get())) {
+                            isSupply = true;
+                        }
+                    }
+                    if (isSupply) {
+                        // 补给盒绿色高亮
+                        event.renderer.box(p, supplyBoxColor.get(), supplyBoxColor.get(), ShapeMode.Both, 0);
+                    } else if (!fullStoreBoxes.contains(p)) {
+                        // 存沙盒黄色高亮（满了的不亮）
+                        event.renderer.box(p, storeBoxColor.get(), storeBoxColor.get(), ShapeMode.Both, 0);
+                    }
+                }
     }
 
     private void tickMining() {
@@ -254,6 +299,19 @@ public class AutoMineSand extends Module {
 
     private void doStore() {
         ScreenHandler handler = mc.player.currentScreenHandler;
+        // 先检查盒子是否已满（27格全满）
+        boolean boxFull = true;
+        for (int i = 0; i < 27; i++) {
+            if (i >= handler.slots.size()) break;
+            if (handler.getSlot(i).getStack().isEmpty()) { boxFull = false; break; }
+        }
+        if (boxFull && storeBoxPos != null) {
+            fullStoreBoxes.add(storeBoxPos.toImmutable());
+            closeScreen();
+            info("存沙盒已满，寻找下一个");
+            goToStore();
+            return;
+        }
         int moved = 0;
         for (int i = 9; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
@@ -327,6 +385,7 @@ public class AutoMineSand extends Module {
             for (int y = -r; y <= r; y++)
                 for (int z = -r; z <= r; z++) {
                     BlockPos p = c.add(x, y, z);
+                    if (fullStoreBoxes.contains(p)) continue;
                     BlockState s = mc.world.getBlockState(p);
                     if (s.getBlock() instanceof ShulkerBoxBlock) {
                         if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
