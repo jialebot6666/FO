@@ -414,6 +414,8 @@ public class AutoMineSand extends Module {
             waitingShulkerOpen = true;
             shulkerWaitTimer = 0;
             openShulker(supply);
+        } else {
+            PathManagers.get().moveTo(supply, false);
         }
     }
 
@@ -512,6 +514,9 @@ public class AutoMineSand extends Module {
             waitingShulkerOpen = true;
             shulkerWaitTimer = 0;
             openShulker(storeBoxPos);
+        } else {
+            // 不在附近就重新走过去（被攻击打断后自动续上）
+            PathManagers.get().moveTo(storeBoxPos, false);
         }
     }
 
