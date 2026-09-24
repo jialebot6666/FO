@@ -44,4 +44,23 @@ public class FacingLogicTest {
         float[] high = FacingLogic.yawPitchTo(0, 1, 5, 0, 4, 0);
         assertTrue(high[1] > low[1]);
     }
+
+    @Test
+    void yawMatchesSlimefunHelperFormula() {
+        // SlimefunHelper PlayerStateManager.setPlayerRotationSafe: yaw = toDegrees(atan2(-x, z))
+        // FO FacingLogic: yaw = toDegrees(atan2(-dx, dz)) —— 移植对齐验证
+        double x = 3.0, y = 1.0, z = -2.0;
+        float expected = (float) Math.toDegrees(Math.atan2(-x, z));
+        float[] fp = FacingLogic.yawPitchTo(x, y, z, 0, 0, 0);
+        assertEquals(expected, fp[0], 0.01f);
+    }
+
+    @Test
+    void pitchMatchesYingFormula() {
+        // Ying ElytraCollector: pitch = -toDegrees(atan2(dy, sqrt(dx^2+dz^2)))
+        double dx = 3.0, dy = 2.0, dz = -2.0;
+        float expected = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+        float[] fp = FacingLogic.yawPitchTo(dx, dy, dz, 0, 0, 0);
+        assertEquals(expected, fp[1], 0.01f);
+    }
 }

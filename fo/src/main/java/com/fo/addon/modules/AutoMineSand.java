@@ -3,6 +3,7 @@ package com.fo.addon.modules;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.NukerSphericalLogic;
 import com.fo.addon.utils.OpenBoxRetryLogic;
 import com.fo.addon.utils.SandPickupLogic;
@@ -30,7 +31,6 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
@@ -809,21 +809,8 @@ public class AutoMineSand extends Module {
 
     private void openShulker(BlockPos pos) {
         if (!mc.player.getBlockPos().isWithinDistance(pos, 5)) return;
-        // 先转头对准盒子中心并同步视角包：反作弊要求视线与交互点一致，否则服务端不响应，盒子打不开
-        faceBoxForOpen(pos);
-        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos, false);
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
-    }
-
-    /** 对准潜影盒中心并显式发送视角包（先发视角包，服务器处理交互包时才能看到新视角） */
-    private void faceBoxForOpen(BlockPos pos) {
-        float[] fp = FacingLogic.yawPitchTo(
-            pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
-            mc.player.getX(), mc.player.getY() + mc.player.getStandingEyeHeight(), mc.player.getZ());
-        mc.player.setYaw(fp[0]);
-        mc.player.setPitch(fp[1]);
-        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
-            fp[0], fp[1], mc.player.isOnGround(), mc.player.horizontalCollision));
+        // 统一转头模式（Ying/SlimefunHelper）：存视角→转头+发包→交互→恢复视角
+        InteractionUtils.interactBlockSafely(pos, Direction.UP);
     }
 
     private void closeScreen() {
