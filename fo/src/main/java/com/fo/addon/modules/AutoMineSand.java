@@ -2,6 +2,7 @@ package com.fo.addon.modules;
 
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
+import com.fo.addon.utils.SandPickupLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -24,6 +25,7 @@ import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -122,6 +124,7 @@ public class AutoMineSand extends Module {
     private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
     private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
     private int nukerClickTimer = 0;      // Nuker 点击延迟计数器
+    private boolean pickingUp = false;     // Nuker 正在用 Baritone pickup 捡沙子掉落物
     private int storeTickCounter = 0;     // 存沙等服务器同步 tick
     private int storeStuckSlot = -1;       // 上次 shift 点击的沙槽(界面槽位)
     private int storeStuckTicks = 0;      // 卡住检测计数
@@ -159,6 +162,8 @@ public class AutoMineSand extends Module {
         supplyStuckSlot = -1;
         initScanBoxes.clear();
         initScanIndex = 0;
+        nukerTarget = null;
+        pickingUp = false;
         PathManagers.get().protectShulkerBoxes(true);
 
         // 收集附近所有潜影盒，准备逐个打开同步名字
@@ -175,6 +180,8 @@ public class AutoMineSand extends Module {
     public void onDeactivate() {
         PathManagers.get().stop();
         PathManagers.get().protectShulkerBoxes(false);
+        pickingUp = false;
+        nukerTarget = null;
         info("FO 自动挖沙已停止");
     }
 
@@ -315,9 +322,16 @@ public class AutoMineSand extends Module {
      * - BlockIterator 严格遍历，squaredDistance 到方块中心校验距离
      * - clickDelay 控制点击间隔（默认 8 tick = 400ms）
      * - 自动转头看向目标方块
-     * - reach 内没沙了，Baritone 走到最近沙块
+     * - reach 内没沙了：优先用 Baritone pickup 走到沙子掉落物旁拾取，捡完再挖沙
      */
     private void nukerTick() {
+        // 拾取优先：正在捡掉落物时，搜索半径内没有沙掉落物才算捡完，然后恢复挖沙
+        if (pickingUp) {
+            if (hasSandDropsInRadius()) return;
+            pickingUp = false;
+            PathManagers.get().stop();
+        }
+
         // 点击延迟计数
         if (nukerClickTimer > 0) {
             nukerClickTimer--;
@@ -355,7 +369,22 @@ public class AutoMineSand extends Module {
 
         BlockIterator.after(() -> {
             if (candidates.isEmpty()) {
-                // reach 内没沙了，Baritone 挖掘模式边走边挖（路上顺便挖沙）
+                // reach 内没沙了：有沙掉落物就捡，捡完再挖；没有掉落物直接挖沙
+                SandPickupLogic.Action act = SandPickupLogic.decide(hasSandDropsInRadius(), pickingUp);
+                switch (act) {
+                    case START -> {
+                        pickingUp = true;
+                        PathManagers.get().pickupItems(AutoMineSand::isSandItem);
+                        return;
+                    }
+                    case KEEP -> { return; }
+                    case STOP_AND_MINE -> {
+                        pickingUp = false;
+                        PathManagers.get().stop();
+                    }
+                    case MINE -> { }
+                }
+                // 没有可捡的掉落物，让 Baritone 挖沙（边走边挖）
                 PathManagers.get().mine(Blocks.SAND, Blocks.RED_SAND);
                 return;
             }
@@ -400,6 +429,19 @@ public class AutoMineSand extends Module {
 
     private boolean isSand(Block b) {
         return b == Blocks.SAND || b == Blocks.RED_SAND;
+    }
+
+    /** 掉落物是否沙子物品 */
+    private static boolean isSandItem(ItemStack stack) {
+        Item i = stack.getItem();
+        return i == Items.SAND || i == Items.RED_SAND;
+    }
+
+    /** 搜索半径内是否有沙子掉落物 */
+    private boolean hasSandDropsInRadius() {
+        int r = searchRadius.get();
+        Box box = mc.player.getBoundingBox().expand(r);
+        return !mc.world.getEntitiesByClass(ItemEntity.class, box, e -> isSandItem(e.getStack())).isEmpty();
     }
 
     /** 在原版 reach(4.5格) 内找沙块 */

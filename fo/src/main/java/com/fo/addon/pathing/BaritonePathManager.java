@@ -1,10 +1,12 @@
 package com.fo.addon.pathing;
 
 import net.minecraft.block.Block;
+import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.function.Predicate;
 
 /** 纯反射调用 BaritoneAPI，不依赖 baritone-api 编译期类。任何一步失败都会抛出异常，由 PathManagers 回退到空实现。 */
 public class BaritonePathManager implements IPathManager {
@@ -16,6 +18,8 @@ public class BaritonePathManager implements IPathManager {
     private final Method setGoalAndPathM;
     private final Method mineProcessM;
     private final Method mineM;
+    private final Method followProcessM;
+    private final Method pickupM;
     private final Constructor<?> goalXZCtor;
     private final Constructor<?> goalGetToBlockCtor;
 
@@ -55,6 +59,11 @@ public class BaritonePathManager implements IPathManager {
         // mine(Block...) 是变参，编译后签名是 mine(Block[])，反射用数组类型匹配
         mineM = mineProcess.getMethod("mine", Block[].class);
 
+        // FollowProcess.pickup(Predicate<ItemStack>)：持续走到匹配掉落物旁拾取
+        Class<?> followProcess = Class.forName("baritone.api.process.IFollowProcess");
+        followProcessM = baritone.getClass().getMethod("getFollowProcess");
+        pickupM = followProcess.getMethod("pickup", Predicate.class);
+
         // GoalXZ 没有 (BlockPos) 构造器，只有 (int,int) 和 (BetterBlockPos)
         goalXZCtor = Class.forName("baritone.api.pathing.goals.GoalXZ").getConstructor(int.class, int.class);
         goalGetToBlockCtor = Class.forName("baritone.api.pathing.goals.GoalGetToBlock").getConstructor(BlockPos.class);
@@ -93,6 +102,14 @@ public class BaritonePathManager implements IPathManager {
     public void mine(Block... blocks) {
         try {
             mineM.invoke(mineProcessM.invoke(baritone), (Object) blocks);
+        } catch (ReflectiveOperationException ignored) {
+        }
+    }
+
+    @Override
+    public void pickupItems(Predicate<ItemStack> filter) {
+        try {
+            pickupM.invoke(followProcessM.invoke(baritone), filter);
         } catch (ReflectiveOperationException ignored) {
         }
     }
