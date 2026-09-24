@@ -102,7 +102,7 @@ public class BaritonePathManager implements IPathManager {
         try {
             Class<?> api = Class.forName("baritone.api.BaritoneAPI");
             Object settings = api.getMethod("getSettings").invoke(null);
-            // blocksToDisallowBreaking 是 Setting<Block[]>，直接改它的 value 字段
+            // blocksToDisallowBreaking 是 Setting<List<Block>>，直接改它的 value 字段（List）
             java.lang.reflect.Field f = settings.getClass().getField("blocksToDisallowBreaking");
             Object setting = f.get(settings);
             java.lang.reflect.Field valueField = setting.getClass().getField("value");
@@ -126,9 +126,9 @@ public class BaritonePathManager implements IPathManager {
                     net.minecraft.block.Blocks.RED_SHULKER_BOX,
                     net.minecraft.block.Blocks.BLACK_SHULKER_BOX
                 };
-                valueField.set(setting, shulkers);
+                valueField.set(setting, java.util.Arrays.asList(shulkers));
             } else {
-                valueField.set(setting, new Block[0]);
+                valueField.set(setting, new java.util.ArrayList<Block>());
             }
         } catch (Exception e) {
             e.printStackTrace();
