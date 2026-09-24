@@ -2,6 +2,7 @@ package com.fo.addon.modules;
 
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
+import com.fo.addon.utils.NukerSphericalLogic;
 import com.fo.addon.utils.SandPickupLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -14,8 +15,6 @@ import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockIterator;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
 import net.minecraft.block.Block;
@@ -69,13 +68,21 @@ public class AutoMineSand extends Module {
         .name("核爆范围").description("Nuker 模式下最大挖掘半径")
         .defaultValue(4).min(1).max(6).sliderMin(1).sliderMax(6).build());
 
-    private final Setting<Integer> nukerClickDelay = sgGeneral.add(new IntSetting.Builder()
-        .name("核爆点击延迟").description("Nuker 模式下每次挖掘之间的 tick 间隔（8=400ms）")
-        .defaultValue(8).min(0).max(20).sliderMin(0).sliderMax(20).build());
+    private final Setting<Integer> nukerMaxInstaMine = sgGeneral.add(new IntSetting.Builder()
+        .name("核爆发包上限").description("每 tick 最多连续发包次数（SlimefunHelper 原版 30，防踢）")
+        .defaultValue(30).min(1).max(60).sliderMin(1).sliderMax(60).build());
+
+    private final Setting<Integer> nukerMinDy = sgGeneral.add(new IntSetting.Builder()
+        .name("核爆纵向下限").description("Nuker 模式下相对玩家脚下可挖的最低层数")
+        .defaultValue(0).min(-6).max(6).sliderMin(-6).sliderMax(6).build());
+
+    private final Setting<Integer> nukerMaxDy = sgGeneral.add(new IntSetting.Builder()
+        .name("核爆纵向上限").description("Nuker 模式下相对玩家脚下可挖的最高层数")
+        .defaultValue(6).min(-6).max(6).sliderMin(-6).sliderMax(6).build());
 
     private final Setting<Boolean> nukerRotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("核爆自动转头").description("Nuker 模式下自动转头看向目标方块（Grim 安全）")
-        .defaultValue(true).build());
+        .name("核爆自动转头").description("Nuker 模式下自动转头看向目标方块（SlimefunHelper 默认 NO_BYPASS 不转头更防踢）")
+        .defaultValue(false).build());
 
     private final Setting<String> supplyBoxName = sgSupply.add(new StringSetting.Builder()
         .name("补给盒关键词").description("潜影盒命名包含此关键词即识别为 FO 补给盒")
@@ -121,10 +128,10 @@ public class AutoMineSand extends Module {
     private boolean waitingShulkerOpen = false;
     private BlockPos storeBoxPos = null;
     private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
-    private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标
-    private int nukerTickCounter = 0;     // Nuker 4tick 刷新计数
-    private int nukerClickTimer = 0;      // Nuker 点击延迟计数器
+    private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标（SlimefunHelper lastMinePos）
     private boolean pickingUp = false;     // Nuker 正在用 Baritone pickup 捡沙子掉落物
+    private java.util.List<int[]> nukerOffsets = null; // 球型范围相对坐标（按距离升序，懒生成）
+    private double nukerOffsetsRange = -1; // 上次生成偏移表用的半径
     private int storeTickCounter = 0;     // 存沙等服务器同步 tick
     private int storeStuckSlot = -1;       // 上次 shift 点击的沙槽(界面槽位)
     private int storeStuckTicks = 0;      // 卡住检测计数
@@ -318,10 +325,11 @@ public class AutoMineSand extends Module {
     }
 
     /**
-     * Nuker 模式：照搬 LeavesHack NukerPlus 逻辑
-     * - BlockIterator 严格遍历，squaredDistance 到方块中心校验距离
-     * - clickDelay 控制点击间隔（默认 8 tick = 400ms）
-     * - 自动转头看向目标方块
+     * Nuker 模式：移植 SlimefunHelper MineBot（核爆挖掘）
+     * - SPHERICAL 球型范围找最近沙块（偏移表按距离升序）
+     * - 瞬时破坏（一 tick 能挖完，如效率铲挖沙）时每 tick 循环发包，直到服务器确认在挖或达到发包上限
+     * - 非瞬时方块只发一次 START，交给原版慢慢挖
+     * - 冷却由 onBlockBreakingCooldown 清零（等价 SlimefunHelper setMiningCooldown(0)）
      * - reach 内没沙了：优先用 Baritone pickup 走到沙子掉落物旁拾取，捡完再挖沙
      */
     private void nukerTick() {
@@ -332,43 +340,13 @@ public class AutoMineSand extends Module {
             PathManagers.get().stop();
         }
 
-        // 点击延迟计数
-        if (nukerClickTimer > 0) {
-            nukerClickTimer--;
-        }
-
-        // 继续挖当前目标
-        if (nukerTarget != null) {
-            BlockState s = mc.world.getBlockState(nukerTarget);
-            if (s.isAir() || !isSand(s.getBlock()) || !isWithinReach(nukerTarget)) {
-                nukerTarget = null;
-            } else {
-                mc.interactionManager.updateBlockBreakingProgress(nukerTarget, Direction.UP);
-                return;
+        // SlimefunHelper MineBot onMineCommon 挖掘循环
+        int tryMine = 0;
+        do {
+            if (nukerTarget == null || !checkMineCondition(nukerTarget)) {
+                nukerTarget = findNextMinePosSpherical();
             }
-        }
-
-        // 点击延迟未到，不找新目标
-        if (nukerClickTimer > 0) return;
-
-        // 用 BlockIterator 严格遍历 reach 范围
-        double range = nukerRange.get();
-        double rangeSq = range * range;
-        Vec3d eye = mc.player.getEyePos();
-        BlockPos center = mc.player.getBlockPos();
-        List<BlockPos> candidates = new ArrayList<>();
-
-        BlockIterator.register((int) Math.ceil(range) + 1, (int) Math.ceil(range) + 1, (blockPos, blockState) -> {
-            if (!isSand(blockState.getBlock())) return;
-            double dist = Utils.squaredDistance(
-                eye.x, eye.y, eye.z,
-                blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5);
-            if (dist > rangeSq) return;
-            candidates.add(blockPos.toImmutable());
-        });
-
-        BlockIterator.after(() -> {
-            if (candidates.isEmpty()) {
+            if (nukerTarget == null) {
                 // reach 内没沙了：有沙掉落物就捡，捡完再挖；没有掉落物直接挖沙
                 SandPickupLogic.Action act = SandPickupLogic.decide(hasSandDropsInRadius(), pickingUp);
                 switch (act) {
@@ -389,16 +367,14 @@ public class AutoMineSand extends Module {
                 return;
             }
 
-            // 找最近的沙块
-            candidates.sort(Comparator.comparingDouble(p ->
-                Utils.squaredDistance(eye.x, eye.y, eye.z, p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
+            // 朝向目标方块（SlimefunHelper: Direction.getFacing(shouldFacing).getOpposite()）
+            Vec3d shouldFacing = nukerTarget.toCenterPos().subtract(mc.player.getEyePos());
+            Direction dir = Direction.getFacing(shouldFacing).getOpposite();
 
-            BlockPos target = candidates.get(0);
-            nukerTarget = target;
-
-            // 自动转头
+            // 自动转头（可选项，默认关 = SlimefunHelper NO_BYPASS 防踢）
             if (nukerRotate.get()) {
-                Vec3d targetCenter = Vec3d.ofCenter(target);
+                Vec3d targetCenter = Vec3d.ofCenter(nukerTarget);
+                Vec3d eye = mc.player.getEyePos();
                 double dx = targetCenter.x - eye.x;
                 double dy = targetCenter.y - eye.y;
                 double dz = targetCenter.z - eye.z;
@@ -409,15 +385,52 @@ public class AutoMineSand extends Module {
                 mc.player.setPitch(pitch);
             }
 
-            mc.player.swingHand(Hand.MAIN_HAND);
-            mc.interactionManager.attackBlock(target, Direction.UP);
-            nukerClickTimer = nukerClickDelay.get();
-        });
+            // 发包（冷却已被 onBlockBreakingCooldown 清零，等价 SlimefunHelper setMiningCooldown(0)）
+            mc.interactionManager.updateBlockBreakingProgress(nukerTarget, dir);
+
+            // 非瞬时破坏：只发一次 START，交给原版逐步挖
+            if (!isInstantBreak(nukerTarget)) break;
+
+            tryMine++;
+        } while (!mc.interactionManager.isBreakingBlock() && tryMine < nukerMaxInstaMine.get());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     private void onBlockBreakingCooldown(BlockBreakingCooldownEvent event) {
         if (nukerMode.get()) event.cooldown = 0;
+    }
+
+    /** SlimefunHelper checkDistanceAndCondition：距离内 + 是沙（跳过 double-break 检查） */
+    private boolean checkMineCondition(BlockPos pos) {
+        return isWithinReach(pos) && isSand(mc.world.getBlockState(pos).getBlock());
+    }
+
+    /** SlimefunHelper findNextMinePosSpherical：球型范围（偏移表按距离升序）找最近合法沙块 */
+    private BlockPos findNextMinePosSpherical() {
+        int range = nukerRange.get();
+        ensureNukerOffsets(range);
+        BlockPos center = mc.player.getSteppingPos().add(0, 1, 0);
+        int lowest = nukerMinDy.get();
+        int highest = nukerMaxDy.get();
+        for (int[] v : nukerOffsets) {
+            int y = v[1];
+            if (y < lowest || y > highest) continue;
+            BlockPos p = center.add(v[0], y, v[2]);
+            if (checkMineCondition(p)) return p;
+        }
+        return null;
+    }
+
+    /** 懒生成球型范围偏移表（按距离升序，SlimefunHelper getBlocksAround 同款） */
+    private void ensureNukerOffsets(int range) {
+        if (nukerOffsets != null && nukerOffsetsRange == range) return;
+        nukerOffsets = NukerSphericalLogic.offsets(range);
+        nukerOffsetsRange = range;
+    }
+
+    /** 是否一 tick 内能挖完（瞬时破坏，SlimefunHelper shouldTreatAsInstantBreak: delta >= 1.0） */
+    private boolean isInstantBreak(BlockPos pos) {
+        return mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos) >= 1.0F;
     }
 
     /** 检查方块是否在原版 reach 范围内（从眼睛算） */
