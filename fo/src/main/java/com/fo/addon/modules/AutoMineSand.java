@@ -4,6 +4,7 @@ import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.NukerSphericalLogic;
+import com.fo.addon.utils.OpenBoxRetryLogic;
 import com.fo.addon.utils.SandPickupLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -128,6 +129,7 @@ public class AutoMineSand extends Module {
     private int tickTimer = 0;
     private int shulkerWaitTimer = 0;
     private boolean waitingShulkerOpen = false;
+    private int openFailCount = 0;         // INIT_SCAN 连续打不开盒子的次数
     private BlockPos storeBoxPos = null;
     private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
     private BlockPos nukerTarget = null;   // Nuker 当前挖掘目标（SlimefunHelper lastMinePos）
@@ -240,6 +242,7 @@ public class AutoMineSand extends Module {
                 initScanIndex++;
                 shulkerWaitTimer = 0;
                 waitingShulkerOpen = true;
+                openFailCount = 0;
             }
             return;
         }
@@ -257,12 +260,28 @@ public class AutoMineSand extends Module {
             return;
         }
         BlockPos box = initScanBoxes.get(initScanIndex);
-        if (mc.player.getBlockPos().isWithinDistance(box, 3)) {
-            openShulker(box);
-            shulkerWaitTimer = 0;
-        } else if (!PathManagers.get().isPathing()) {
-            // 没在寻路才重新指路，防止每 tick 重算路径导致转圈
-            PathManagers.get().moveTo(box, false);
+        switch (OpenBoxRetryLogic.decide(
+            mc.player.getBlockPos().isWithinDistance(box, 3),
+            openFailCount,
+            3)) {
+            case TRY_OPEN -> {
+                // 打开后等结果（界面开→推进；5 tick 没开→再试），失败 3 次跳过该盒，避免无限转头重试
+                openShulker(box);
+                shulkerWaitTimer = 0;
+                waitingShulkerOpen = true;
+                openFailCount++;
+            }
+            case SKIP_BOX -> {
+                info("打不开潜影盒，跳过该盒继续扫描");
+                openFailCount = 0;
+                initScanIndex++;
+            }
+            case MOVE_TO -> {
+                if (!PathManagers.get().isPathing()) {
+                    // 没在寻路才重新指路；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
+                    PathManagers.get().moveTo(box, true);
+                }
+            }
         }
     }
 
@@ -509,7 +528,8 @@ public class AutoMineSand extends Module {
         info("前往补给盒: " + reason);
         PathManagers.get().stop();
         state = State.GOING_SUPPLY;
-        PathManagers.get().moveTo(supply, false);
+        // GoalXZ（ignoreY）：走到盒子 xz 位置即可，避免把实体方块当目标导致寻路绕圈
+        PathManagers.get().moveTo(supply, true);
     }
 
     private void tickGoingSupply() {
@@ -522,8 +542,8 @@ public class AutoMineSand extends Module {
             shulkerWaitTimer = 0;
             openShulker(supply);
         } else if (!PathManagers.get().isPathing()) {
-            // 没在寻路才重新指路，防止每 tick 重算路径导致转圈
-            PathManagers.get().moveTo(supply, false);
+            // 没在寻路才重新指路；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
+            PathManagers.get().moveTo(supply, true);
         }
     }
 
@@ -611,7 +631,8 @@ public class AutoMineSand extends Module {
         info("前往存沙潜影盒");
         PathManagers.get().stop();
         state = State.GOING_STORE;
-        PathManagers.get().moveTo(box, false);
+        // GoalXZ（ignoreY）：走到盒子 xz 位置即可，避免把实体方块当目标导致寻路绕圈
+        PathManagers.get().moveTo(box, true);
     }
 
     private void tickGoingStore() {
@@ -623,8 +644,8 @@ public class AutoMineSand extends Module {
             shulkerWaitTimer = 0;
             openShulker(storeBoxPos);
         } else if (!PathManagers.get().isPathing()) {
-            // 不在附近且没在寻路才重新指路（被攻击打断后自动续上），防止每 tick 重算路径导致转圈
-            PathManagers.get().moveTo(storeBoxPos, false);
+            // 不在附近且没在寻路才重新指路（被攻击打断后自动续上）；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
+            PathManagers.get().moveTo(storeBoxPos, true);
         }
     }
 
