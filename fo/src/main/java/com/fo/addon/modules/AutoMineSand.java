@@ -349,27 +349,30 @@ public class AutoMineSand extends Module {
      * - 瞬时破坏（一 tick 能挖完，如效率铲挖沙）时每 tick 循环发包，直到服务器确认在挖或达到发包上限
      * - 非瞬时方块只发一次 START，交给原版慢慢挖
      * - 冷却由 onBlockBreakingCooldown 清零（等价 SlimefunHelper setMiningCooldown(0)）
-     * - reach 内没沙：走去最近沙块（核爆全程开启，不停下等捡掉落物，掉落物靠走路自动拾取）
+     * - reach 内没沙：优先 pickup 走去捡沙掉落物（边走边核爆，捡完即止不停下等），没掉落物就走最近沙块
      */
     private void nukerTick() {
         // SlimefunHelper MineBot onMineCommon 挖掘循环
-        // 原则：核爆全程开启。reach 内没沙就走去最近沙块（掉落物靠走路自动拾取），
-        // 不停下等 Baritone 捡完掉落物（会卡死且太慢）。
+        // 原则：核爆全程开启；掉落物用 Baritone pickup 收集，但不进入"等捡完"状态（V4.11 卡死根因）。
         int tryMine = 0;
         do {
             if (nukerTarget == null || !checkMineCondition(nukerTarget)) {
                 nukerTarget = findNextMinePosSpherical();
             }
             if (nukerTarget == null) {
-                // 核爆没沙：走去最近沙块，到达后核爆自动接管
-                switch (NukerMoveLogic.decide(findNearestSand(searchRadius.get()) != null, PathManagers.get().isPathing())) {
+                // 核爆没沙：优先走去捡沙掉落物（边走边核爆，捡完即止不停下等），
+                // 没掉落物就走最近沙块；全程不进入"等捡完"状态，避免卡死
+                switch (NukerMoveLogic.decide(hasSandDropsInRadius(), findNearestSand(searchRadius.get()) != null, PathManagers.get().isPathing())) {
+                    case PICKUP -> {
+                        PathManagers.get().pickupItems(AutoMineSand::isSandItem);
+                    }
                     case MOVE_TO_SAND -> {
                         BlockPos nearest = findNearestSand(searchRadius.get());
                         // GoalGetToBlock：沙是普通可站方块（非潜影盒那种实体方块），可直达不绕圈
                         PathManagers.get().moveTo(nearest, false);
                     }
                     case WAIT -> {
-                        // 正在寻路或大范围也没沙，等（不掉队，掉落物经走路拾取）
+                        // 正在寻路或确实没目标，等（不掉队）
                     }
                 }
                 return;
@@ -450,6 +453,19 @@ public class AutoMineSand extends Module {
 
     private boolean isSand(Block b) {
         return b == Blocks.SAND || b == Blocks.RED_SAND;
+    }
+
+    /** 掉落物是否沙子物品 */
+    private static boolean isSandItem(ItemStack stack) {
+        Item i = stack.getItem();
+        return i == Items.SAND || i == Items.RED_SAND;
+    }
+
+    /** 搜索半径内是否有沙子掉落物 */
+    private boolean hasSandDropsInRadius() {
+        int r = searchRadius.get();
+        Box box = mc.player.getBoundingBox().expand(r);
+        return !mc.world.getEntitiesByClass(ItemEntity.class, box, e -> isSandItem(e.getStack())).isEmpty();
     }
 
     /** 在原版 reach(4.5格) 内找沙块 */

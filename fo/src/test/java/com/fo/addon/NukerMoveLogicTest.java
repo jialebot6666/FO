@@ -7,25 +7,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 核爆没沙时移动决策防回归测试：
- * 核爆全程开启，不停下等捡掉落物；大范围还有沙且没在寻路 → 走去最近沙块。
+ * 核爆全程开启；掉落物用 Baritone pickup 收集（不等捡完），没掉落物才走去沙块。
  */
 public class NukerMoveLogicTest {
 
     @Test
-    void hasSandAndNotPathing_moveToSand() {
-        assertEquals(NukerMoveLogic.Action.MOVE_TO_SAND, NukerMoveLogic.decide(true, false));
+    void pathingAlwaysWait() {
+        // 正在寻路/pickup 途中不重复指路
+        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(true, true, true));
+        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(false, true, true));
     }
 
     @Test
-    void hasSandButPathing_wait() {
-        // 正在寻路（走去沙块途中）不重复指路
-        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(true, true));
+    void dropsTakePriority() {
+        // 有沙掉落物优先 pickup 去捡
+        assertEquals(NukerMoveLogic.Action.PICKUP, NukerMoveLogic.decide(true, false, false));
+        assertEquals(NukerMoveLogic.Action.PICKUP, NukerMoveLogic.decide(true, true, false));
     }
 
     @Test
-    void noSandNear_wait() {
-        // 大范围也没沙：不掉队等待
-        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(false, false));
-        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(false, true));
+    void noDropsButSand_moveToSand() {
+        // 没掉落物但大范围还有沙 → 走去沙块
+        assertEquals(NukerMoveLogic.Action.MOVE_TO_SAND, NukerMoveLogic.decide(false, true, false));
+    }
+
+    @Test
+    void nothing_wait() {
+        // 没有掉落物也没沙 → 等
+        assertEquals(NukerMoveLogic.Action.WAIT, NukerMoveLogic.decide(false, false, false));
     }
 }
