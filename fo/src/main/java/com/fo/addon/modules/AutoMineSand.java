@@ -4,9 +4,12 @@ import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
+import com.fo.addon.utils.NearestBoxLogic;
 import com.fo.addon.utils.NukerMoveLogic;
 import com.fo.addon.utils.NukerSphericalLogic;
 import com.fo.addon.utils.OpenBoxRetryLogic;
+import com.fo.addon.utils.StoreOpenLogic;
+import com.fo.addon.utils.StoreSlotLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -142,6 +145,9 @@ public class AutoMineSand extends Module {
     private BlockPos supplyBoxPos = null;  // 缓存补给盒位置
     private final java.util.List<BlockPos> initScanBoxes = new java.util.ArrayList<>(); // 待扫描的盒子
     private int initScanIndex = 0;         // 扫描到第几个
+    private final Set<BlockPos> nameSyncedBoxes = new HashSet<>();  // INIT_SCAN 成功打开过（数据已同步）的盒子
+    private final Set<BlockPos> unopenableBoxes = new HashSet<>();  // 存沙/补给时反复打不开被放弃的盒子
+    private int openRetryCount = 0;        // 当前盒子连续开盒失败次数（StoreOpenLogic 用）
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -172,6 +178,9 @@ public class AutoMineSand extends Module {
         supplyStuckSlot = -1;
         initScanBoxes.clear();
         initScanIndex = 0;
+        nameSyncedBoxes.clear();
+        unopenableBoxes.clear();
+        openRetryCount = 0;
         nukerTarget = null;
         PathManagers.get().protectShulkerBoxes(true);
 
@@ -236,6 +245,11 @@ public class AutoMineSand extends Module {
             shulkerWaitTimer++;
             if (shulkerWaitTimer >= 10) { // 等10tick让服务器同步潜影盒数据
                 closeScreen();
+                // V4.14: 记录"成功打开过=数据已同步"的盒子，存沙候选只从这里选，
+                // 防止扫描时被 SKIP 的盒子（名字未知，可能是补给盒）被误当存沙盒
+                if (initScanIndex < initScanBoxes.size()) {
+                    nameSyncedBoxes.add(initScanBoxes.get(initScanIndex).toImmutable());
+                }
                 initScanIndex++;
                 shulkerWaitTimer = 0;
                 waitingShulkerOpen = true;
@@ -529,6 +543,8 @@ public class AutoMineSand extends Module {
             state = State.OPEN_SUPPLY;
             waitingShulkerOpen = true;
             shulkerWaitTimer = 0;
+            storeTickCounter = 0;   // V4.14: 每次开盒重置同步计数
+            openRetryCount = 0;
             openShulker(supply);
         } else if (!PathManagers.get().isPathing()) {
             // 没在寻路才重新指路；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
@@ -537,14 +553,29 @@ public class AutoMineSand extends Module {
     }
 
     private void tickOpenSupply() {
-        if (mc.currentScreen instanceof ShulkerBoxScreen) { doSupply(); return; }
-        if (waitingShulkerOpen) {
-            shulkerWaitTimer++;
-            if (shulkerWaitTimer > 40) { waitingShulkerOpen = false; state = State.MINING; }
-            return;
+        // V4.14: 对齐 miku handleGettingTools——开盒超时原地重试，不回 MINING
+        //（回 MINING 会因补给条件未满足立刻再触发 goToSupply→重新指路→转头，形成自转死循环）。
+        // 补给盒唯一、无法换盒，failLimit 给大值 = 持续原地重试直到打开。
+        boolean screenOpen = mc.currentScreen instanceof ShulkerBoxScreen;
+        if (screenOpen) storeTickCounter++; else shulkerWaitTimer++;
+        switch (StoreOpenLogic.decide(screenOpen, storeTickCounter, 3,
+                waitingShulkerOpen, shulkerWaitTimer, 40, openRetryCount, 1000000)) {
+            case SYNC_WAIT, WAIT_OPEN -> { }
+            case PROCEED -> { openRetryCount = 0; doSupply(); }
+            case RETRY_OPEN -> {
+                openRetryCount++;
+                shulkerWaitTimer = 0;
+                waitingShulkerOpen = true;
+                BlockPos supply = supplyBoxPos != null ? supplyBoxPos : findNamedShulker(supplyBoxName.get());
+                if (supply != null) openShulker(supply);
+            }
+            case GIVE_UP -> {
+                // 理论上到不了（failLimit 极大）；兜底防呆
+                waitingShulkerOpen = false;
+                closeScreen();
+                state = State.MINING;
+            }
         }
-        closeScreen();
-        state = State.MINING;
     }
 
     private void doSupply() {
@@ -612,11 +643,12 @@ public class AutoMineSand extends Module {
     private void goToStore() {
         BlockPos box = findOtherShulker();
         if (box == null) {
-            info("所有存沙潜影盒都已满，模块停止");
+            info("没有可用的存沙潜影盒（都已满或打不开），模块停止");
             toggle();
             return;
         }
         storeBoxPos = box;
+        openRetryCount = 0;
         info("前往存沙潜影盒");
         PathManagers.get().stop();
         state = State.GOING_STORE;
@@ -631,6 +663,8 @@ public class AutoMineSand extends Module {
             state = State.OPEN_STORE;
             waitingShulkerOpen = true;
             shulkerWaitTimer = 0;
+            storeTickCounter = 0;   // V4.14: 每次开盒重置同步计数（修复第二次开盒跳过同步等待）
+            openRetryCount = 0;
             openShulker(storeBoxPos);
         } else if (!PathManagers.get().isPathing()) {
             // 不在附近且没在寻路才重新指路（被攻击打断后自动续上）；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
@@ -661,10 +695,10 @@ public class AutoMineSand extends Module {
         int playerFirst = rows * 9;   // 27
         int playerLast = rows * 9 + 35; // 62
 
-        // 卡住检测：上次点的槽位还是沙=盒子满了
+        // 兜底卡住检测：服务器拒绝 QUICK_MOVE 时槽位回写仍有沙（同步判满漏掉的服务端真相）
         if (storeStuckSlot >= playerFirst && storeStuckSlot <= playerLast) {
             ItemStack s = sh.getSlot(storeStuckSlot).getStack();
-            if (!s.isEmpty() && (s.getItem() == Items.SAND || s.getItem() == Items.RED_SAND)) {
+            if (!s.isEmpty() && isSandItem(s)) {
                 storeStuckTicks++;
                 if (storeStuckTicks > 20) {
                     if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
@@ -679,22 +713,50 @@ public class AutoMineSand extends Module {
             storeStuckSlot = -1;
             storeStuckTicks = 0;
         }
-        // 从服务器同步的界面状态找沙，一次只移一组
-        for (int s = playerFirst; s <= playerLast; s++) {
+
+        // V4.14: miku 式同步判满——搬之前先读盒槽快照，装不下立即换盒，
+        // 不再依赖"点击后等 20 tick 卡住"的慢机制；且一次 tick 批量搬多组（上限 27）。
+        // 只搬沙（isSandItem 过滤），杜绝 miku 把其他物品也存进去的 bug。
+        int moved = 0;
+        for (int s = playerFirst; s <= playerLast && moved < 27; s++) {
             ItemStack stack = sh.getSlot(s).getStack();
-            if (!stack.isEmpty() && (stack.getItem() == Items.SAND || stack.getItem() == Items.RED_SAND)) {
-                quickMove(s);
-                storeStuckSlot = s;
+            if (stack.isEmpty() || !isSandItem(stack)) continue;
+            if (StoreSlotLogic.findSandTargetSlot(boxCounts(sh), boxIsSand(sh), 64, stack.getCount()) == -1) {
+                // 盒子对沙已满：立即换盒（旧逻辑要白等 20 tick）
+                if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
+                info("存沙盒已满，寻找下一个");
+                storeStuckSlot = -1;
                 storeStuckTicks = 0;
+                closeScreen();
+                goToStore();
                 return;
             }
+            quickMove(s);
+            storeStuckSlot = s;
+            moved++;
         }
-        // 没沙了，存完
-        storeStuckSlot = -1;
-        storeStuckTicks = 0;
-        closeScreen();
-        state = State.MINING;
-        info("存沙完成");
+        if (moved == 0) {
+            // 没沙了，存完（moved>0 但到上限时不关盒，下一 tick 继续搬）
+            storeStuckSlot = -1;
+            storeStuckTicks = 0;
+            closeScreen();
+            state = State.MINING;
+            info("存沙完成");
+        }
+    }
+
+    /** 盒槽快照：前 27 槽的数量 */
+    private int[] boxCounts(ScreenHandler sh) {
+        int[] c = new int[27];
+        for (int i = 0; i < 27 && i < sh.slots.size(); i++) c[i] = sh.getSlot(i).getStack().getCount();
+        return c;
+    }
+
+    /** 盒槽快照：前 27 槽是否沙 */
+    private boolean[] boxIsSand(ScreenHandler sh) {
+        boolean[] b = new boolean[27];
+        for (int i = 0; i < 27 && i < sh.slots.size(); i++) b[i] = isSandItem(sh.getSlot(i).getStack());
+        return b;
     }
 
     private boolean needNewShovel() {
