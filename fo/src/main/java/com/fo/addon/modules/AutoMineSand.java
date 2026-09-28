@@ -306,7 +306,7 @@ public class AutoMineSand extends Module {
             return;
         }
         info("补给盒: " + supplyBoxPos.toShortString());
-        BlockPos store = findOtherShulker();
+        BlockPos store = findNearestStoreBox();
         if (store == null) {
             error("未找到存沙潜影盒，模块停止");
             toggle();
@@ -641,7 +641,9 @@ public class AutoMineSand extends Module {
     }
 
     private void goToStore() {
-        BlockPos box = findOtherShulker();
+        // V4.15: 改用"名字已同步的最近盒"选存沙盒（对齐 V4.14 提交意图），
+        // 不再用 findOtherShulker 的扫描顺序首盒（可能横穿沙漠 / 误存补给盒）。
+        BlockPos box = findNearestStoreBox();
         if (box == null) {
             info("没有可用的存沙潜影盒（都已满或打不开），模块停止");
             toggle();
@@ -673,19 +675,30 @@ public class AutoMineSand extends Module {
     }
 
     private void tickOpenStore() {
-        if (mc.currentScreen instanceof ShulkerBoxScreen) {
-            storeTickCounter++;
-            if (storeTickCounter < 3) return; // 等服务器同步潜影盒内容
-            doStore();
-            return;
+        // V4.15: 对齐补给侧 tickOpenSupply——开盒超时原地重试（RETRY_OPEN）不回 MINING，
+        // 修复存沙侧"超时回挖矿 → 背包仍满 → goToStore → 重新指路转头 → 再失败"的自转死循环。
+        // 与补给侧区别：存沙盒可换，failLimit 用有限值（3），连续失败到顶标记该盒
+        // 打不开（unopenableBoxes）→ 换下一个存沙盒，而不是无脑回挖矿。
+        boolean screenOpen = mc.currentScreen instanceof ShulkerBoxScreen;
+        if (screenOpen) storeTickCounter++; else shulkerWaitTimer++;
+        switch (StoreOpenLogic.decide(screenOpen, storeTickCounter, 3,
+                waitingShulkerOpen, shulkerWaitTimer, 40, openRetryCount, 3)) {
+            case SYNC_WAIT, WAIT_OPEN -> { }
+            case PROCEED -> { openRetryCount = 0; doStore(); }
+            case RETRY_OPEN -> {
+                openRetryCount++;
+                shulkerWaitTimer = 0;
+                waitingShulkerOpen = true;
+                if (storeBoxPos != null) openShulker(storeBoxPos);
+            }
+            case GIVE_UP -> {
+                // 连续开盒失败：标记该盒打不开，换下一个存沙盒
+                if (storeBoxPos != null) unopenableBoxes.add(storeBoxPos.toImmutable());
+                info("存沙盒打不开，换下一个");
+                closeScreen();
+                goToStore();
+            }
         }
-        if (waitingShulkerOpen) {
-            shulkerWaitTimer++;
-            if (shulkerWaitTimer > 40) { waitingShulkerOpen = false; state = State.MINING; }
-            return;
-        }
-        closeScreen();
-        state = State.MINING;
     }
 
     private void doStore() {
@@ -810,25 +823,31 @@ public class AutoMineSand extends Module {
         return null;
     }
 
-    private BlockPos findOtherShulker() {
+    /**
+     * 从"名字已同步且非补给、未满、可打开"的候选中选三维最近的存沙盒（V4.15 接线）。
+     * 候选只取 nameSyncedBoxes（INIT_SCAN 成功打开过 = 名字已同步），
+     * 排除满盒(fullStoreBoxes)、打不开的盒(unopenableBoxes)、补给盒(名字含补给关键词)。
+     * 最近选择委托 NearestBoxLogic.select（纯逻辑，已有单测）。
+     */
+    private BlockPos findNearestStoreBox() {
         BlockPos c = mc.player.getBlockPos();
-        int r = searchRadius.get();
-        for (int x = -r; x <= r; x++)
-            for (int y = -r; y <= r; y++)
-                for (int z = -r; z <= r; z++) {
-                    BlockPos p = c.add(x, y, z);
-                    if (fullStoreBoxes.contains(p)) continue;
-                    BlockState s = mc.world.getBlockState(p);
-                    if (s.getBlock() instanceof ShulkerBoxBlock) {
-                        if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
-                            var n = be.getCustomName();
-                            if (n == null || !n.getString().contains(supplyBoxName.get())) return p;
-                        } else {
-                            return p;
-                        }
-                    }
-                }
-        return null;
+        java.util.List<int[]> candidates = new java.util.ArrayList<>();
+        java.util.List<BlockPos> boxes = new java.util.ArrayList<>();
+        for (BlockPos p : nameSyncedBoxes) {
+            if (fullStoreBoxes.contains(p) || unopenableBoxes.contains(p)) continue;
+            BlockState s = mc.world.getBlockState(p);
+            if (!(s.getBlock() instanceof ShulkerBoxBlock)) continue;
+            boolean supply = false;
+            if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
+                var n = be.getCustomName();
+                if (n != null && n.getString().contains(supplyBoxName.get())) supply = true;
+            }
+            if (supply) continue;
+            candidates.add(new int[]{p.getX(), p.getY(), p.getZ()});
+            boxes.add(p);
+        }
+        int idx = NearestBoxLogic.select(c.getX(), c.getY(), c.getZ(), candidates, Set.of());
+        return idx == -1 ? null : boxes.get(idx);
     }
 
     private int findShulkerItem(ScreenHandler handler, List<Item> items, int minDurability) {

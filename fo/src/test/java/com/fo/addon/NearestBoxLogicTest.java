@@ -37,6 +37,18 @@ public class NearestBoxLogicTest {
         assertEquals(1, NearestBoxLogic.select(0, 64, 0, boxes, Set.of(0)));
     }
 
+    // V4.15 存沙侧接线场景：补给盒 + 满盒同时被排除，剩下多个存沙盒里选最近的
+    @Test
+    void excludeSupplyAndFullPicksNearestStoreBox() {
+        List<int[]> boxes = List.of(
+            new int[]{1, 64, 0},     // 最近，但被排除（补给盒）
+            new int[]{3, 64, 0},     // 次近，被排除（已满）
+            new int[]{6, 64, 0},     // 第三近 → 应选它
+            new int[]{-10, 64, 0}    // 远
+        );
+        assertEquals(2, NearestBoxLogic.select(0, 64, 0, boxes, Set.of(0, 1)));
+    }
+
     // 全部被排除 → -1（模块据此报"所有存沙盒已满"）
     @Test
     void allExcludedReturnsMinusOne() {
