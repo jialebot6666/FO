@@ -133,6 +133,7 @@ public class AutoMineSand extends Module {
     private int tickTimer = 0;
     private int shulkerWaitTimer = 0;
     private boolean waitingShulkerOpen = false;
+    private boolean justClosed = false;  // V4.17: INIT_SCAN 关屏后只等1tick就推进，不固定等5tick
     private int openFailCount = 0;         // INIT_SCAN 连续打不开盒子的次数
     private BlockPos storeBoxPos = null;
     private final Set<BlockPos> fullStoreBoxes = new HashSet<>();
@@ -174,6 +175,7 @@ public class AutoMineSand extends Module {
         tickTimer = 0;
         shulkerWaitTimer = 0;
         waitingShulkerOpen = false;
+        justClosed = false;
         storeBoxPos = null;
         supplyBoxPos = null;
         fullStoreBoxes.clear();
@@ -245,10 +247,10 @@ public class AutoMineSand extends Module {
 
     /** INIT_SCAN：逐个打开附近潜影盒同步名字，开完后识别补给盒和存沙盒 */
     private void tickInitScan() {
-        // 开着潜影盒 → 等几tick让BlockEntity同步名字，然后关闭
+        // 开着潜影盒 → 等3tick（V4.17，原10tick）让服务器同步潜影盒名字，然后立即关闭
         if (mc.currentScreen instanceof ShulkerBoxScreen) {
             shulkerWaitTimer++;
-            if (shulkerWaitTimer >= 10) { // 等10tick让服务器同步潜影盒数据
+            if (shulkerWaitTimer >= 3) { // V4.17: 3tick足够服务器同步潜影盒数据（认名字不需要等0.5秒）
                 closeScreen();
                 // V4.14: 记录"成功打开过=数据已同步"的盒子，存沙候选只从这里选，
                 // 防止扫描时被 SKIP 的盒子（名字未知，可能是补给盒）被误当存沙盒
@@ -257,14 +259,19 @@ public class AutoMineSand extends Module {
                 }
                 initScanIndex++;
                 shulkerWaitTimer = 0;
-                waitingShulkerOpen = true;
+                justClosed = true;   // V4.17: 关屏后只等1tick就处理下一个盒子
                 openFailCount = 0;
             }
             return;
         }
+        // V4.17: 刚关屏，只等1tick就直接推进（原在 waitingShulkerOpen 里固定等5tick，太慢）
+        if (justClosed) {
+            justClosed = false;
+            return;
+        }
         if (waitingShulkerOpen) {
             shulkerWaitTimer++;
-            if (shulkerWaitTimer >= 5) { // 关完等5tick再开下一个
+            if (shulkerWaitTimer >= 5) { // 开盒交互后等界面打开/重试，保持5tick防误判打不开
                 waitingShulkerOpen = false;
                 shulkerWaitTimer = 0;
             }
