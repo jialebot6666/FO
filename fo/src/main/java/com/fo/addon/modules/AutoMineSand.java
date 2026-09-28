@@ -8,6 +8,7 @@ import com.fo.addon.utils.NearestBoxLogic;
 import com.fo.addon.utils.NukerMoveLogic;
 import com.fo.addon.utils.NukerSphericalLogic;
 import com.fo.addon.utils.OpenBoxRetryLogic;
+import com.fo.addon.utils.StandSpotLogic;
 import com.fo.addon.utils.StoreOpenLogic;
 import com.fo.addon.utils.StoreSlotLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
@@ -143,6 +144,10 @@ public class AutoMineSand extends Module {
     private int storeStuckTicks = 0;      // 卡住检测计数
     private int supplyStuckSlot = -1;      // 补给时上次点的槽位
     private BlockPos supplyBoxPos = null;  // 缓存补给盒位置
+    private BlockPos storeGoal = null;     // V4.16: 存沙寻路目标（盒子旁站立点，带 Y）
+    private boolean storeGoalIgnoreY = false; // V4.16: 站立点找不到（盒子浮空）退化为 GoalXZ
+    private BlockPos supplyGoal = null;    // V4.16: 补给寻路目标（盒子旁站立点，带 Y）
+    private boolean supplyGoalIgnoreY = false; // V4.16: 同上退化标志
     private final java.util.List<BlockPos> initScanBoxes = new java.util.ArrayList<>(); // 待扫描的盒子
     private int initScanIndex = 0;         // 扫描到第几个
     private final Set<BlockPos> nameSyncedBoxes = new HashSet<>();  // INIT_SCAN 成功打开过（数据已同步）的盒子
@@ -289,8 +294,11 @@ public class AutoMineSand extends Module {
             }
             case MOVE_TO -> {
                 if (!PathManagers.get().isPathing()) {
-                    // 没在寻路才重新指路；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
-                    PathManagers.get().moveTo(box, true);
+                    // V4.16: 先走到盒子旁站立点（带 Y），Y 轴不再被忽略——
+                    // 旧 GoalXZ 只给 xz，盒子在沙丘顶/坑里时走不到判定距离，开盒也够不到；
+                    // 站立点找不到（盒子浮空）才退化为 GoalXZ。
+                    BlockPos stand = findStandSpot(box);
+                    PathManagers.get().moveTo(stand != null ? stand : box, stand == null);
                 }
             }
         }
@@ -531,8 +539,12 @@ public class AutoMineSand extends Module {
         info("前往补给盒: " + reason);
         PathManagers.get().stop();
         state = State.GOING_SUPPLY;
-        // GoalXZ（ignoreY）：走到盒子 xz 位置即可，避免把实体方块当目标导致寻路绕圈
-        PathManagers.get().moveTo(supply, true);
+        // V4.16: 优先走到盒子旁的站立点（带 Y），Y 轴不再被忽略——
+        // 旧 GoalXZ(ignoreY) 只给 xz，盒子在沙丘顶/坑里时 3D 到达判定永远不满足、开盒也够不到。
+        // 找不到站立点（如盒子浮空）才退化为 GoalXZ。
+        supplyGoal = findStandSpot(supply);
+        supplyGoalIgnoreY = supplyGoal == null;
+        PathManagers.get().moveTo(supplyGoal != null ? supplyGoal : supply, supplyGoalIgnoreY);
     }
 
     private void tickGoingSupply() {
@@ -547,8 +559,13 @@ public class AutoMineSand extends Module {
             openRetryCount = 0;
             openShulker(supply);
         } else if (!PathManagers.get().isPathing()) {
-            // 没在寻路才重新指路；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
-            PathManagers.get().moveTo(supply, true);
+            // 没在寻路才重新指路（被攻击打断后自动续上）；V4.16: 重新指路同样用站立点（带 Y）
+            if (supplyGoal == null || mc.player.getBlockPos().getSquaredDistance(supplyGoal) > 6 * 6) {
+                // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
+                supplyGoal = findStandSpot(supply);
+                supplyGoalIgnoreY = supplyGoal == null;
+            }
+            PathManagers.get().moveTo(supplyGoal != null ? supplyGoal : supply, supplyGoalIgnoreY);
         }
     }
 
@@ -654,8 +671,12 @@ public class AutoMineSand extends Module {
         info("前往存沙潜影盒");
         PathManagers.get().stop();
         state = State.GOING_STORE;
-        // GoalXZ（ignoreY）：走到盒子 xz 位置即可，避免把实体方块当目标导致寻路绕圈
-        PathManagers.get().moveTo(box, true);
+        // V4.16: 优先走到盒子旁的站立点（带 Y），Y 轴不再被忽略——
+        // 旧 GoalXZ(ignoreY) 只给 xz，盒子在沙丘顶/坑里时 3D 到达判定永远不满足、开盒也够不到。
+        // 找不到站立点（如盒子浮空）才退化为 GoalXZ。
+        storeGoal = findStandSpot(box);
+        storeGoalIgnoreY = storeGoal == null;
+        PathManagers.get().moveTo(storeGoal != null ? storeGoal : box, storeGoalIgnoreY);
     }
 
     private void tickGoingStore() {
@@ -669,8 +690,13 @@ public class AutoMineSand extends Module {
             openRetryCount = 0;
             openShulker(storeBoxPos);
         } else if (!PathManagers.get().isPathing()) {
-            // 不在附近且没在寻路才重新指路（被攻击打断后自动续上）；用 GoalXZ（ignoreY）避免把实体方块当目标导致寻路绕圈
-            PathManagers.get().moveTo(storeBoxPos, true);
+            // 不在附近且没在寻路才重新指路（被攻击打断后自动续上）；V4.16: 重新指路同样用站立点（带 Y）
+            if (storeGoal == null || mc.player.getBlockPos().getSquaredDistance(storeGoal) > 6 * 6) {
+                // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
+                storeGoal = findStandSpot(storeBoxPos);
+                storeGoalIgnoreY = storeGoal == null;
+            }
+            PathManagers.get().moveTo(storeGoal != null ? storeGoal : storeBoxPos, storeGoalIgnoreY);
         }
     }
 
@@ -879,11 +905,52 @@ public class AutoMineSand extends Module {
 
     private void openShulker(BlockPos pos) {
         if (!mc.player.getBlockPos().isWithinDistance(pos, 5)) return;
+        // V4.16: 六面检测——按玩家眼睛相对盒子的位置选玩家正对的那个面交互
+        // （不再固定 UP：盒子顶面被其他方块盖住、或玩家站在盒子侧面/下方时，
+        // 固定 UP 的交互会被服务器按视线回溯拒绝，盒子永远打不开）。
+        Vec3d eye = mc.player.getEyePos();
+        Direction face = faceById(FacingLogic.bestFaceIndex(
+            eye.x, eye.y, eye.z, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5));
         // 统一转头模式（Ying/SlimefunHelper）：存视角→转头+发包→交互→恢复视角
-        InteractionUtils.interactBlockSafely(pos, Direction.UP);
+        InteractionUtils.interactBlockSafely(pos, face);
     }
 
     private void closeScreen() {
         if (mc.currentScreen instanceof HandledScreen) mc.player.closeHandledScreen();
+    }
+
+    /** 面 ID（FacingLogic.bestFaceIndex 返回值，与 Direction.ID 顺序一致）→ Direction */
+    private static Direction faceById(int id) {
+        return switch (id) {
+            case 0 -> Direction.DOWN;
+            case 1 -> Direction.UP;
+            case 2 -> Direction.NORTH;
+            case 3 -> Direction.SOUTH;
+            case 4 -> Direction.WEST;
+            default -> Direction.EAST;
+        };
+    }
+
+    /**
+     * 计算潜影盒旁的交互站立点（V4.16）：在 StandSpotLogic 生成的候选中（水平 ±2、
+     * Y 盒子Y-1..盒子Y+1），过滤"空气格 + 下方实心"（脚能站住），选三维距离玩家
+     * 最近的格作为寻路目标。玩家走到盒子同一层旁边，能点到盒子、开盒判定（≤5）成立。
+     * 找不到（如盒子浮空、四周无可站立格）返回 null，调用方退化为 GoalXZ。
+     */
+    private BlockPos findStandSpot(BlockPos box) {
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int[] c : StandSpotLogic.candidates(box.getX(), box.getY(), box.getZ(), 2)) {
+            m.set(c[0], c[1], c[2]);
+            if (!mc.world.getBlockState(m).isReplaceable()) continue;
+            if (!mc.world.getBlockState(m.down()).isSolidBlock(mc.world, m.down())) continue;
+            double d = mc.player.squaredDistanceTo(c[0] + 0.5, c[1] + 0.5, c[2] + 0.5);
+            if (d < bestD) {
+                bestD = d;
+                best = m.toImmutable();
+            }
+        }
+        return best;
     }
 }

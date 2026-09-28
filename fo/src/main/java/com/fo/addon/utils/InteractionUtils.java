@@ -23,7 +23,7 @@ public final class InteractionUtils {
     private InteractionUtils() {
     }
 
-    /** 转头对准方块并安全交互，交互后恢复原视角 */
+    /** 转头对准方块指定面的面中心并安全交互，交互后恢复原视角 */
     public static void interactBlockSafely(BlockPos pos, Direction face) {
         if (mc.player == null || mc.world == null) return;
 
@@ -31,9 +31,13 @@ public final class InteractionUtils {
         float oldPitch = mc.player.getPitch();
         float oldYaw = mc.player.getYaw();
 
-        // 2. atan2 计算目标角度并转头
+        // 2. 对准"面中心"（V4.16）：视线与交互点一致，反作弊按视线回溯能命中该面；
+        //    面由调用方按六面检测选定（不再固定盒子中心 + UP，顶面被盖/站位刁钻也能开）
+        double cx = pos.getX() + 0.5 + face.getOffsetX() * 0.5;
+        double cy = pos.getY() + 0.5 + face.getOffsetY() * 0.5;
+        double cz = pos.getZ() + 0.5 + face.getOffsetZ() * 0.5;
         float[] fp = FacingLogic.yawPitchTo(
-            pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
+            cx, cy, cz,
             mc.player.getX(), mc.player.getY() + mc.player.getStandingEyeHeight(), mc.player.getZ());
         mc.player.setYaw(fp[0]);
         mc.player.setPitch(fp[1]);
@@ -42,8 +46,8 @@ public final class InteractionUtils {
         mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
             fp[0], fp[1], mc.player.isOnGround(), mc.player.horizontalCollision));
 
-        // 4. 交互
-        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), face, pos, false);
+        // 4. 交互（命中点 = 面中心）
+        BlockHitResult hit = new BlockHitResult(new Vec3d(cx, cy, cz), face, pos, false);
         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
 
         // 5. 恢复原视角

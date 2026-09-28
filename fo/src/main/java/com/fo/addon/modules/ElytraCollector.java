@@ -3,6 +3,7 @@ package com.fo.addon.modules;
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
+import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.TrashDefaults;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
 import com.seedfinding.mccore.rand.ChunkRand;
@@ -1515,8 +1516,13 @@ supplyScanStart = 0;
         }
         // 打开重试：最多 5 次，每次间隔 1 秒 (storageTick 1/21/41/61/81)
         if (openRetry < 5 && storageTick == 1 + openRetry * 20) {
-            faceBlockForPlace(ecPos, Direction.UP);
-            interactAt(ecPos);
+            // V4.16: 六面检测——末影箱顶面可能被盖住、玩家也可能站在侧面/下方，
+            // 固定 UP 面交互会被服务器按视线回溯拒绝；改为选玩家正对的面交互
+            Vec3d eye = mc.player.getEyePos();
+            Direction face = faceById(FacingLogic.bestFaceIndex(
+                eye.x, eye.y, eye.z, ecPos.getX() + 0.5, ecPos.getY() + 0.5, ecPos.getZ() + 0.5));
+            faceBlockForPlace(ecPos, face);
+            interactAt(ecPos, face);
             openRetry++;
         }
         if (isContainerOpen()) {
@@ -2174,6 +2180,18 @@ supplyScanStart = 0;
     private void interactAt(BlockPos pos, Direction face) {
         var hit = new BlockHitResult(Vec3d.ofCenter(pos), face, pos, false);
         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
+    }
+
+    // 面 ID（FacingLogic.bestFaceIndex 返回值，与 Direction.ID 顺序一致）→ Direction
+    private static Direction faceById(int id) {
+        return switch (id) {
+            case 0 -> Direction.DOWN;
+            case 1 -> Direction.UP;
+            case 2 -> Direction.NORTH;
+            case 3 -> Direction.SOUTH;
+            case 4 -> Direction.WEST;
+            default -> Direction.EAST;
+        };
     }
 
     // 把视角转向目标方块面并同步给服务器 (反作弊要求视线与交互点一致，否则放置会被拦截)
