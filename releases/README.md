@@ -25,6 +25,7 @@
 | FO-V1.4a.jar | V1.4a | 白名单补齐 61 项 |
 | FO-V1.5.jar | V1.5 | 存鞘翅绝不用补给盒 + 无盒自动下线 |
 | FO-V2.3-09a0ad2.jar | V2.3 | 低Y退出真正退出游戏 |
+| FO-V4.15-c8142da.jar | V4.15 | 存沙路径重构：goToStore 选最近盒（只在 INIT_SCAN 同步过名字的盒中选，排除满盒/不可开盒）+ tickOpenStore 开盒超时原地重试不回 MINING |
 
 > 备注：8430096（AutoTrash 白名单修复）的云端交付链接已失效，
 > 本地无 jar 副本；其源码仍完整保留在 Git 历史中（commit 8430096），
