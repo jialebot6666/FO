@@ -56,4 +56,24 @@ public class StandSpotLogicTest {
         }
         assertTrue(found, "缺少与盒子同层的水平相邻候选");
     }
+
+    // V4.17: withoutBelow 过滤掉盒子正下方（Y-1 层），保留同一层与上一层——站到盒子下面开盒打不开
+    @Test
+    void withoutBelowRemovesBelowLayer() {
+        List<int[]> cs = StandSpotLogic.withoutBelow(64, StandSpotLogic.candidates(0, 64, 0, 2));
+        assertEquals(24 * 2, cs.size(), "过滤后应只剩同一层+上一层 = 48 个候选");
+        for (int[] c : cs) {
+            assertTrue(c[1] >= 64, "出现盒子正下方候选: " + c[1]);
+        }
+    }
+
+    // V4.17: withoutBelow 保留同层水平相邻候选（玩家站在盒子面前开盒的理想位置）
+    @Test
+    void withoutBelowKeepsSameLayerNeighbors() {
+        boolean found = false;
+        for (int[] c : StandSpotLogic.withoutBelow(64, StandSpotLogic.candidates(0, 64, 0, 1))) {
+            if (c[1] == 64 && Math.abs(c[0]) == 1 && c[2] == 0) { found = true; break; }
+        }
+        assertTrue(found, "过滤后缺少同层相邻候选");
+    }
 }

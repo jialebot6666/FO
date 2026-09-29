@@ -39,4 +39,19 @@ public final class StandSpotLogic {
         }
         return out;
     }
+
+    /**
+     * 过滤掉盒子正下方（Y < boxY）的候选（V4.17 新增）。
+     * 站到盒子下面开盒会被盒子挡住/服务器按视线回溯拒绝，永远打不开；
+     * 站立点只取盒子同一层/上一层的旁边格（"盒子面前"），寻路不会钻到盒子下面。
+     *
+     * @return 过滤后的候选列表（保留原顺序）
+     */
+    public static List<int[]> withoutBelow(int boxY, List<int[]> candidates) {
+        List<int[]> out = new ArrayList<>();
+        for (int[] c : candidates) {
+            if (c[1] >= boxY) out.add(c);
+        }
+        return out;
+    }
 }
