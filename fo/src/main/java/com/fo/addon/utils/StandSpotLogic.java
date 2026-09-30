@@ -54,4 +54,24 @@ public final class StandSpotLogic {
         }
         return out;
     }
+
+    /**
+     * 生成盒子紧邻格（水平 ±1，8 邻域）的站立点候选（V4.19 新增）。
+     * 玩家与盒子之间一格空隙都不留：站立点 = 盒子水平相邻格，Y 取盒子同层 + 上一层
+     * （盒子正下方 Y-1 层排除——站到盒子下面开盒打不开）。
+     * 调用方按世界条件过滤（空气格 + 下方实心）后选距玩家最近者。
+     *
+     * @return 候选坐标列表，每项 {x,y,z}：同层 8 个 + 上一层 8 个 = 16 个
+     */
+    public static List<int[]> adjacentCandidates(int boxX, int boxY, int boxZ) {
+        List<int[]> out = new ArrayList<>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue; // 盒子自身格
+                out.add(new int[]{boxX + dx, boxY, boxZ + dz});     // 同层
+                out.add(new int[]{boxX + dx, boxY + 1, boxZ + dz}); // 上一层
+            }
+        }
+        return out;
+    }
 }

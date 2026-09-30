@@ -22,6 +22,7 @@ public class BaritonePathManager implements IPathManager {
     private final Method pickupM;
     private final Constructor<?> goalXZCtor;
     private final Constructor<?> goalGetToBlockCtor;
+    private final Constructor<?> goalNearCtor;
 
     public static boolean isAvailable() {
         try {
@@ -67,6 +68,8 @@ public class BaritonePathManager implements IPathManager {
         // GoalXZ 没有 (BlockPos) 构造器，只有 (int,int) 和 (BetterBlockPos)
         goalXZCtor = Class.forName("baritone.api.pathing.goals.GoalXZ").getConstructor(int.class, int.class);
         goalGetToBlockCtor = Class.forName("baritone.api.pathing.goals.GoalGetToBlock").getConstructor(BlockPos.class);
+        // GoalNear(BlockPos, double)：精确到达——玩家中心进入目标格 range 内才算到达
+        goalNearCtor = Class.forName("baritone.api.pathing.goals.GoalNear").getConstructor(BlockPos.class, double.class);
     }
 
     @Override
@@ -92,6 +95,18 @@ public class BaritonePathManager implements IPathManager {
             Object goal = ignoreY
                 ? goalXZCtor.newInstance(pos.getX(), pos.getZ())
                 : goalGetToBlockCtor.newInstance(pos);
+            setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
+        } catch (ReflectiveOperationException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void moveToPrecise(BlockPos pos) {
+        try {
+            // GoalNear(pos, 0.5)：玩家中心进入目标格 0.5 格内才算到达，
+            // 站在盒子紧邻格正中，一格空间都不留（GoalGetToBlock 只到相邻格就停）。
+            Object goal = goalNearCtor.newInstance(pos, 0.5);
             setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
         } catch (ReflectiveOperationException e) {
             e.printStackTrace();

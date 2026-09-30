@@ -76,4 +76,27 @@ public class StandSpotLogicTest {
         }
         assertTrue(found, "过滤后缺少同层相邻候选");
     }
+
+    // V4.19: adjacentCandidates 生成盒子紧邻格（水平±1）= 同层 8 + 上一层 8 = 16，
+    // 不含盒子自身格、不含盒子正下方（Y-1）
+    @Test
+    void adjacentCandidatesCover16Spots() {
+        List<int[]> cs = StandSpotLogic.adjacentCandidates(0, 64, 0);
+        assertEquals(16, cs.size());
+        for (int[] c : cs) {
+            assertTrue(Math.abs(c[0]) <= 1 && Math.abs(c[2]) <= 1, "越出紧邻范围: " + c[0] + "," + c[2]);
+            assertTrue(c[1] == 64 || c[1] == 65, "Y 不在同层/上一层: " + c[1]);
+            assertFalse(c[0] == 0 && c[1] == 64 && c[2] == 0, "盒子自身格未被排除");
+        }
+    }
+
+    // V4.19: 紧邻格必须包含同层水平相邻格（玩家与盒子一格空隙都不留的交互位）
+    @Test
+    void adjacentCandidatesIncludeSameLayerNeighbors() {
+        boolean found = false;
+        for (int[] c : StandSpotLogic.adjacentCandidates(0, 64, 0)) {
+            if (c[1] == 64 && Math.abs(c[0]) == 1 && c[2] == 0) { found = true; break; }
+        }
+        assertTrue(found, "紧邻候选缺少同层水平相邻格");
+    }
 }

@@ -220,8 +220,13 @@ public class AutoMineSand extends Module {
 
         // 开着潜影盒时跳过 delay，每 tick 都处理存取
         boolean inShulker = mc.currentScreen instanceof ShulkerBoxScreen;
+        // V4.19: INIT_SCAN/GOING_*/OPEN_* 状态跳过操作延迟——寻路到达、开盒重试必须
+        // 立即响应（delay=5 时 40 tick 超时被放大成 10 秒，卡顿感来自这里）；
+        // 只有 MINING 保留节流（挖沙发包本身不需要每 tick 决策）。
+        boolean fastState = state == State.INIT_SCAN || state == State.GOING_SUPPLY
+            || state == State.OPEN_SUPPLY || state == State.GOING_STORE || state == State.OPEN_STORE;
 
-        if (!inShulker && tickTimer > 0) { tickTimer--; return; }
+        if (!inShulker && !fastState && tickTimer > 0) { tickTimer--; return; }
 
         switch (state) {
             case MINING -> tickMining();
@@ -232,7 +237,7 @@ public class AutoMineSand extends Module {
             case OPEN_STORE -> tickOpenStore();
         }
 
-        if (!inShulker) tickTimer = delay.get();
+        if (!inShulker && !fastState) tickTimer = delay.get();
     }
 
     /** 收集附近所有潜影盒位置 */
@@ -287,19 +292,21 @@ public class AutoMineSand extends Module {
             return;
         }
         BlockPos box = initScanBoxes.get(initScanIndex);
-        // V4.17: 每个盒子都先寻路到它"面前"的站立点再打开（同一层/上一层旁边格，绝不到盒子
-        // 正下方——站到盒子下面开盒会被视线回溯拒绝，永远打不开）。站立点每盒缓存一次。
+        // V4.19: 每个盒子都先寻路到它"面前"的紧邻站立点（水平±1，同层/上一层，绝不到盒子
+        // 正下方）再打开——玩家与盒子一格空间都不留，六面检测自然选正对的侧面开盒。
+        // 站立点每盒缓存一次，到达判定 = 玩家中心在站立点格 1 格内（原 2 格太松，
+        // GoalGetToBlock 停点距站立点 1 格就满足，等于没寻路就开）。
         if (!box.equals(initScanStandBox)) {
             initScanStand = findStandSpot(box);
             initScanStandBox = box;
         }
         boolean atStand = initScanStand != null
             ? mc.player.squaredDistanceTo(
-                initScanStand.getX() + 0.5, initScanStand.getY() + 0.5, initScanStand.getZ() + 0.5) <= 4.0
+                initScanStand.getX() + 0.5, initScanStand.getY() + 0.5, initScanStand.getZ() + 0.5) <= 1.0
             : mc.player.getBlockPos().isWithinDistance(box, 3); // 盒子悬空无站立点，退化原3格判定
         switch (OpenBoxRetryLogic.decide(atStand, openFailCount, 3)) {
             case TRY_OPEN -> {
-                // 已站在盒子面前 → 六面检测开盒（玩家正对的侧面，不会从下面开）
+                // 已站在盒子紧邻格 → 六面检测开盒（玩家正对的侧面，不会从下面开）
                 openShulker(box);
                 shulkerWaitTimer = 0;
                 waitingShulkerOpen = true;
@@ -311,10 +318,14 @@ public class AutoMineSand extends Module {
                 initScanIndex++;
             }
             case MOVE_TO -> {
-                // V4.17: 寻路到盒子面前的站立点（带 Y），站在盒子同一层旁边，开盒判定成立；
-                // 站立点找不到（盒子浮空）才退化为 GoalXZ。
+                // V4.19: 精确寻路到盒子面前的紧邻站立点（GoalNear 0.5，玩家中心进入格内，
+                // 一格空间都不留）；站立点找不到（盒子浮空）才退化为 GoalXZ。
                 if (!PathManagers.get().isPathing()) {
-                    PathManagers.get().moveTo(initScanStand != null ? initScanStand : box, initScanStand == null);
+                    if (initScanStand != null) {
+                        PathManagers.get().moveToPrecise(initScanStand);
+                    } else {
+                        PathManagers.get().moveTo(box, true);
+                    }
                 }
             }
         }
@@ -566,7 +577,18 @@ public class AutoMineSand extends Module {
     private void tickGoingSupply() {
         BlockPos supply = supplyBoxPos != null ? supplyBoxPos : findNamedShulker(supplyBoxName.get());
         if (supply == null) { state = State.MINING; return; }
-        if (mc.player.getBlockPos().isWithinDistance(supply, 3)) {
+        // V4.19: 到达判定 = 玩家中心在站立点格 1 格内（紧贴盒子旁），不再用"盒子 3 格"——
+        // 3 格判定让玩家停在盒子 2-3 格处够不到开盒，陷入抬头重试循环。
+        if (supplyGoal == null || mc.player.getBlockPos().getSquaredDistance(supplyGoal) > 6 * 6) {
+            // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
+            supplyGoal = findStandSpot(supply);
+            supplyGoalIgnoreY = supplyGoal == null;
+        }
+        boolean atStand = supplyGoal != null
+            ? mc.player.squaredDistanceTo(
+                supplyGoal.getX() + 0.5, supplyGoal.getY() + 0.5, supplyGoal.getZ() + 0.5) <= 1.0
+            : mc.player.getBlockPos().isWithinDistance(supply, 3); // 盒子浮空无站立点，退化3格判定
+        if (atStand) {
             PathManagers.get().stop();
             state = State.OPEN_SUPPLY;
             waitingShulkerOpen = true;
@@ -575,24 +597,24 @@ public class AutoMineSand extends Module {
             openRetryCount = 0;
             openShulker(supply);
         } else if (!PathManagers.get().isPathing()) {
-            // 没在寻路才重新指路（被攻击打断后自动续上）；V4.16: 重新指路同样用站立点（带 Y）
-            if (supplyGoal == null || mc.player.getBlockPos().getSquaredDistance(supplyGoal) > 6 * 6) {
-                // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
-                supplyGoal = findStandSpot(supply);
-                supplyGoalIgnoreY = supplyGoal == null;
+            // 没在寻路才重新指路（被攻击打断后自动续上）；V4.19: 精确寻路到站立点格内
+            if (supplyGoal != null) {
+                PathManagers.get().moveToPrecise(supplyGoal);
+            } else {
+                PathManagers.get().moveTo(supply, true);
             }
-            PathManagers.get().moveTo(supplyGoal != null ? supplyGoal : supply, supplyGoalIgnoreY);
         }
     }
 
     private void tickOpenSupply() {
         // V4.14: 对齐 miku handleGettingTools——开盒超时原地重试，不回 MINING
         //（回 MINING 会因补给条件未满足立刻再触发 goToSupply→重新指路→转头，形成自转死循环）。
-        // 补给盒唯一、无法换盒，failLimit 给大值 = 持续原地重试直到打开。
+        // V4.19: 补给盒打不开连续 5 次（failLimit=5）直接报错停模块——
+        // 旧 failLimit=1000000 意味着永远循环"转头→等→转头"，打不开就不停。
         boolean screenOpen = mc.currentScreen instanceof ShulkerBoxScreen;
         if (screenOpen) storeTickCounter++; else shulkerWaitTimer++;
         switch (StoreOpenLogic.decide(screenOpen, storeTickCounter, 3,
-                waitingShulkerOpen, shulkerWaitTimer, 40, openRetryCount, 1000000)) {
+                waitingShulkerOpen, shulkerWaitTimer, 40, openRetryCount, 5)) {
             case SYNC_WAIT, WAIT_OPEN -> { }
             case PROCEED -> { openRetryCount = 0; doSupply(); }
             case RETRY_OPEN -> {
@@ -603,10 +625,11 @@ public class AutoMineSand extends Module {
                 if (supply != null) openShulker(supply);
             }
             case GIVE_UP -> {
-                // 理论上到不了（failLimit 极大）；兜底防呆
+                // V4.19: 连续 5 次打不开，报错停模块（不再无限循环重试）
                 waitingShulkerOpen = false;
                 closeScreen();
-                state = State.MINING;
+                error("补给盒连续 5 次打不开，模块停止（请检查补给盒位置/是否被方块盖住）");
+                toggle();
             }
         }
     }
@@ -697,7 +720,18 @@ public class AutoMineSand extends Module {
 
     private void tickGoingStore() {
         if (storeBoxPos == null) { state = State.MINING; return; }
-        if (mc.player.getBlockPos().isWithinDistance(storeBoxPos, 3)) {
+        // V4.19: 到达判定 = 玩家中心在站立点格 1 格内（紧贴盒子旁），不再用"盒子 3 格"——
+        // 3 格判定让玩家停在盒子 2-3 格处够不到开盒，陷入抬头重试循环。
+        if (storeGoal == null || mc.player.getBlockPos().getSquaredDistance(storeGoal) > 6 * 6) {
+            // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
+            storeGoal = findStandSpot(storeBoxPos);
+            storeGoalIgnoreY = storeGoal == null;
+        }
+        boolean atStand = storeGoal != null
+            ? mc.player.squaredDistanceTo(
+                storeGoal.getX() + 0.5, storeGoal.getY() + 0.5, storeGoal.getZ() + 0.5) <= 1.0
+            : mc.player.getBlockPos().isWithinDistance(storeBoxPos, 3); // 盒子浮空无站立点，退化3格判定
+        if (atStand) {
             PathManagers.get().stop();
             state = State.OPEN_STORE;
             waitingShulkerOpen = true;
@@ -706,13 +740,12 @@ public class AutoMineSand extends Module {
             openRetryCount = 0;
             openShulker(storeBoxPos);
         } else if (!PathManagers.get().isPathing()) {
-            // 不在附近且没在寻路才重新指路（被攻击打断后自动续上）；V4.16: 重新指路同样用站立点（带 Y）
-            if (storeGoal == null || mc.player.getBlockPos().getSquaredDistance(storeGoal) > 6 * 6) {
-                // 站立点失效（到达过/被破坏/离太远）时重新计算，保证目标始终带 Y
-                storeGoal = findStandSpot(storeBoxPos);
-                storeGoalIgnoreY = storeGoal == null;
+            // 不在站立点且没在寻路才重新指路（被攻击打断后自动续上）；V4.19: 精确寻路到站立点格内
+            if (storeGoal != null) {
+                PathManagers.get().moveToPrecise(storeGoal);
+            } else {
+                PathManagers.get().moveTo(storeBoxPos, true);
             }
-            PathManagers.get().moveTo(storeGoal != null ? storeGoal : storeBoxPos, storeGoalIgnoreY);
         }
     }
 
@@ -948,21 +981,26 @@ public class AutoMineSand extends Module {
     }
 
     /**
-     * 计算潜影盒旁的交互站立点（V4.16）：在 StandSpotLogic 生成的候选中（水平 ±2、
-     * Y 盒子Y-1..盒子Y+1），过滤"空气格 + 下方实心"（脚能站住），选三维距离玩家
-     * 最近的格作为寻路目标。玩家走到盒子同一层旁边，能点到盒子、开盒判定（≤5）成立。
+     * 计算潜影盒旁的交互站立点（V4.19）：优先盒子紧邻格（水平 ±1，同层/上一层）——
+     * 玩家与盒子之间一格空隙都不留，站到盒子旁边同一层，六面检测自然选玩家正对的
+     * 侧面开盒；紧邻格全被占/悬空才放宽到水平 ±2（仍排除盒子正下方）。
+     * 过滤"空气格 + 下方实心"（脚能站住），选三维距离玩家最近的格作为寻路目标。
      * 找不到（如盒子浮空、四周无可站立格）返回 null，调用方退化为 GoalXZ。
      */
     private BlockPos findStandSpot(BlockPos box) {
+        BlockPos best = pickStandSpot(box, StandSpotLogic.adjacentCandidates(box.getX(), box.getY(), box.getZ()));
+        if (best != null) return best;
+        return pickStandSpot(box, StandSpotLogic.withoutBelow(
+            box.getY(),
+            StandSpotLogic.candidates(box.getX(), box.getY(), box.getZ(), 2)));
+    }
+
+    /** 从候选里选"空气格 + 下方实心 + 距玩家最近"的站立点（世界条件过滤） */
+    private BlockPos pickStandSpot(BlockPos box, java.util.List<int[]> cands) {
         BlockPos.Mutable m = new BlockPos.Mutable();
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
-        for (int[] c : StandSpotLogic.withoutBelow(
-            box.getY(),
-            StandSpotLogic.candidates(box.getX(), box.getY(), box.getZ(), 2))) {
-            // V4.17: 候选已排除盒子正下方（Y-1 层）——站到盒子下面开盒会被盒子挡住/视线回溯
-            // 拒绝，永远打不开；只站盒子同一层/上一层的旁边格（"盒子面前"）。
-            if (c[1] < box.getY()) continue;
+        for (int[] c : cands) {
             m.set(c[0], c[1], c[2]);
             if (!mc.world.getBlockState(m).isReplaceable()) continue;
             if (!mc.world.getBlockState(m.down()).isSolidBlock(mc.world, m.down())) continue;
