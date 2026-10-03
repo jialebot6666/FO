@@ -699,40 +699,81 @@ public class AutoMineSand extends Module {
             }
             int checkSlot = supplyStuckSlot;
             ItemStack s = handler.getSlot(checkSlot).getStack();
-            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 2) {
-                // V4.26: 严格等"选中槽是够耐久的铲子"（swap 真正完成才放行）。
-                // 原"等非空"在选中槽原本有物品（如沙子/旧铲）时会提前误判通过 → 提前关盒 → swap 包作废 → 新铲落背包
-                boolean shovelOnHand = SHOVELS.contains(s.getItem()) &&
-                    (!s.isDamageable() ||
-                        (s.getMaxDamage() - s.getDamage()) > shovelMinDurability.get());
-                if (!shovelOnHand) return;
-                supplyStuckSlot = -1;
-                supplyWaitNotEmpty = false;
-                supplyWaitTick = 0;
-                // 新铲已上手 → 放回旧铲
-                supplyPhase = 3;
-                int oldShovel = findWornOutShovelInPlayer(handler);
-                if (oldShovel != -1) {
-                    quickMove(oldShovel);
-                    supplyStuckSlot = oldShovel;
+            if (supplyJob == SupplyJob.SHOVEL) {
+                // === V4.27 替换流程（选中槽是铲子时）：主手旧铲 ↔ 盒新铲直接交换 ===
+                if (supplyPhase == 1) {
+                    // 等选中槽空（旧铲已拿起，cursor=旧铲）→ 交换盒新铲
+                    if (!s.isEmpty()) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    int newSlot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
+                    if (newSlot == -1) {
+                        // 盒里没有够耐久的铲子 → 先把 cursor 上的旧铲放回主手（防丢铲）→ 再报错停
+                        pickup(mc.player.getInventory().getSelectedSlot() + 27);
+                        supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
+                        supplyWaitNotEmpty = true;
+                        supplyPhase = 9;
+                        supplyWaitTick = 0;
+                        return;
+                    }
+                    pickup(newSlot); // 交换：盒槽=旧铲, cursor=新铲（无空位要求，盒满也能换）
+                    supplyStuckSlot = newSlot;
+                    supplyPhase = 2;
+                    supplyWaitTick = 0;
                     return;
                 }
-                // 背包没有旧铲（swap 时已被换走）→ 铲子流程完成，关盒
-                supplyPhase = 0;
-                supplyJob = SupplyJob.NONE;
-                closeScreen();
-                state = State.MINING;
-                return;
-            }
-            if (supplyWaitNotEmpty ? s.isEmpty() : !s.isEmpty()) return;
-            supplyStuckSlot = -1;
-            supplyWaitNotEmpty = false;
-            supplyWaitTick = 0;
-            // V4.25: 铲子流程 phase 状态机——拿新铲(1)→切主手(2)→放旧铲(3)→关盒
-            if (supplyJob == SupplyJob.SHOVEL) {
-                if (supplyPhase == 1) {
-                    // 刚拿完新铲（盒槽已空）→ 确定性切到主手选中槽，不再靠 quickMove 随机落点
-                    supplyPhase = 2;
+                if (supplyPhase == 2) {
+                    // 等 cursor 是够耐久的铲子（交换完成）→ 放下到选中槽
+                    ItemStack cursor = handler.getCursorStack();
+                    boolean cursorNewShovel = SHOVELS.contains(cursor.getItem()) &&
+                        (!cursor.isDamageable() ||
+                            (cursor.getMaxDamage() - cursor.getDamage()) > shovelMinDurability.get());
+                    if (!cursorNewShovel) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    pickup(mc.player.getInventory().getSelectedSlot() + 27); // 放下新铲（选中槽已空）
+                    supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
+                    supplyWaitNotEmpty = true;
+                    supplyPhase = 3;
+                    supplyWaitTick = 0;
+                    return;
+                }
+                if (supplyPhase == 3) {
+                    // 等选中槽是够耐久的铲子（新铲确认上手）→ 完成关盒
+                    boolean shovelOnHand = SHOVELS.contains(s.getItem()) &&
+                        (!s.isDamageable() ||
+                            (s.getMaxDamage() - s.getDamage()) > shovelMinDurability.get());
+                    if (!shovelOnHand) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    supplyPhase = 0;
+                    supplyJob = SupplyJob.NONE;
+                    closeScreen();
+                    state = State.MINING;
+                    return;
+                }
+                if (supplyPhase == 9) {
+                    // 旧铲已放回主手 → 报错停（盒里没有够耐久的铲子）
+                    if (s.isEmpty()) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    error("补给盒里没有够耐久的铲子了，模块停止");
+                    closeScreen();
+                    toggle();
+                    return;
+                }
+                // === V4.26 兜底流程（选中槽被杂物占用时）：quickMove 拿新铲 → swap 切主手 → 放旧铲 ===
+                if (supplyPhase == 11) {
+                    // 等盒槽空（quickMove 完成）→ 切主手
+                    if (!s.isEmpty()) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    supplyPhase = 12;
                     FindItemResult r = InvUtils.find(itemStack ->
                         SHOVELS.contains(itemStack.getItem()) &&
                         (!itemStack.isDamageable() ||
@@ -746,12 +787,39 @@ public class AutoMineSand extends Module {
                     }
                     InvUtils.swap(r.slot(), false); // 快捷栏槽=直接切选中；背包槽=交换到选中槽
                     supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
-                    supplyWaitNotEmpty = true;      // phase=2 专用判断：等选中槽是够耐久铲子
+                    supplyWaitNotEmpty = true;
                     supplyWaitTick = 0;
                     return;
                 }
-                if (supplyPhase == 3) {
+                if (supplyPhase == 12) {
+                    // 等选中槽是够耐久的铲子（swap 真正完成）→ 放回旧铲
+                    boolean shovelOnHand = SHOVELS.contains(s.getItem()) &&
+                        (!s.isDamageable() ||
+                            (s.getMaxDamage() - s.getDamage()) > shovelMinDurability.get());
+                    if (!shovelOnHand) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
+                    supplyPhase = 13;
+                    int oldShovel = findWornOutShovelInPlayer(handler);
+                    if (oldShovel != -1) {
+                        quickMove(oldShovel);
+                        supplyStuckSlot = oldShovel;
+                        return;
+                    }
+                    // 背包没有旧铲（swap 时已被换走）→ 铲子流程完成，关盒
+                    supplyPhase = 0;
+                    supplyJob = SupplyJob.NONE;
+                    closeScreen();
+                    state = State.MINING;
+                    return;
+                }
+                if (supplyPhase == 13) {
                     // 刚放完旧铲 → 完成关盒
+                    if (!s.isEmpty()) return;
+                    supplyStuckSlot = -1;
+                    supplyWaitNotEmpty = false;
+                    supplyWaitTick = 0;
                     supplyPhase = 0;
                     supplyJob = SupplyJob.NONE;
                     closeScreen();
@@ -759,6 +827,10 @@ public class AutoMineSand extends Module {
                     return;
                 }
             }
+            if (supplyWaitNotEmpty ? s.isEmpty() : !s.isEmpty()) return;
+            supplyStuckSlot = -1;
+            supplyWaitNotEmpty = false;
+            supplyWaitTick = 0;
             if (supplyJob == SupplyJob.FOOD) {
                 // 拿完一组食物 → 关盒（不重入找食物槽——盒槽已被拿空，重找会误报"没有食物"）
                 supplyPhase = 0;
@@ -772,17 +844,27 @@ public class AutoMineSand extends Module {
         // V4.23: 一次补给流程只做一件事（tickMining 触发时锁定的 supplyJob），补完关盒回挖矿
         switch (supplyJob) {
             case SHOVEL -> {
-                // 先拿新铲（防中途打断手无铲子）→ 回写后切主手 → 放旧铲 → 关盒
-                int newSlot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
-                if (newSlot == -1) {
-                    error("补给盒里没有够耐久的铲子了，模块停止");
-                    closeScreen();
-                    toggle();
-                    return;
+                // V4.27: 替换为主——选中槽是铲子时直接"主手旧铲 ↔ 盒新铲"交换（无空位要求/无随机落点/无竞态）；
+                // 选中槽被杂物占用时回退 V4.26 兜底流程（quickMove+swap）
+                ItemStack selected = handler.getSlot(mc.player.getInventory().getSelectedSlot() + 27).getStack();
+                if (SHOVELS.contains(selected.getItem())) {
+                    pickup(mc.player.getInventory().getSelectedSlot() + 27); // 拿起主手旧铲
+                    supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
+                    supplyPhase = 1;
+                    supplyWaitTick = 0;
+                } else {
+                    int newSlot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
+                    if (newSlot == -1) {
+                        error("补给盒里没有够耐久的铲子了，模块停止");
+                        closeScreen();
+                        toggle();
+                        return;
+                    }
+                    quickMove(newSlot);
+                    supplyStuckSlot = newSlot;
+                    supplyPhase = 11;
+                    supplyWaitTick = 0;
                 }
-                quickMove(newSlot);
-                supplyStuckSlot = newSlot;
-                supplyPhase = 1;
             }
             case FOOD -> {
                 // 锁死一组：背包所选食物为 0 触发，shift 整组 64 恰好一组，无叠加超量
@@ -1140,6 +1222,13 @@ public class AutoMineSand extends Module {
         mc.interactionManager.clickSlot(
             mc.player.currentScreenHandler.syncId, slot, 0,
             SlotActionType.QUICK_MOVE, mc.player);
+    }
+
+    /** V4.27: PICKUP 点击（拿起/放下/交换）——替换流程的基础操作 */
+    private void pickup(int slot) {
+        mc.interactionManager.clickSlot(
+            mc.player.currentScreenHandler.syncId, slot, 0,
+            SlotActionType.PICKUP, mc.player);
     }
 
     private void openShulker(BlockPos pos) {
