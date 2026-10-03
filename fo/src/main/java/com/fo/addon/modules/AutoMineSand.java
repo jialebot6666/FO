@@ -166,7 +166,8 @@ public class AutoMineSand extends Module {
     private int openRetryCount = 0;        // 当前盒子连续开盒失败次数（StoreOpenLogic 用）
     private final Set<BlockPos> supplyLikeBoxes = new HashSet<>(); // V4.23: 内容指纹候选（盒内含钻石/合金铲，名字丢失兜底）
     private SupplyJob supplyJob = SupplyJob.NONE; // V4.23: 本次补给流程任务（一次只做一件事）
-    private int supplyPhase = 0;            // V4.23: 补铲子流程阶段（0=未开始 1=已拿新铲待放旧铲 2=已放旧铲）
+    private int supplyPhase = 0;            // V4.25: 补铲子流程阶段（0=未开始 1=已拿新铲 2=已切主手 3=已放旧铲）
+    private boolean supplyWaitNotEmpty = false; // V4.25: 回写等待方向（false=等槽空, true=等槽非空，切主手确认用）
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -210,6 +211,7 @@ public class AutoMineSand extends Module {
         supplyLikeBoxes.clear();
         supplyJob = SupplyJob.NONE;
         supplyPhase = 0;
+        supplyWaitNotEmpty = false;
         openRetryCount = 0;
         nukerTarget = null;
         PathManagers.get().protectShulkerBoxes(true);
@@ -416,6 +418,15 @@ public class AutoMineSand extends Module {
     }
 
     private void tickMining() {
+        // V4.25(A): 挖掘前自动切铲子到主手——手持不是铲子时，从背包/快捷栏找够耐久的铲子切到选中槽。
+        // 不依赖补给流程的落点：任何来源的铲子都自动上手（AutoTree 同款 InvUtils.swap 用法）。
+        if (!SHOVELS.contains(mc.player.getMainHandStack().getItem())) {
+            FindItemResult r = InvUtils.find(itemStack ->
+                SHOVELS.contains(itemStack.getItem()) &&
+                (!itemStack.isDamageable() ||
+                    (itemStack.getMaxDamage() - itemStack.getDamage()) > shovelMinDurability.get()));
+            if (r.found()) InvUtils.swap(r.slot(), false);
+        }
         // V4.23: 触发时锁定本次补给任务（一次补给流程只做一件事，补完关盒回挖矿）
         if (needNewShovel()) { supplyJob = SupplyJob.SHOVEL; goToSupply("铲子耐久不足"); return; }
         if (foodCount(foodItem()) < 1) { supplyJob = SupplyJob.FOOD; goToSupply(foodType.get().label + "不足"); return; }
@@ -675,35 +686,58 @@ public class AutoMineSand extends Module {
 
     private void doSupply() {
         ScreenHandler handler = mc.player.currentScreenHandler;
-        // 等上次点的槽位同步完（supplyStuckSlot < 27 盒槽=拿物资，>= 27 背包槽=放回旧铲）
+        // 等上次点击的槽位同步完（supplyWaitNotEmpty=false 等槽空=拿取/放回盒；true 等槽非空=确认新铲已到主手）
         if (supplyStuckSlot >= 0) {
             int checkSlot = supplyStuckSlot;
             ItemStack s = handler.getSlot(checkSlot).getStack();
-            if (!s.isEmpty()) return;
+            if (supplyWaitNotEmpty ? s.isEmpty() : !s.isEmpty()) return;
             supplyStuckSlot = -1;
-            // V4.23: 铲子流程——刚拿完新铲（phase=1）→ 放回旧铲；刚放完旧铲（phase=2）→ 关盒
-            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 1) {
-                supplyPhase = 2;
-                int oldShovel = findWornOutShovelInPlayer(handler);
-                if (oldShovel != -1) {
-                    quickMove(oldShovel);
-                    supplyStuckSlot = oldShovel;
+            supplyWaitNotEmpty = false;
+            // V4.25: 铲子流程 phase 状态机——拿新铲(1)→切主手(2)→放旧铲(3)→关盒
+            if (supplyJob == SupplyJob.SHOVEL) {
+                if (supplyPhase == 1) {
+                    // 刚拿完新铲（盒槽已空）→ 确定性切到主手选中槽，不再靠 quickMove 随机落点
+                    supplyPhase = 2;
+                    FindItemResult r = InvUtils.find(itemStack ->
+                        SHOVELS.contains(itemStack.getItem()) &&
+                        (!itemStack.isDamageable() ||
+                            (itemStack.getMaxDamage() - itemStack.getDamage()) > shovelMinDurability.get()));
+                    if (!r.found()) {
+                        // 新铲拿丢了（异常）→ 报错停，防无铲子空转
+                        error("拿到的新铲子丢失，模块停止");
+                        closeScreen();
+                        toggle();
+                        return;
+                    }
+                    InvUtils.swap(r.slot(), false); // 快捷栏槽=直接切选中；背包槽=交换到选中槽
+                    supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
+                    supplyWaitNotEmpty = true;      // 等选中槽非空 = 新铲确认上手
                     return;
                 }
-                // 背包没有旧铲 → 铲子流程完成，关盒
-                supplyPhase = 0;
-                supplyJob = SupplyJob.NONE;
-                closeScreen();
-                state = State.MINING;
-                return;
-            }
-            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 2) {
-                // 刚放完旧铲 → 完成关盒
-                supplyPhase = 0;
-                supplyJob = SupplyJob.NONE;
-                closeScreen();
-                state = State.MINING;
-                return;
+                if (supplyPhase == 2) {
+                    // 新铲已在主手 → 放回旧铲
+                    supplyPhase = 3;
+                    int oldShovel = findWornOutShovelInPlayer(handler);
+                    if (oldShovel != -1) {
+                        quickMove(oldShovel);
+                        supplyStuckSlot = oldShovel;
+                        return;
+                    }
+                    // 背包没有旧铲（swap 时已被换走/在快捷栏）→ 铲子流程完成，关盒
+                    supplyPhase = 0;
+                    supplyJob = SupplyJob.NONE;
+                    closeScreen();
+                    state = State.MINING;
+                    return;
+                }
+                if (supplyPhase == 3) {
+                    // 刚放完旧铲 → 完成关盒
+                    supplyPhase = 0;
+                    supplyJob = SupplyJob.NONE;
+                    closeScreen();
+                    state = State.MINING;
+                    return;
+                }
             }
             if (supplyJob == SupplyJob.FOOD) {
                 // 拿完一组食物 → 关盒（不重入找食物槽——盒槽已被拿空，重找会误报"没有食物"）
@@ -718,7 +752,7 @@ public class AutoMineSand extends Module {
         // V4.23: 一次补给流程只做一件事（tickMining 触发时锁定的 supplyJob），补完关盒回挖矿
         switch (supplyJob) {
             case SHOVEL -> {
-                // 先拿新铲（防中途打断手无铲子）→ 回写后放旧铲 → 关盒
+                // 先拿新铲（防中途打断手无铲子）→ 回写后切主手 → 放旧铲 → 关盒
                 int newSlot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
                 if (newSlot == -1) {
                     error("补给盒里没有够耐久的铲子了，模块停止");
