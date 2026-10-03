@@ -40,4 +40,13 @@ class FoodTypeTest {
                 "label 不是中文: " + f.label);
         }
     }
+
+    @Test
+    void toStringReturnsChineseLabel() {
+        // V4.24: Meteor EnumSetting 下拉框走 toString——必须中文（否则显示 BREAD 等英文枚举名，违反前端全汉化）
+        assertEquals("面包", FoodType.BREAD.toString());
+        assertEquals("金苹果", FoodType.GOLDEN_APPLE.toString());
+        assertEquals("牛排", FoodType.COOKED_BEEF.toString());
+        assertEquals("金胡萝卜", FoodType.GOLDEN_CARROT.toString());
+    }
 }

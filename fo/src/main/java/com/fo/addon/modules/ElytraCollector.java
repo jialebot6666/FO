@@ -687,7 +687,7 @@ public class ElytraCollector extends Module {
         landingRecover = false;
         recoverCount = 0;
         stateTick = 0;
-        info("飞向最近未去过的船 近似龙头=" + current.headPos + " 朝向=" + current.facing);
+        info("飞向最近未去过的船，朝向=" + directionLabel(current.facing));  // V4.24: 不显示坐标（无政府服禁止暴露）
         state = State.FLYING;
     }
 
@@ -701,7 +701,7 @@ public class ElytraCollector extends Module {
             // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动退出游戏 (断开服务器)
             if (state != State.IDLE && state != State.DONE
                 && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
-                warning("Y=" + String.format("%.1f", mc.player.getY()) + " 低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");
+                warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
                 disconnect("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
                 stopTask("低高度自动退出游戏.");
                 return;
@@ -869,13 +869,13 @@ public class ElytraCollector extends Module {
                             exactHead = exact.pos;
                             waypoints = ShipWaypoints.from(exactHead, current.facing);
                             headFound = true;
-                            info("已确认龙头: " + exactHead + " 朝向=" + current.facing);
+                            info("已确认龙头，朝向=" + directionLabel(current.facing));  // V4.24: 不显示坐标（无政府服禁止暴露）
                             if (debugSetting.get()) {
                                 int realTop = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, exactHead.getX(), exactHead.getZ());
                                 debugLog("head=(" + exactHead.getX() + "," + exactHead.getY() + "," + exactHead.getZ() + ") 龙头下地表=" + realTop + " seedY=" + current.headPos.getY());
                             }
                         } else {
-                            info("检测龙头第 " + scanAttempts + "/7 次未找到 (目标=" + current.headPos.getX() + "," + current.headPos.getZ() + ").");
+                            info("检测龙头第 " + scanAttempts + "/7 次未找到");  // V4.24: 不显示目标坐标（无政府服禁止暴露）
                         }
                     }
                 }
@@ -3093,6 +3093,17 @@ supplyScanStart = 0;
         } catch (NumberFormatException e) {
             return (long) s.hashCode();
         }
+    }
+
+    /** V4.24: 方向英文枚举 → 中文（前端全汉化） */
+    private static String directionLabel(Direction d) {
+        return switch (d) {
+            case NORTH -> "北";
+            case SOUTH -> "南";
+            case EAST -> "东";
+            case WEST -> "西";
+            default -> d.toString();
+        };
     }
 
     // ========== 数据类 ==========

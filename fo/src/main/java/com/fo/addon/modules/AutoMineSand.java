@@ -369,14 +369,14 @@ public class AutoMineSand extends Module {
             // V4.23: 服务器清除长时间放置盒子名字时，用内容指纹兜底（盒内含钻石/合金铲）
             supplyBoxPos = findNearestSupplyLikeBox();
             if (supplyBoxPos != null) {
-                info("补给盒名字丢失，已按盒内钻石/合金铲内容识别: " + supplyBoxPos.toShortString());
+                info("补给盒名字丢失，已按盒内钻石/合金铲内容识别");  // V4.24: 不显示坐标（无政府服禁止暴露坐标，防录屏泄露）
             } else {
                 error("扫描后仍未找到命名「" + supplyBoxName.get() + "」的补给盒，模块停止");
                 toggle();
                 return;
             }
         }
-        info("补给盒: " + supplyBoxPos.toShortString());
+        info("补给盒已识别");  // V4.24: 不显示坐标（无政府服禁止暴露坐标）
         BlockPos store = findNearestStoreBox();
         if (store == null) {
             error("未找到存沙潜影盒，模块停止");
@@ -398,8 +398,8 @@ public class AutoMineSand extends Module {
                     BlockPos p = c.add(x, y, z);
                     BlockState s = mc.world.getBlockState(p);
                     if (!(s.getBlock() instanceof ShulkerBoxBlock)) continue;
-                    boolean isSupply = false;
-                    if (mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
+                    boolean isSupply = supplyBoxPos != null && p.equals(supplyBoxPos); // V4.24: 内容指纹识别的补给盒（名字丢失）也亮绿色
+                    if (!isSupply && mc.world.getBlockEntity(p) instanceof ShulkerBoxBlockEntity be) {
                         var n = be.getCustomName();
                         if (n != null && n.getString().contains(supplyBoxName.get())) {
                             isSupply = true;
