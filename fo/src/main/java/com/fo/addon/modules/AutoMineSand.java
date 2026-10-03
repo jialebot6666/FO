@@ -168,6 +168,7 @@ public class AutoMineSand extends Module {
     private SupplyJob supplyJob = SupplyJob.NONE; // V4.23: 本次补给流程任务（一次只做一件事）
     private int supplyPhase = 0;            // V4.25: 补铲子流程阶段（0=未开始 1=已拿新铲 2=已切主手 3=已放旧铲）
     private boolean supplyWaitNotEmpty = false; // V4.25: 回写等待方向（false=等槽空, true=等槽非空，切主手确认用）
+    private int supplyWaitTick = 0;         // V4.26: 补给回写等待超时计数（防切主手失败时无限等待卡死）
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -212,6 +213,7 @@ public class AutoMineSand extends Module {
         supplyJob = SupplyJob.NONE;
         supplyPhase = 0;
         supplyWaitNotEmpty = false;
+        supplyWaitTick = 0;
         openRetryCount = 0;
         nukerTarget = null;
         PathManagers.get().protectShulkerBoxes(true);
@@ -688,11 +690,44 @@ public class AutoMineSand extends Module {
         ScreenHandler handler = mc.player.currentScreenHandler;
         // 等上次点击的槽位同步完（supplyWaitNotEmpty=false 等槽空=拿取/放回盒；true 等槽非空=确认新铲已到主手）
         if (supplyStuckSlot >= 0) {
+            // V4.26: 回写等待超时保护（60 tick ≈ 3 秒）——异常时不再无限等待卡死
+            if (++supplyWaitTick > 60) {
+                error("补给物品移动超时，模块停止");
+                closeScreen();
+                toggle();
+                return;
+            }
             int checkSlot = supplyStuckSlot;
             ItemStack s = handler.getSlot(checkSlot).getStack();
+            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 2) {
+                // V4.26: 严格等"选中槽是够耐久的铲子"（swap 真正完成才放行）。
+                // 原"等非空"在选中槽原本有物品（如沙子/旧铲）时会提前误判通过 → 提前关盒 → swap 包作废 → 新铲落背包
+                boolean shovelOnHand = SHOVELS.contains(s.getItem()) &&
+                    (!s.isDamageable() ||
+                        (s.getMaxDamage() - s.getDamage()) > shovelMinDurability.get());
+                if (!shovelOnHand) return;
+                supplyStuckSlot = -1;
+                supplyWaitNotEmpty = false;
+                supplyWaitTick = 0;
+                // 新铲已上手 → 放回旧铲
+                supplyPhase = 3;
+                int oldShovel = findWornOutShovelInPlayer(handler);
+                if (oldShovel != -1) {
+                    quickMove(oldShovel);
+                    supplyStuckSlot = oldShovel;
+                    return;
+                }
+                // 背包没有旧铲（swap 时已被换走）→ 铲子流程完成，关盒
+                supplyPhase = 0;
+                supplyJob = SupplyJob.NONE;
+                closeScreen();
+                state = State.MINING;
+                return;
+            }
             if (supplyWaitNotEmpty ? s.isEmpty() : !s.isEmpty()) return;
             supplyStuckSlot = -1;
             supplyWaitNotEmpty = false;
+            supplyWaitTick = 0;
             // V4.25: 铲子流程 phase 状态机——拿新铲(1)→切主手(2)→放旧铲(3)→关盒
             if (supplyJob == SupplyJob.SHOVEL) {
                 if (supplyPhase == 1) {
@@ -711,23 +746,8 @@ public class AutoMineSand extends Module {
                     }
                     InvUtils.swap(r.slot(), false); // 快捷栏槽=直接切选中；背包槽=交换到选中槽
                     supplyStuckSlot = mc.player.getInventory().getSelectedSlot() + 27;
-                    supplyWaitNotEmpty = true;      // 等选中槽非空 = 新铲确认上手
-                    return;
-                }
-                if (supplyPhase == 2) {
-                    // 新铲已在主手 → 放回旧铲
-                    supplyPhase = 3;
-                    int oldShovel = findWornOutShovelInPlayer(handler);
-                    if (oldShovel != -1) {
-                        quickMove(oldShovel);
-                        supplyStuckSlot = oldShovel;
-                        return;
-                    }
-                    // 背包没有旧铲（swap 时已被换走/在快捷栏）→ 铲子流程完成，关盒
-                    supplyPhase = 0;
-                    supplyJob = SupplyJob.NONE;
-                    closeScreen();
-                    state = State.MINING;
+                    supplyWaitNotEmpty = true;      // phase=2 专用判断：等选中槽是够耐久铲子
+                    supplyWaitTick = 0;
                     return;
                 }
                 if (supplyPhase == 3) {
