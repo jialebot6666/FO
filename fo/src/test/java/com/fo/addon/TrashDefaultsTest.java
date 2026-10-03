@@ -13,15 +13,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TrashDefaultsTest {
 
     @Test
-    void defaultWhitelistHas61Items() {
-        // 用户实测配置：两张截图合并共 61 种物品
-        assertEquals(61, TrashDefaults.DEFAULT_WHITELIST_IDS.size());
+    void defaultWhitelistHas62Items() {
+        // 用户实测配置：两张截图合并共 61 种物品；V4.22 加沙（minecraft:sand）后 62 项
+        assertEquals(62, TrashDefaults.DEFAULT_WHITELIST_IDS.size());
     }
 
     @Test
     void defaultWhitelistIdsAreUnique() {
         // 无重复项（避免联动时列表里出现重复物品）
-        assertEquals(61, Set.copyOf(TrashDefaults.DEFAULT_WHITELIST_IDS).size());
+        assertEquals(62, Set.copyOf(TrashDefaults.DEFAULT_WHITELIST_IDS).size());
+    }
+
+    @Test
+    void defaultWhitelistContainsSand() {
+        // V4.22: 挖沙联动场景——沙必须在白名单（保留沙攒满背包触发存沙，杂物被丢）
+        Set<String> ids = Set.copyOf(TrashDefaults.DEFAULT_WHITELIST_IDS);
+        assertTrue(ids.contains("minecraft:sand"));
     }
 
     @Test
@@ -47,7 +54,7 @@ class TrashDefaultsTest {
 
     @Test
     void emptyOrNullListFillsDefault() {
-        // 联动时：列表为空/未配置 → 填默认 61 项
+        // 联动时：列表为空/未配置 → 填默认 62 项
         assertTrue(TrashDefaults.shouldFillDefault(null));
         assertTrue(TrashDefaults.shouldFillDefault(List.of()));
     }

@@ -18,6 +18,7 @@ import meteordevelopment.meteorclient.pathing.BaritoneUtils;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -81,7 +82,7 @@ public class AutoMineSand extends Module {
 
     private final Setting<Integer> nukerMinDy = sgGeneral.add(new IntSetting.Builder()
         .name("核爆纵向下限").description("Nuker 模式下相对玩家脚下可挖的最低层数")
-        .defaultValue(0).min(-6).max(6).sliderMin(-6).sliderMax(6).build());
+        .defaultValue(-6).min(-6).max(6).sliderMin(-6).sliderMax(6).build());
 
     private final Setting<Integer> nukerMaxDy = sgGeneral.add(new IntSetting.Builder()
         .name("核爆纵向上限").description("Nuker 模式下相对玩家脚下可挖的最高层数")
@@ -173,6 +174,11 @@ public class AutoMineSand extends Module {
             toggle();
             return;
         }
+        // V4.22: 联动开启自动扔垃圾（强制白名单+确保沙在保留列表）。
+        // 注意顺序：Baritone 检查通过后才开——若上方已 toggle() 关闭，
+        // onDeactivate 会触发 disableForMineSandLink，此时标记未设=无操作，不会误关。
+        AutoTrash trash = Modules.get().get(AutoTrash.class);
+        if (trash != null) trash.enableForMineSandLink();
         state = State.INIT_SCAN;
         tickTimer = 0;
         shulkerWaitTimer = 0;
@@ -207,6 +213,10 @@ public class AutoMineSand extends Module {
 
     @Override
     public void onDeactivate() {
+        // V4.22: 挖沙停止（手动关/模块自停/被禁用都走这里）→ 关闭挖沙联动开启的自动扔垃圾；
+        // 用户手动开的自动扔垃圾不受影响（联动来源标记为空则不关）。
+        AutoTrash trash = Modules.get().get(AutoTrash.class);
+        if (trash != null) trash.disableForMineSandLink();
         PathManagers.get().stop();
         PathManagers.get().protectShulkerBoxes(false);
         nukerTarget = null;

@@ -8,7 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * AutoTrash 默认白名单（61 项，来自用户实测配置）。
+ * AutoTrash 默认白名单（62 项，来自用户实测配置 + V4.22 加沙）。
  *
  * <p>物品以 ID 字符串定义（可在纯 JUnit 环境测试数量/内容），
  * 运行时通过 {@link #toItems()} 转换为 {@link Item} 列表。
@@ -17,8 +17,10 @@ import java.util.List;
  */
 public final class TrashDefaults {
 
-    /** 默认白名单 61 项 ID：白名单模式下仅保留这些物品，其余全部丢弃 */
+    /** 默认白名单 62 项 ID：白名单模式下仅保留这些物品，其余全部丢弃 */
     public static final List<String> DEFAULT_WHITELIST_IDS = List.of(
+        // V4.22: 挖沙联动场景——沙必须保留（攒满背包触发存沙），杂物被丢
+        "minecraft:sand",                   // 沙
         // 第一张截图 (35 项)
         "minecraft:end_crystal",            // 末地水晶
         "minecraft:ender_chest",            // 末影箱

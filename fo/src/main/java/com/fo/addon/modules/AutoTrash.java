@@ -61,7 +61,7 @@ public class AutoTrash extends Module {
     private final Setting<Boolean> excludeHotbar = sgGeneral.add(new BoolSetting.Builder()
         .name("排除快捷栏")
         .description("不处理快捷栏中的物品（推荐开启，保护常用物品）.")
-        .defaultValue(true)
+        .defaultValue(false)   // V4.22: 默认不启用——挖沙联动时快捷栏杂物也要丢（主手槽始终跳过）
         .build());
 
     private final Setting<Boolean> toggleOffOnClear = sgGeneral.add(new BoolSetting.Builder()
@@ -72,11 +72,15 @@ public class AutoTrash extends Module {
 
     private int tickTimer = 0;
 
+    /** V4.22: 联动来源标记——仅当由"FO 自动挖沙"联动开启时，才在挖沙停止时联动关闭；
+     *  用户手动开的（标记为空）一律不关，避免误伤手动操作。 */
+    private boolean linkedByMineSand = false;
+
     public AutoTrash() {
         super(AddonTemplate.CATEGORY, "FO 自动扔垃圾", "自动扔垃圾：黑/白名单模式自动丢弃指定物品。");
     }
 
-    /** 供 ElytraCollector 联动调用：强制白名单模式；列表非空则沿用用户配置，空才填默认 61 项；额外弹一次系统通知 */
+    /** 供 ElytraCollector 联动调用：强制白名单模式；列表非空则沿用用户配置，空才填默认列表；额外弹一次系统通知 */
     public void enableForElytraLink() {
         mode.set(TrashLogic.Mode.WHITELIST);
         boolean filledDefault = TrashDefaults.shouldFillDefault(items.get());
@@ -103,6 +107,38 @@ public class AutoTrash extends Module {
     /** 供 ElytraCollector 联动回滚调用：仅关闭模块（不还原模式/列表） */
     public void disableForElytraLink() {
         if (isActive()) toggle();
+    }
+
+    /**
+     * V4.22: 供 AutoMineSand 挖沙联动调用。强制白名单 + 确保列表含沙——
+     * 白名单模式下列表缺沙会把沙一起丢掉（存沙永远攒不满），
+     * 联动时缺沙自动补 minecraft:sand，其余项不动（尊重用户已有配置）。
+     * 记录联动来源标记：挖沙停止时只关自己联动开的。
+     */
+    public void enableForMineSandLink() {
+        mode.set(TrashLogic.Mode.WHITELIST);
+        java.util.List<Item> list = new java.util.ArrayList<>(items.get());
+        if (!list.contains(Items.SAND)) {
+            list.add(Items.SAND);
+            items.set(list);
+        }
+        linkedByMineSand = true;
+        if (!isActive()) toggle();
+
+        try {
+            MeteorToast toast = new MeteorToast.Builder("已联动开启 FO 自动扔垃圾（自动挖沙）")
+                .icon(Items.SHULKER_BOX)
+                .text("白名单模式，已确保沙在保留列表（" + list.size() + " 项）")
+                .build();
+            mc.getToastManager().add(toast);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** V4.22: 挖沙联动回滚——仅当是挖沙联动开启的才关闭（用户手动开的不动） */
+    public void disableForMineSandLink() {
+        if (linkedByMineSand && isActive()) toggle();
+        linkedByMineSand = false;
     }
 
     @Override
