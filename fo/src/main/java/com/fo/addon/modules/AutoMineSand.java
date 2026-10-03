@@ -803,10 +803,14 @@ public class AutoMineSand extends Module {
         }
 
         // V4.14: miku 式同步判满——搬之前先读盒槽快照，装不下立即换盒，
-        // 不再依赖"点击后等 20 tick 卡住"的慢机制；且一次 tick 批量搬多组（上限 27）。
+        // 不再依赖"点击后等 20 tick 卡住"的慢机制。
+        // V4.21: 一组一组存——每 tick 只搬一组沙（上限 1），QUICK_MOVE 包节流：
+        // 一次批量 27 组瞬间发出容易被服务器吞包/触发反作弊丢沙；
+        // 配合上方 storeStuckSlot 回写等待（服务端回写前不搬下一组），
+        // 天然每组间隔 ≥1 tick，一盒打开期间持续搬，全部搬完才关盒。
         // 只搬沙（isSandItem 过滤），杜绝 miku 把其他物品也存进去的 bug。
         int moved = 0;
-        for (int s = playerFirst; s <= playerLast && moved < 27; s++) {
+        for (int s = playerFirst; s <= playerLast && moved < 1; s++) {
             ItemStack stack = sh.getSlot(s).getStack();
             if (stack.isEmpty() || !isSandItem(stack)) continue;
             if (StoreSlotLogic.findSandTargetSlot(boxCounts(sh), boxIsSand(sh), 64, stack.getCount()) == -1) {
