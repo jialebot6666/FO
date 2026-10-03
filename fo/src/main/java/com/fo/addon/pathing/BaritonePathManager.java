@@ -68,8 +68,10 @@ public class BaritonePathManager implements IPathManager {
         // GoalXZ 没有 (BlockPos) 构造器，只有 (int,int) 和 (BetterBlockPos)
         goalXZCtor = Class.forName("baritone.api.pathing.goals.GoalXZ").getConstructor(int.class, int.class);
         goalGetToBlockCtor = Class.forName("baritone.api.pathing.goals.GoalGetToBlock").getConstructor(BlockPos.class);
-        // GoalNear(BlockPos, double)：精确到达——玩家中心进入目标格 range 内才算到达
-        goalNearCtor = Class.forName("baritone.api.pathing.goals.GoalNear").getConstructor(BlockPos.class, double.class);
+        // GoalNear(BlockPos, int range)：精确到达。range 是整格容忍度（注意是 int 不是 double，
+        // 写 double 会 NoSuchMethodException 导致整个 Baritone 桥接初始化失败）。
+        // range=0 → 玩家脚所在格必须等于目标格 = "一格空间都不留"（站到盒子紧邻格正中）。
+        goalNearCtor = Class.forName("baritone.api.pathing.goals.GoalNear").getConstructor(BlockPos.class, int.class);
     }
 
     @Override
@@ -104,9 +106,9 @@ public class BaritonePathManager implements IPathManager {
     @Override
     public void moveToPrecise(BlockPos pos) {
         try {
-            // GoalNear(pos, 0.5)：玩家中心进入目标格 0.5 格内才算到达，
+            // GoalNear(pos, 0)：玩家脚所在格必须 == 目标格才算到达（range=0 整格精确），
             // 站在盒子紧邻格正中，一格空间都不留（GoalGetToBlock 只到相邻格就停）。
-            Object goal = goalNearCtor.newInstance(pos, 0.5);
+            Object goal = goalNearCtor.newInstance(pos, 0);
             setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
         } catch (ReflectiveOperationException e) {
             e.printStackTrace();
