@@ -105,7 +105,7 @@ public class ElytraCollector extends Module {
     private final Setting<String> seedSetting = sgGeneral.add(new StringSetting.Builder()
         .name("世界种子")
         .description("世界种子 (0 = 当前世界).")
-        .defaultValue("0")
+        .defaultValue("-7346913998703726680")
         .build()
     );
 

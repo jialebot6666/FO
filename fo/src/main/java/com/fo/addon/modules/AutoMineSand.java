@@ -393,7 +393,9 @@ public class AutoMineSand extends Module {
         if (needNewShovel()) { goToSupply("铲子耐久不足"); return; }
         if (foodCount() < 1) { goToSupply("金萝卜不足"); return; }
         if (totemCount() < totemTarget.get()) { goToSupply("图腾不足"); return; }
-        if (autoStore.get() && emptySlots() <= storeEmptySlots.get()) { goToStore(); return; }
+        // V4.23: 存沙触发需"背包有整组沙"——只有零头（不满一组）时不开盒，
+        // 否则开盒→搬不动→关盒→又触发，死循环。零头沙留背包，挖沙时自动合并攒满一组。
+        if (autoStore.get() && emptySlots() <= storeEmptySlots.get() && hasFullSandStack()) { goToStore(); return; }
 
         if (nukerMode.get()) {
             nukerTick();
@@ -823,6 +825,7 @@ public class AutoMineSand extends Module {
         for (int s = playerFirst; s <= playerLast && moved < 1; s++) {
             ItemStack stack = sh.getSlot(s).getStack();
             if (stack.isEmpty() || !isSandItem(stack)) continue;
+            if (stack.getCount() < 64) continue; // V4.23: 不满一组不存——零头沙留在背包，挖沙时自动合并攒满一组再存
             if (StoreSlotLogic.findSandTargetSlot(boxCounts(sh), boxIsSand(sh), 64, stack.getCount()) == -1) {
                 // 盒子对沙已满：立即换盒（旧逻辑要白等 20 tick）
                 if (storeBoxPos != null) fullStoreBoxes.add(storeBoxPos.toImmutable());
@@ -893,6 +896,15 @@ public class AutoMineSand extends Module {
             if (mc.player.getInventory().getStack(i).isEmpty()) c++;
         }
         return c;
+    }
+
+    /** V4.23: 背包是否存在整组沙（count ≥ 64）。存沙触发条件之一——只有零头沙不开盒（防死循环） */
+    private boolean hasFullSandStack() {
+        for (int i = 9; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (!s.isEmpty() && isSandItem(s) && s.getCount() >= 64) return true;
+        }
+        return false;
     }
 
     private BlockPos findNamedShulker(String nameContains) {
