@@ -3,6 +3,7 @@ package com.fo.addon.modules;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.FoodType;
 import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.NearestBoxLogic;
 import com.fo.addon.utils.NukerMoveLogic;
@@ -11,6 +12,7 @@ import com.fo.addon.utils.OpenBoxRetryLogic;
 import com.fo.addon.utils.StandSpotLogic;
 import com.fo.addon.utils.StoreOpenLogic;
 import com.fo.addon.utils.StoreSlotLogic;
+import com.fo.addon.utils.SupplyFingerprintLogic;
 import meteordevelopment.meteorclient.events.entity.player.BlockBreakingCooldownEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -36,6 +38,8 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
+import net.minecraft.util.Identifier;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
@@ -100,9 +104,9 @@ public class AutoMineSand extends Module {
         .name("铲子最低耐久").description("耐久低于此值自动换新铲")
         .defaultValue(10).min(1).max(100).sliderMin(1).sliderMax(100).build());
 
-    private final Setting<Integer> foodTarget = sgSupply.add(new IntSetting.Builder()
-        .name("金萝卜目标数量").description("从补给盒补到多少")
-        .defaultValue(64).min(8).max(64).sliderMin(8).sliderMax(64).build());
+    private final Setting<FoodType> foodType = sgSupply.add(new EnumSetting.Builder<FoodType>()
+        .name("补给食物种类").description("背包该食物为 0 时从补给盒补一整组（64 个）；四选一")
+        .defaultValue(FoodType.GOLDEN_CARROT).build());
 
     private final Setting<Integer> totemTarget = sgSupply.add(new IntSetting.Builder()
         .name("图腾目标数量").description("从补给盒补到多少个")
@@ -129,6 +133,9 @@ public class AutoMineSand extends Module {
         .defaultValue(true).build());
 
     private enum State { MINING, INIT_SCAN, GOING_SUPPLY, OPEN_SUPPLY, GOING_STORE, OPEN_STORE }
+
+    /** V4.23: 补给流程任务类型——一次补给流程只做一件事（铲子/食物/图腾），补完关盒回挖矿 */
+    private enum SupplyJob { NONE, SHOVEL, FOOD, TOTEM }
 
     private State state = State.MINING;
     private int tickTimer = 0;
@@ -157,6 +164,9 @@ public class AutoMineSand extends Module {
     private final Set<BlockPos> nameSyncedBoxes = new HashSet<>();  // INIT_SCAN 成功打开过（数据已同步）的盒子
     private final Set<BlockPos> unopenableBoxes = new HashSet<>();  // 存沙/补给时反复打不开被放弃的盒子
     private int openRetryCount = 0;        // 当前盒子连续开盒失败次数（StoreOpenLogic 用）
+    private final Set<BlockPos> supplyLikeBoxes = new HashSet<>(); // V4.23: 内容指纹候选（盒内含钻石/合金铲，名字丢失兜底）
+    private SupplyJob supplyJob = SupplyJob.NONE; // V4.23: 本次补给流程任务（一次只做一件事）
+    private int supplyPhase = 0;            // V4.23: 补铲子流程阶段（0=未开始 1=已拿新铲待放旧铲 2=已放旧铲）
 
     private static final List<Item> SHOVELS = Arrays.asList(
         Items.NETHERITE_SHOVEL, Items.DIAMOND_SHOVEL, Items.IRON_SHOVEL,
@@ -197,6 +207,9 @@ public class AutoMineSand extends Module {
         initScanIndex = 0;
         nameSyncedBoxes.clear();
         unopenableBoxes.clear();
+        supplyLikeBoxes.clear();
+        supplyJob = SupplyJob.NONE;
+        supplyPhase = 0;
         openRetryCount = 0;
         nukerTarget = null;
         PathManagers.get().protectShulkerBoxes(true);
@@ -270,6 +283,13 @@ public class AutoMineSand extends Module {
         if (mc.currentScreen instanceof ShulkerBoxScreen) {
             shulkerWaitTimer++;
             if (shulkerWaitTimer >= 3) { // V4.17: 3tick足够服务器同步潜影盒数据（认名字不需要等0.5秒）
+                // V4.23: 顺手读盒内内容——含钻石/合金铲 → 记为内容指纹候选
+                //（服务器清掉盒子名字后，按内容兜底识别补给盒）
+                if (containsFingerprintShovel(mc.player.currentScreenHandler)) {
+                    if (initScanIndex < initScanBoxes.size()) {
+                        supplyLikeBoxes.add(initScanBoxes.get(initScanIndex).toImmutable());
+                    }
+                }
                 closeScreen();
                 // V4.14: 记录"成功打开过=数据已同步"的盒子，存沙候选只从这里选，
                 // 防止扫描时被 SKIP 的盒子（名字未知，可能是补给盒）被误当存沙盒
@@ -346,9 +366,15 @@ public class AutoMineSand extends Module {
         PathManagers.get().stop();
         supplyBoxPos = findNamedShulker(supplyBoxName.get());
         if (supplyBoxPos == null) {
-            error("扫描后仍未找到命名「" + supplyBoxName.get() + "」的补给盒，模块停止");
-            toggle();
-            return;
+            // V4.23: 服务器清除长时间放置盒子名字时，用内容指纹兜底（盒内含钻石/合金铲）
+            supplyBoxPos = findNearestSupplyLikeBox();
+            if (supplyBoxPos != null) {
+                info("补给盒名字丢失，已按盒内钻石/合金铲内容识别: " + supplyBoxPos.toShortString());
+            } else {
+                error("扫描后仍未找到命名「" + supplyBoxName.get() + "」的补给盒，模块停止");
+                toggle();
+                return;
+            }
         }
         info("补给盒: " + supplyBoxPos.toShortString());
         BlockPos store = findNearestStoreBox();
@@ -390,9 +416,10 @@ public class AutoMineSand extends Module {
     }
 
     private void tickMining() {
-        if (needNewShovel()) { goToSupply("铲子耐久不足"); return; }
-        if (foodCount() < 1) { goToSupply("金萝卜不足"); return; }
-        if (totemCount() < totemTarget.get()) { goToSupply("图腾不足"); return; }
+        // V4.23: 触发时锁定本次补给任务（一次补给流程只做一件事，补完关盒回挖矿）
+        if (needNewShovel()) { supplyJob = SupplyJob.SHOVEL; goToSupply("铲子耐久不足"); return; }
+        if (foodCount(foodItem()) < 1) { supplyJob = SupplyJob.FOOD; goToSupply(foodType.get().label + "不足"); return; }
+        if (totemCount() < totemTarget.get()) { supplyJob = SupplyJob.TOTEM; goToSupply("图腾不足"); return; }
         // V4.23: 存沙触发需"背包有整组沙"——只有零头（不满一组）时不开盒，
         // 否则开盒→搬不动→关盒→又触发，死循环。零头沙留背包，挖沙时自动合并攒满一组。
         if (autoStore.get() && emptySlots() <= storeEmptySlots.get() && hasFullSandStack()) { goToStore(); return; }
@@ -648,49 +675,99 @@ public class AutoMineSand extends Module {
 
     private void doSupply() {
         ScreenHandler handler = mc.player.currentScreenHandler;
-        // 等上次点的槽位同步完
+        // 等上次点的槽位同步完（supplyStuckSlot < 27 盒槽=拿物资，>= 27 背包槽=放回旧铲）
         if (supplyStuckSlot >= 0) {
-            // supplyStuckSlot >= 27 表示点的是玩家背包槽位（放回旧铲子）
-            // < 27 表示点的是补给盒槽位（拿新物资）
             int checkSlot = supplyStuckSlot;
             ItemStack s = handler.getSlot(checkSlot).getStack();
             if (!s.isEmpty()) return;
             supplyStuckSlot = -1;
+            // V4.23: 铲子流程——刚拿完新铲（phase=1）→ 放回旧铲；刚放完旧铲（phase=2）→ 关盒
+            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 1) {
+                supplyPhase = 2;
+                int oldShovel = findWornOutShovelInPlayer(handler);
+                if (oldShovel != -1) {
+                    quickMove(oldShovel);
+                    supplyStuckSlot = oldShovel;
+                    return;
+                }
+                // 背包没有旧铲 → 铲子流程完成，关盒
+                supplyPhase = 0;
+                supplyJob = SupplyJob.NONE;
+                closeScreen();
+                state = State.MINING;
+                return;
+            }
+            if (supplyJob == SupplyJob.SHOVEL && supplyPhase == 2) {
+                // 刚放完旧铲 → 完成关盒
+                supplyPhase = 0;
+                supplyJob = SupplyJob.NONE;
+                closeScreen();
+                state = State.MINING;
+                return;
+            }
+            if (supplyJob == SupplyJob.FOOD) {
+                // 拿完一组食物 → 关盒（不重入找食物槽——盒槽已被拿空，重找会误报"没有食物"）
+                supplyPhase = 0;
+                supplyJob = SupplyJob.NONE;
+                closeScreen();
+                state = State.MINING;
+                return;
+            }
+            // TOTEM：回写后重入下方分支，拿满 target 自动关盒
         }
-        int moved = 0;
-        // 先把背包里没耐久的铲子放回补给盒
-        if (needNewShovel()) {
-            int oldShovelScreenSlot = findWornOutShovelInPlayer(handler);
-            if (oldShovelScreenSlot != -1) {
-                quickMove(oldShovelScreenSlot);
-                supplyStuckSlot = oldShovelScreenSlot;
-                moved++;
-            } else {
-                // 旧铲子已清掉，拿新的
-                int slot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
-                if (slot != -1) {
-                    quickMove(slot);
-                    supplyStuckSlot = slot;
-                    moved++;
-                } else {
-                    // 补给盒里也没有够耐久的铲子
+        // V4.23: 一次补给流程只做一件事（tickMining 触发时锁定的 supplyJob），补完关盒回挖矿
+        switch (supplyJob) {
+            case SHOVEL -> {
+                // 先拿新铲（防中途打断手无铲子）→ 回写后放旧铲 → 关盒
+                int newSlot = findShulkerItem(handler, SHOVELS, shovelMinDurability.get());
+                if (newSlot == -1) {
                     error("补给盒里没有够耐久的铲子了，模块停止");
                     closeScreen();
                     toggle();
                     return;
                 }
+                quickMove(newSlot);
+                supplyStuckSlot = newSlot;
+                supplyPhase = 1;
+            }
+            case FOOD -> {
+                // 锁死一组：背包所选食物为 0 触发，shift 整组 64 恰好一组，无叠加超量
+                Item food = foodItem();
+                int slot = findShulkerItemExact(handler, food);
+                if (slot == -1) {
+                    error("补给盒里没有所选食物（" + foodType.get().label + "）了，模块停止（请给补给盒补货）");
+                    closeScreen();
+                    toggle();
+                    return;
+                }
+                quickMove(slot);
+                supplyStuckSlot = slot;
+            }
+            case TOTEM -> {
+                // 图腾不可堆叠，逐个拿；拿满 target 后关盒
+                if (totemCount() >= totemTarget.get()) {
+                    supplyPhase = 0;
+                    supplyJob = SupplyJob.NONE;
+                    closeScreen();
+                    state = State.MINING;
+                    return;
+                }
+                int slot = findShulkerItemExact(handler, Items.TOTEM_OF_UNDYING);
+                if (slot == -1) {
+                    error("补给盒里没有图腾了，模块停止（请给补给盒补货）");
+                    closeScreen();
+                    toggle();
+                    return;
+                }
+                quickMove(slot);
+                supplyStuckSlot = slot;
+            }
+            case NONE -> {
+                supplyPhase = 0;
+                closeScreen();
+                state = State.MINING;
             }
         }
-        if (moved > 0) { return; } // 这 tick 只处理铲子
-        if (foodCount() < foodTarget.get()) {
-            int slot = findShulkerItemExact(handler, Items.GOLDEN_CARROT);
-            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
-        }
-        if (totemCount() < totemTarget.get()) {
-            int slot = findShulkerItemExact(handler, Items.TOTEM_OF_UNDYING);
-            if (slot != -1) { quickMove(slot); supplyStuckSlot = slot; moved++; }
-        }
-        if (moved == 0) { closeScreen(); state = State.MINING; }
     }
 
     /** 在玩家背包(界面槽位27-62)找没耐久的铲子，返回界面槽位 */
@@ -872,13 +949,44 @@ public class AutoMineSand extends Module {
         return (s.getMaxDamage() - s.getDamage()) <= shovelMinDurability.get();
     }
 
-    private int foodCount() {
+    /** V4.23: 所选补给食物种类对应的 Item（FoodType.itemId → 注册表） */
+    private Item foodItem() {
+        return Registries.ITEM.get(Identifier.tryParse(foodType.get().itemId));
+    }
+
+    /** V4.23: 背包所选食物的总量 */
+    private int foodCount(Item item) {
         int c = 0;
         for (int i = 0; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.getItem() == Items.GOLDEN_CARROT) c += s.getCount();
+            if (s.getItem() == item) c += s.getCount();
         }
         return c;
+    }
+
+    /** V4.23: 盒内是否含钻石/合金铲（补给盒内容指纹，SupplyFingerprintLogic 定义硬性标准） */
+    private boolean containsFingerprintShovel(ScreenHandler sh) {
+        for (int i = 0; i < 27 && i < sh.slots.size(); i++) {
+            ItemStack s = sh.getSlot(i).getStack();
+            if (s.isEmpty()) continue;
+            String id = Registries.ITEM.getId(s.getItem()).toString();
+            if (SupplyFingerprintLogic.FINGERPRINT_SHOVEL_IDS.contains(id)) return true;
+        }
+        return false;
+    }
+
+    /** V4.23: 内容指纹候选里选三维最近者（名字丢失时兜底识别补给盒） */
+    private BlockPos findNearestSupplyLikeBox() {
+        BlockPos c = mc.player.getBlockPos();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (BlockPos p : supplyLikeBoxes) {
+            if (unopenableBoxes.contains(p)) continue;
+            if (!(mc.world.getBlockState(p).getBlock() instanceof ShulkerBoxBlock)) continue;
+            double d = c.getSquaredDistance(p);
+            if (d < bestD) { bestD = d; best = p; }
+        }
+        return best;
     }
 
     private int totemCount() {
@@ -936,6 +1044,8 @@ public class AutoMineSand extends Module {
         java.util.List<BlockPos> boxes = new java.util.ArrayList<>();
         for (BlockPos p : nameSyncedBoxes) {
             if (fullStoreBoxes.contains(p) || unopenableBoxes.contains(p)) continue;
+            // V4.23: 内容指纹识别的补给盒（名字被服务器清掉）也要排除——否则沙会存进补给盒
+            if (supplyBoxPos != null && p.equals(supplyBoxPos)) continue;
             BlockState s = mc.world.getBlockState(p);
             if (!(s.getBlock() instanceof ShulkerBoxBlock)) continue;
             boolean supply = false;
