@@ -4,6 +4,7 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.ReturnPathLogic;
 import com.fo.addon.utils.TrashDefaults;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
 import com.seedfinding.mccore.rand.ChunkRand;
@@ -335,6 +336,7 @@ public class ElytraCollector extends Module {
     private boolean frameHadElytra = false; // 到达展示框时框里是否有鞘翅 (打掉后框会变空，不能据此判定没鞘翅)
     private boolean frameAirChecked = false; // 龙头确认后是否已在空中检查过展示框内容
     private boolean frameAirEmpty = false;   // 空中检查结果：展示框里没有鞘翅
+    private boolean relaunchAfterReturn = false; // LEAVE_SHIP 由 relaunchAfterShip 触发（采集完成回起飞点）时为 true；超时停止，绝不原地起飞
     private int frameAirScanTicks = 0;       // 空中找展示框实体的累计扫描 tick
     private boolean pickupSessionDone = false; // 每艘船捡到鞘翅后只触发一次船旁存储会话 (防缺口未补齐时原地无限重启)
     private boolean firstFireworkDone = false;
@@ -1175,10 +1177,14 @@ public class ElytraCollector extends Module {
             case EXIT_P1 -> {
                 if (reached(waypoints.p1, 2.5)) {
                     advance(CollectStep.EXIT_LANDING);
-                } else if (stateTick > 600) {
+                } else if (ReturnPathLogic.timedOut(stateTick)) {
                     // 走回降落点超时 (StorageReturn 语义：30s 走不到也继续，不卡死)
                     warning("走回降落点超时 (30s)，跳过该步骤继续.");
                     advance(CollectStep.EXIT_LANDING);
+                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
+                    // 每 20 tick 或寻路失败时重发 moveTo (对齐 Ying StorageReturn REPATH_INTERVAL 语义)
+                    PathManagers.get().moveTo(waypoints.p1, false);
+                    lastGotoTick = stateTick;
                 }
             }
             case EXIT_LANDING -> {
@@ -1186,11 +1192,13 @@ public class ElytraCollector extends Module {
                     addBlacklist(current.headPos);
                     info("该船完成，加入黑名单.");
                     finishShip();
-                } else if (stateTick > 600) {
-                    // 回不到降落点：直接完成该船 (黑名单跳过)，绝不卡死
-                    warning("回不到降落点 (30s)，该船加入黑名单跳过.");
-                    addBlacklist(current.headPos);
-                    finishShip();
+                } else if (ReturnPathLogic.timedOut(stateTick)) {
+                    // 对齐 Ying StorageReturn 超时语义：回不到起飞点宁可停止任务，也不原地起飞撞墙
+                    warning("回不到降落点 (30s)，停止任务.");
+                    stopTask("回不到起飞点 (30s)，FO 鞘翅采集任务停止.");
+                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
+                    PathManagers.get().moveTo(waypoints.landing.down(4), false);
+                    lastGotoTick = stateTick;
                 }
             }
             case LEAVE_SHIP -> {
@@ -1200,12 +1208,21 @@ public class ElytraCollector extends Module {
                     info("已回到降落点，起飞离开.");
                     state = State.RISING;
                     stateTick = 0;
-                } else if (stateTick > 600) {
-                    // 回降落点超时：原地起飞 (方向已由 takeoffFacing 修正)
-                    warning("回降落点超时 (30s)，原地起飞离开.");
-                    releaseForward();
-                    state = State.RISING;
-                    stateTick = 0;
+                } else if (ReturnPathLogic.timedOut(stateTick)) {
+                    if (relaunchAfterReturn) {
+                        // 采集完成回起飞点超时：宁可停止任务，也不原地起飞撞墙 (对齐 Ying StorageReturn)
+                        warning("回降落点超时 (30s)，停止任务.");
+                        stopTask("回不到起飞点 (30s)，FO 鞘翅采集任务停止.");
+                    } else {
+                        // 展示框没鞘翅跳过船：回降落点超时原地起飞离开 (原行为)
+                        warning("回降落点超时 (30s)，原地起飞离开.");
+                        releaseForward();
+                        state = State.RISING;
+                        stateTick = 0;
+                    }
+                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
+                    PathManagers.get().moveTo(waypoints.landing.down(4), false);
+                    lastGotoTick = stateTick;
                 }
             }
         }
@@ -1323,8 +1340,19 @@ supplyScanStart = 0;
         takeoffFacing = current != null ? current.facing : null;
         firstFireworkDone = false;
         landingRecover = false;
-        state = State.RISING;
-        stateTick = 0;
+        // 对齐 Ying t()：已降落且不在起飞点 → 先回降落点 (LEAVE_SHIP) 修正起飞方向再起飞，防止原地起飞撞墙
+        relaunchAfterReturn = true;
+        if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
+            info("采集完成：先回降落点修正起飞方向后再起飞.");
+            state = State.COLLECTING;
+            collectStep = CollectStep.LEAVE_SHIP;
+            stateTick = 0;
+            lastGotoTick = 0;
+            beginCollectStep();
+        } else {
+            state = State.RISING;
+            stateTick = 0;
+        }
         launchSearch();
     }
 
@@ -1339,6 +1367,7 @@ supplyScanStart = 0;
         takeoffFacing = current.facing;
         firstFireworkDone = false;
         landingRecover = false;
+        relaunchAfterReturn = false; // 跳过船场景：回降落点超时仍原地起飞离开 (原行为)
         releaseForward();
         launchSearch();
         if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
