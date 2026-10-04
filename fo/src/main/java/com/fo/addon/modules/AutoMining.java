@@ -7,6 +7,7 @@ import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.MiningGuard;
 import com.fo.addon.utils.CraftingSlotMath;
 import com.fo.addon.utils.PickupTimeoutLogic;
+import com.fo.addon.utils.StartupCheckLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
@@ -249,24 +250,16 @@ public class AutoMining extends Module {
             return;
         }
 
-        // 必需品检查：时运镐 + 空潜影盒 + 工作台（钻石模式）+ 末影箱
-        if (findFortunePickaxeSlot() == -1) {
-            error("背包缺少必要物品！需要：时运镐");
-            toggle();
-            return;
-        }
-        if (findEmptyShulkerSlot() == -1) {
-            error("背包缺少必要物品！需要：空潜影盒");
-            toggle();
-            return;
-        }
-        if (miningMode.get() == MiningMode.DIAMOND && findSlot(Items.CRAFTING_TABLE) == -1) {
-            error("背包缺少必要物品！需要：工作台");
-            toggle();
-            return;
-        }
-        if (findSlot(Items.ENDER_CHEST) == -1) {
-            error("背包缺少必要物品！需要：末影箱");
+        // 必需品检查：时运镐 + 空潜影盒（或末影箱取盒兜底）+ 工作台（钻石模式）+ 末影箱
+        String missing = StartupCheckLogic.missingItem(
+            findFortunePickaxeSlot() != -1,
+            findEmptyShulkerSlot() != -1,
+            findSlot(Items.ENDER_CHEST) != -1,
+            miningMode.get() == MiningMode.DIAMOND,
+            findSlot(Items.CRAFTING_TABLE) != -1
+        );
+        if (missing != null) {
+            error("背包缺少必要物品！需要：" + missing);
             toggle();
             return;
         }
@@ -747,7 +740,12 @@ public class AutoMining extends Module {
         if (emptyBoxInEc != -1) {
             mc.interactionManager.clickSlot(h.syncId, emptyBoxInEc, 0, SlotActionType.QUICK_MOVE, mc.player);
             debug("已从末影箱取出空潜影盒，继续放置");
-            waitTicks(MiningState.STORING_IN_ENDER_CHEST, 4);
+            // V4.40：取盒完成 → 关界面 → 挖掉末影箱回收（对齐 misaka 顺序：取空盒后接 MINING_ENDER_CHEST）。
+            // 修复原逻辑取到空盒后仍在 STORING_IN_ENDER_CHEST 循环取盒、把空盒取光才断开的死循环。
+            // 下一轮 PLACING_SHULKER 放盒时用刚取到的空盒（中间隔了挖/拾取末影箱，服务端回包已同步）。
+            mc.player.closeHandledScreen();
+            storingToEnder = false;
+            state = MiningState.MINING_ENDER_CHEST;
             return;
         }
 
