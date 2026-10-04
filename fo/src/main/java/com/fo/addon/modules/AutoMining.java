@@ -130,6 +130,12 @@ public class AutoMining extends Module {
         .defaultValue(true)
         .build());
 
+    private final Setting<Boolean> autoKillAura = sgGeneral.add(new BoolSetting.Builder()
+        .name("联动杀戮光环")
+        .description("开启自动挖矿时同步开启 FO杀戮光环，关闭时同步关闭（成对联动）")
+        .defaultValue(true)
+        .build());
+
     private final Setting<Boolean> debugOutput = sgGeneral.add(new BoolSetting.Builder()
         .name("调试输出")
         .description("在聊天栏输出详细状态信息.")
@@ -269,6 +275,12 @@ public class AutoMining extends Module {
             if (trash != null) trash.enableForMineLink();
         }
 
+        // FO杀戮光环联动（成对：开→开）
+        if (autoKillAura.get()) {
+            FOKillAura ka = Modules.get().get(FOKillAura.class);
+            if (ka != null && !ka.isActive()) ka.toggle();
+        }
+
         // 初始化状态
         state = MiningState.MINING;
         tickCount = 0;
@@ -289,6 +301,11 @@ public class AutoMining extends Module {
         if (autoTrash.get()) {
             AutoTrash trash = Modules.get().get(AutoTrash.class);
             if (trash != null) trash.disableForMineLink();
+        }
+        // FO杀戮光环联动（成对：关→关）
+        if (autoKillAura.get()) {
+            FOKillAura ka = Modules.get().get(FOKillAura.class);
+            if (ka != null && ka.isActive()) ka.toggle();
         }
         PathManagers.get().stop();
         state = MiningState.IDLE;
@@ -1515,9 +1532,14 @@ public class AutoMining extends Module {
 
     /** 确保手持时运镐（挖矿状态每 20 tick 调用；防 Baritone/手动挖选中精准采集镐挖钻石 → 掉原矿） */
     private void ensureFortunePickaxeHeld() {
-        // 自动吃保护：AutoEat 正在吃/玩家正在使用物品时不抢槽位，等吃完下一 tick 再锁回时运镐（修复与 AutoEat 抢槽死循环）
+        // 自动吃/杀戮光环保护：AutoEat 在吃、玩家正在使用物品、FO杀戮光环正在攻击时
+        // 不抢槽位，等结束下一 tick 再锁回时运镐（修复与 AutoEat/杀戮光环抢槽死循环）
         AutoEat autoEat = Modules.get().get(AutoEat.class);
-        if (MiningGuard.shouldSkipFortuneLock(mc.player.isUsingItem(), autoEat != null && autoEat.eating)) return;
+        FOKillAura ka = Modules.get().get(FOKillAura.class);
+        if (MiningGuard.shouldSkipFortuneLock(
+            mc.player.isUsingItem(),
+            autoEat != null && autoEat.eating,
+            ka != null && ka.attacking)) return;
 
         ItemStack held = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
         if (isPickaxe(held.getItem()) && getFortuneLevel(held) > 0) return;

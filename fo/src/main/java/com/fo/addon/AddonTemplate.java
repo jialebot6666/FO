@@ -6,6 +6,7 @@ import com.fo.addon.modules.AutoMining;
 import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
+import com.fo.addon.modules.FOKillAura;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -28,6 +29,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoLog());
         Modules.get().add(new AutoMineSand());
         Modules.get().add(new AutoMining());
+        Modules.get().add(new FOKillAura());
     }
 
     @Override
