@@ -4,7 +4,10 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
+import com.fo.addon.utils.MiningGuard;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -15,6 +18,7 @@ import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.EnderChestBlock;
 import net.minecraft.block.ShulkerBoxBlock;
@@ -432,48 +436,28 @@ public class AutoMining extends Module {
     private void inventoryFull() {
         BlockPos playerPos = mc.player.getBlockPos();
 
-        // y 太低时（下界 y<6）优先找更高的安全点
-        int minY = mc.world.getRegistryKey() == World.NETHER ? 6 : -58;
-        if (playerPos.getY() - 2 < minY) {
-            BlockPos alt = findSafeSpot(playerPos, 32);
-            if (alt != null) {
-                safeSpot = alt;
-                debug("找到安全位置: " + alt.toShortString());
-                state = MiningState.PATHING_TO_SAFE_SPOT;
-                return;
-            }
-            debug("在32格范围内找不到合适的放置位置");
-        }
-
-        // 玩家周围 5x5x5 全是实体方块 → 就地清理 3x3x3
-        if (isSolidSurrounding(playerPos)) {
-            safeSpot = playerPos;
-            debug("玩家周围5x5x5全是实体方块，准备挖掘3x3x3空间");
-            state = MiningState.CLEARING_AREA;
+        // misaka x0027：背包满 → 找安全位置；找到后 2 格内就地清理 3x3x3，否则寻路过去
+        BlockPos spot = findSafeSpot();
+        if (spot == null) {
+            error("找不到安全的位置放置方块");
+            toggle();
             return;
         }
-
-        // 32 格范围找安全位置
-        BlockPos spot = findSafeSpot(playerPos, 32);
-        if (spot != null) {
-            safeSpot = spot;
-            debug("找到安全位置: " + spot.toShortString());
-            state = MiningState.PATHING_TO_SAFE_SPOT;
-        } else {
-            debug("在32格范围内找不到合适的放置位置");
-            state = MiningState.FINDING_SAFE_SPOT;
-        }
+        safeSpot = spot;
+        debug("找到安全位置: " + spot.toShortString());
+        double dist = playerPos.getSquaredDistance(spot);
+        state = dist < 4 ? MiningState.CLEARING_AREA : MiningState.PATHING_TO_SAFE_SPOT;
     }
 
-    /** FINDING_SAFE_SPOT：重新找安全位置 */
+    /** FINDING_SAFE_SPOT：重新找安全位置（misaka x0027 同款：找到后按距离分流） */
     private void findingSafeSpot() {
         if (safeSpot == null) {
-            BlockPos spot = findSafeSpot(mc.player.getBlockPos(), 32);
+            BlockPos spot = findSafeSpot();
             if (spot != null) {
                 safeSpot = spot;
                 info("找到安全位置: " + spot.toShortString());
             } else {
-                info("在32格范围内找不到合适的放置位置，等待后重试");
+                info("找不到安全的位置放置方块，等待后重试");
                 waitTicks(MiningState.FINDING_SAFE_SPOT, 40);
                 return;
             }
@@ -1371,59 +1355,57 @@ public class AutoMining extends Module {
 
     // ================= 位置搜索 =================
 
-    /** 玩家周围 5x5x5 是否全是实体方块 */
-    private boolean isSolidSurrounding(BlockPos center) {
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dy = -2; dy <= 2; dy++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    if (!mc.world.getBlockState(center.add(dx, dy, dz)).isSolid()) return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    /** 在 range 格范围内找安全位置：实心方块 + 上方 2 格空气 + 非液体（移植 misaka findSafeSpot） */
-    private BlockPos findSafeSpot(BlockPos center, int range) {
-        BlockPos best = null;
-        double bestDist = Double.MAX_VALUE;
-        for (int dx = -range; dx <= range; dx++) {
-            for (int dy = -8; dy <= 8; dy++) {
-                for (int dz = -range; dz <= range; dz++) {
-                    BlockPos p = center.add(dx, dy, dz);
-                    if (!mc.world.getBlockState(p).isSolid()) continue;
-                    if (!mc.world.getBlockState(p.up()).isAir() || !mc.world.getBlockState(p.up(2)).isAir()) continue;
-                    if (!mc.world.getBlockState(p).getFluidState().isEmpty()) continue;
-                    double d = p.getSquaredDistance(center);
-                    if (d < bestDist) {
-                        bestDist = d;
-                        best = p;
+    /** misaka x0015：从玩家位置半径 3→128 方形递增扫描（Y ±3），第一个非液体实心方块即返回 */
+    private BlockPos findSafeSpot() {
+        BlockPos playerPos = mc.player.getBlockPos();
+        for (int r = 3; r <= 128; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -3; dy <= 3; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        BlockPos p = playerPos.add(dx, dy, dz);
+                        if (isSafeSpotBlock(p)) return p;
                     }
                 }
             }
         }
-        return best;
+        return null;
     }
 
-    /** 在 safeSpot 周围 3x3 找可放置位置：空气 + 下方实心 + 非液体 */
+    /** 安全位置判定（misaka 语义）：实心方块（可站立/可挖）且非液体 */
+    private boolean isSafeSpotBlock(BlockPos p) {
+        BlockState state = mc.world.getBlockState(p);
+        if (state.isAir() || !state.isSolid()) return false;
+        return state.getFluidState().isEmpty();
+    }
+
+    /** misaka x0023()：先玩家当前 Y 层在 safeSpot X/Z ±1 找 3×3，再 safeSpot 周围 3×3×3 */
     private BlockPos findPlacePosition(BlockPos center) {
-        BlockPos best = null;
-        double bestDist = Double.MAX_VALUE;
+        int playerY = mc.player.getBlockPos().getY();
+        // 第一轮：玩家所在 Y 层（玩家脚部通常站在实心地面上）
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                BlockPos p = center.add(dx, 0, dz);
-                if (p.equals(mc.player.getBlockPos())) continue;
-                if (!mc.world.getBlockState(p).isAir()) continue;
-                if (!mc.world.getBlockState(p.down()).isSolid()) continue;
-                if (!mc.world.getBlockState(p).getFluidState().isEmpty()) continue;
-                double d = p.getSquaredDistance(mc.player.getBlockPos());
-                if (d < bestDist) {
-                    bestDist = d;
-                    best = p;
+                BlockPos p = new BlockPos(center.getX() + dx, playerY, center.getZ() + dz);
+                if (canPlaceAt(p)) return p;
+            }
+        }
+        // 第二轮：safeSpot 周围 3x3x3
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos p = center.add(dx, dy, dz);
+                    if (canPlaceAt(p)) return p;
                 }
             }
         }
-        return best;
+        return null;
+    }
+
+    /** 放置判定（misaka x0023(BlockPos)）：目标格空气 + 下方非空气/非液体 */
+    private boolean canPlaceAt(BlockPos p) {
+        if (!mc.world.getBlockState(p).isAir()) return false;
+        BlockState below = mc.world.getBlockState(p.down());
+        if (below.isAir()) return false;
+        return below.getFluidState().isEmpty();
     }
 
     /** 拾取目标掉落物（10 格内最近） */
@@ -1533,6 +1515,10 @@ public class AutoMining extends Module {
 
     /** 确保手持时运镐（挖矿状态每 20 tick 调用；防 Baritone/手动挖选中精准采集镐挖钻石 → 掉原矿） */
     private void ensureFortunePickaxeHeld() {
+        // 自动吃保护：AutoEat 正在吃/玩家正在使用物品时不抢槽位，等吃完下一 tick 再锁回时运镐（修复与 AutoEat 抢槽死循环）
+        AutoEat autoEat = Modules.get().get(AutoEat.class);
+        if (MiningGuard.shouldSkipFortuneLock(mc.player.isUsingItem(), autoEat != null && autoEat.eating)) return;
+
         ItemStack held = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
         if (isPickaxe(held.getItem()) && getFortuneLevel(held) > 0) return;
         int slot = findFortunePickaxeSlot();
