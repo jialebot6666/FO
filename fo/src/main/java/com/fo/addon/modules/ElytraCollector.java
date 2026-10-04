@@ -4,6 +4,8 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.FlightApproachLogic;
+import com.fo.addon.utils.FlightEscapeLogic;
 import com.fo.addon.utils.FlightFireworkLogic;
 import com.fo.addon.utils.ReturnPathLogic;
 import com.fo.addon.utils.SearchExpansionLogic;
@@ -200,6 +202,7 @@ public class ElytraCollector extends Module {
         .defaultValue(54.77)
         .range(5.0, 80.0)
         .sliderRange(5.0, 80.0)
+        .visible(() -> false) // V4.48 对齐 Ying：巡航爬升实际使用「起飞拉升角度」(45°)，本设置已不接入飞行逻辑（Ying 中同为被 UI 移除的僵尸设置）
         .build()
     );
 
@@ -438,6 +441,10 @@ public class ElytraCollector extends Module {
     private boolean resupplyRescan = false;  // 存鞘翅腾空间后，重新从头扫描末影箱找补给盒 (补给盒已在游标之前)
     private boolean standingMovedOff = false; // 打开容器失败时是否已触发"站在容器上走下来"流程
 
+    // ========== 飞行安全状态（对齐 Ying ElytraApproachSafety22 / ElytraSafeEscape） ==========
+    private final FlightApproachLogic.State approachState = new FlightApproachLogic.State();
+    private final FlightEscapeLogic.State escapeState = new FlightEscapeLogic.State();
+
     // ========== Constructor ==========
     public ElytraCollector() {
         super(AddonTemplate.CATEGORY, "FO 鞘翅采集",
@@ -495,6 +502,10 @@ public class ElytraCollector extends Module {
         storageTick = 0;
         boxInventorySlot = -1;
         resetStorageClick();
+        // V4.48 对齐 Ying：飞行安全会话随停用重置（ElytraApproachSafety22/ElytraSafeEscape 的 WeakHashMap 状态）
+        approachState.targetKey = null;
+        escapeState.stage = FlightEscapeLogic.Stage.ESCAPE;
+        escapeState.ticks = 0;
         releaseForward();
         PathManagers.get().stop();
     }
@@ -787,6 +798,9 @@ public class ElytraCollector extends Module {
             if (state != State.IDLE && state != State.DONE
                 && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
                 warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
+                // V4.48 对齐 Ying LowYSafetyLogout：低Y退出时顺带关闭 FOKillAura
+                FOKillAura ka = Modules.get().get(FOKillAura.class);
+                if (ka != null && ka.isActive()) ka.toggle();
                 disconnect("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
                 stopTask("低高度自动退出游戏.");
                 return;
@@ -819,6 +833,8 @@ public class ElytraCollector extends Module {
 
     // ========== 起飞爬升 (跳 -> 展开鞘翅 -> 抬头 -> 烟花爬升) ==========
     private void onRising() {
+        // 安全复飞（对齐 Ying ElytraSafeEscape）：落地恢复时优先三段式接管（背离 90 格→船外爬升→重新接近）
+        if (landingRecover && onSafeEscape()) return;
         // 恢复流程有独立的阶段超时保护 (30s/30s/20s)，不套用普通起飞超时 (恢复全程可达几十秒)
         if (!landingRecover && stateTick > 400) {
             error("起飞超时 (可能没穿鞘翅或没有烟花).");
@@ -1023,6 +1039,10 @@ public class ElytraCollector extends Module {
             }
         }
 
+        // 接近防撞塔（对齐 Ying ElytraApproachSafety22）：距降落点 ≤200 格开始动态预测滑翔轨迹，
+        // 预测会撞就朝船拉升，距 ≤80 且已确认鞘翅则交接降落
+        if (onApproachSafety()) return;
+
         // 高度保持滞回飞行
         float yaw = yawTowards(lp);
         double y = mc.player.getY();
@@ -1031,7 +1051,8 @@ public class ElytraCollector extends Module {
         } else {
             if (y <= minHeight.get()) climbing = true;
         }
-        float pitch = climbing ? -(float) cruiseClimbPitch.get().doubleValue() : (float) cruiseGlidePitch.get().doubleValue();
+        // V4.48 对齐 Ying：巡航爬升使用「起飞拉升角度」(45°)，cruiseClimbPitch 已隐藏为僵尸设置
+        float pitch = climbing ? -(float) takeoffPitch.get().doubleValue() : (float) cruiseGlidePitch.get().doubleValue();
 
         rotateTo(yaw, pitch);
         mc.options.forwardKey.setPressed(true);
@@ -1042,7 +1063,9 @@ public class ElytraCollector extends Module {
             lastFireworkTick = stateTick;
         }
 
-        // 先飞到降落点正上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
+        // 先飞到降落点上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
+        // V4.48 对齐 Ying：进入降落距离 3 → 80（LANDING_HANDOFF_DISTANCE），让 onLanding 三段下降（俯冲/渐进/缓降）真正生效；
+        // 条件也按 Ying `!climbing && 已检查展示框 && 框里有鞘翅 && 水平距离≤80`
         if (frameAirEmpty) {
             if (mc.player.getY() < maxHeight.get()) {
                 climbing = true;
@@ -1055,10 +1078,192 @@ public class ElytraCollector extends Module {
                 leaveShipNow();
                 return;
             }
-        } else if (headFound && horizontalDistance(lp) <= 3) {
+        } else if (headFound && !climbing && frameAirChecked && !frameAirEmpty
+            && horizontalDistance(lp) <= FlightApproachLogic.LANDING_HANDOFF_DISTANCE) {
             state = State.LANDING;
             stateTick = 0;
         }
+    }
+
+    // ========== 接近防撞塔（对齐 Ying ElytraApproachSafety22） ==========
+    // 距降落点 ≤200 格开始动态预测滑翔轨迹：预测到达高度 = 当前Y - 水平距离×tan(接近俯冲角)，
+    // 预测会撞（低于安全高度=降落点Y+30）→ 朝船直接拉升（pitch -起飞拉升角 + 烟花）到目标高度后恢复接近；
+    // 距 ≤80 且已确认展示框、框里有鞘翅 → 交接降落（返回 true = 本 tick 已接管飞行控制）
+    private boolean onApproachSafety() {
+        if (!mc.player.isGliding()) return false;
+        if (waypoints == null) { approachState.targetKey = null; return false; }
+        BlockPos lp = waypoints.landing;
+        if (lp == null) { approachState.targetKey = null; return false; }
+
+        double px = mc.player.getX(), py = mc.player.getY(), pz = mc.player.getZ();
+        double lx = lp.getX() + 0.5, ly = lp.getY(), lz = lp.getZ() + 0.5;
+        double hDist = Math.hypot(px - lx, pz - lz);
+
+        // 目标变化（换船/重新起飞）时重置会话
+        String key = (int) lx + "," + (int) ly + "," + (int) lz;
+        if (!key.equals(approachState.targetKey)) {
+            approachState.targetKey = key;
+            approachState.mode = FlightApproachLogic.Mode.NORMAL;
+            approachState.ticks = 0;
+            approachState.announced = false;
+        }
+        if (!FlightApproachLogic.shouldIntervene(hDist, approachState.mode)) return false;
+
+        double glide = cruiseGlidePitch.get().doubleValue();
+        double safeY = FlightApproachLogic.safeY(ly);
+        double predicted = FlightApproachLogic.predictedY(py, hDist, glide);
+        approachState.safeY = safeY;
+        approachState.predictedY = predicted;
+
+        // 距≤80、已确认展示框、框里有鞘翅 → 交接降落（对齐 Ying LANDING_HANDOFF_DISTANCE=80）
+        if (FlightApproachLogic.shouldHandoffToLanding(hDist, frameAirChecked, frameAirEmpty)) {
+            releaseForward();
+            climbing = false;
+            stateTick = 0;
+            state = State.LANDING;
+            approachState.targetKey = null;
+            debugLog("防撞塔: 已确认鞘翅，距离 " + String.format("%.1f", hDist) + " 格，切换降落.");
+            return true;
+        }
+
+        // 首次介入决策：预测高度足够 → 正常接近；不足 → 朝船拉升
+        if (!approachState.announced) {
+            approachState.announced = true;
+            if (FlightApproachLogic.decideMode(predicted, safeY) == FlightApproachLogic.Mode.NORMAL) {
+                debugLog("防撞塔: 预测到船位置 Y≈" + String.format("%.1f", predicted) + "，安全高度 Y=" + String.format("%.1f", safeY) + "，可直接从船上方接近.");
+            } else {
+                approachState.mode = FlightApproachLogic.Mode.CLIMB;
+                approachState.awayYaw = yawTowards(lp);
+                approachState.ticks = 0;
+                debugLog("防撞塔: 预测到船位置 Y≈" + String.format("%.1f", predicted) + " < 安全高度 Y=" + String.format("%.1f", safeY) + "，直接朝向末地城拉升.");
+            }
+        }
+        approachState.ticks++;
+
+        if (approachState.mode == FlightApproachLogic.Mode.CLIMB) {
+            // 朝船拉升：pitch -起飞拉升角，按间隔放烟花加速，到目标高度后恢复接近
+            rotateTo(approachState.awayYaw, -(float) takeoffPitch.get().doubleValue());
+            mc.options.forwardKey.setPressed(true);
+            int n = FlightEscapeLogic.fireworkIntervalTicks(fireworkInterval.get());
+            if (approachState.ticks == 1 || approachState.ticks % n == 0) {
+                useFirework();
+            }
+            double needed = FlightApproachLogic.neededY(hDist, glide, ly);
+            if (py >= needed) {
+                approachState.mode = FlightApproachLogic.Mode.REAPPROACH;
+                approachState.ticks = 0;
+                firstFireworkDone = false;
+                debugLog("防撞塔: 拉升到 Y=" + String.format("%.1f", py) + "，恢复安全接近.");
+            }
+            return true;
+        }
+
+        // 正常接近 / 恢复接近：对准降落点，小角度下滑（俯冲角夹到 3~12 度）
+        rotateTo(yawTowards(lp), (float) FlightApproachLogic.approachPitch(glide));
+        mc.options.forwardKey.setPressed(true);
+        climbing = false;
+        approachState.predictedY = FlightApproachLogic.predictedY(py, hDist, glide);
+        if (FlightApproachLogic.shouldClimbAgain(approachState.predictedY, safeY, hDist)) {
+            approachState.mode = FlightApproachLogic.Mode.CLIMB;
+            approachState.awayYaw = yawTowards(lp);
+            approachState.ticks = 0;
+            firstFireworkDone = false;
+            debugLog("防撞塔: 接近中预测高度不足 (Y≈" + String.format("%.1f", approachState.predictedY) + " < " + String.format("%.1f", safeY + 3.0) + ")，继续拉升.");
+            return true;
+        }
+        return hDist <= FlightApproachLogic.TRIGGER_DISTANCE || approachState.mode == FlightApproachLogic.Mode.REAPPROACH;
+    }
+
+    // ========== 安全复飞（对齐 Ying ElytraSafeEscape） ==========
+    // 落地恢复三段式：阶段0 水平背离末地城 90 格（pitch 0）→ 阶段1 船外爬升到降落点上方 30 格（pitch -起飞拉升角+烟花）
+    // → 阶段2 重新接近（俯冲角 3~12 度），距 ≤28 且高度 ≥降落点+10 → 转降落
+    private boolean onSafeEscape() {
+        if (waypoints == null) { landingRecover = false; return false; }
+        BlockPos lp = waypoints.landing;
+        if (lp == null) { landingRecover = false; return false; }
+
+        double px = mc.player.getX(), py = mc.player.getY(), pz = mc.player.getZ();
+        double lx = lp.getX() + 0.5, ly = lp.getY(), lz = lp.getZ() + 0.5;
+        double hDist = Math.hypot(px - lx, pz - lz);
+
+        // 未展开鞘翅：先展开（在地面先跳起，在空中发展开包），本 tick 由复飞接管
+        if (!mc.player.isGliding()) {
+            if (mc.player.isOnGround()) {
+                PathManagers.get().stop();
+                mc.player.jump();
+            } else if (stateTick % 4 == 0) {
+                mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            }
+            return true;
+        }
+
+        // 阶段0 起始：记录背离方向（背对降落点）
+        if (escapeState.ticks == 0 && escapeState.stage == FlightEscapeLogic.Stage.ESCAPE) {
+            escapeState.awayYaw = FlightEscapeLogic.escapeYaw(yawTowards(lp));
+            debugLog("安全复飞: 进入船底逃逸，先水平背离末地城，达到约 90 格安全距离后再抬头.");
+        }
+        escapeState.ticks++;
+
+        switch (escapeState.stage) {
+            case ESCAPE -> {
+                // 阶段0：水平背离，pitch 0，≥60 tick 后每 max(烟花间隔,40) tick 放一次烟花
+                rotateTo(escapeState.awayYaw, 0f);
+                mc.options.forwardKey.setPressed(true);
+                int n = FlightEscapeLogic.fireworkIntervalTicks(fireworkInterval.get());
+                if (FlightEscapeLogic.escapeFireworkDue(escapeState.ticks, n)) {
+                    useFirework();
+                }
+                if (FlightEscapeLogic.shouldStartClimb(hDist)) {
+                    escapeState.stage = FlightEscapeLogic.Stage.CLIMB;
+                    escapeState.ticks = 0;
+                    debugLog("安全复飞: 已离开船体水平范围 (" + String.format("%.1f", hDist) + " 格)，开始在船外爬升到 Y=" + (int) (ly + FlightEscapeLogic.SAFE_HEIGHT_ABOVE_LANDING) + ".");
+                }
+                return true;
+            }
+            case CLIMB -> {
+                // 阶段1：船外爬升，pitch -起飞拉升角，首 tick 与每间隔 tick 放烟花
+                rotateTo(escapeState.awayYaw, -(float) takeoffPitch.get().doubleValue());
+                mc.options.forwardKey.setPressed(true);
+                int n = FlightEscapeLogic.fireworkIntervalTicks(fireworkInterval.get());
+                if (FlightEscapeLogic.climbFireworkDue(escapeState.ticks, n)) {
+                    useFirework();
+                }
+                if (FlightEscapeLogic.shouldStartReapproach(py, ly)) {
+                    escapeState.stage = FlightEscapeLogic.Stage.REAPPROACH;
+                    escapeState.ticks = 0;
+                    firstFireworkDone = false;
+                    debugLog("安全复飞: 已到达船体上方安全高度，开始从船外重新接近.");
+                }
+                return true;
+            }
+            case REAPPROACH -> {
+                // 阶段2：重新接近，小角度下滑；高度不足且距>35 → 回阶段0；距≤28 且高度足够 → 转降落
+                rotateTo(yawTowards(lp), (float) FlightApproachLogic.approachPitch(cruiseGlidePitch.get().doubleValue()));
+                mc.options.forwardKey.setPressed(true);
+                if (FlightEscapeLogic.shouldRetreat(py, ly, hDist)) {
+                    escapeState.stage = FlightEscapeLogic.Stage.ESCAPE;
+                    escapeState.ticks = 0;
+                    escapeState.awayYaw = FlightEscapeLogic.escapeYaw(yawTowards(lp));
+                    firstFireworkDone = false;
+                    debugLog("安全复飞: 重新接近高度不足，取消本次接近并再次向船外撤离.");
+                    return true;
+                }
+                if (FlightEscapeLogic.shouldHandoffToLanding(py, ly, hDist)) {
+                    releaseForward();
+                    landingRecover = false;
+                    escapeState.stage = FlightEscapeLogic.Stage.ESCAPE;
+                    escapeState.ticks = 0;
+                    firstFireworkDone = false;
+                    debugLog("安全复飞: 已从安全高度返回船外，重新进入降落流程.");
+                    state = State.LANDING;
+                    stateTick = 0;
+                }
+                return true;
+            }
+        }
+        escapeState.stage = FlightEscapeLogic.Stage.ESCAPE;
+        escapeState.ticks = 0;
+        return true;
     }
 
     // ========== 与独立 PullUp 模块的协调 ==========
@@ -1346,6 +1551,10 @@ public class ElytraCollector extends Module {
         recoverStageTick = 0;
         recoverCount = 0;
         recoveryAttempts = 0;
+        // V4.48 对齐 Ying：飞行安全会话随停止重置（ElytraApproachSafety22/ElytraSafeEscape 的 WeakHashMap 状态）
+        approachState.targetKey = null;
+        escapeState.stage = FlightEscapeLogic.Stage.ESCAPE;
+        escapeState.ticks = 0;
         releaseForward();
         resetStorageClick();
         if (state != State.IDLE) state = State.IDLE;
