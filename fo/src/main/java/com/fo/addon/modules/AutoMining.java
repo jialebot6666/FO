@@ -6,6 +6,7 @@ import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.MiningGuard;
 import com.fo.addon.utils.CraftingSlotMath;
+import com.fo.addon.utils.PickupTimeoutLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
@@ -210,7 +211,8 @@ public class AutoMining extends Module {
 
     private int repairPickaxeSlot = -1;        // 需要修复的镐子背包槽
     private PickupTarget pickupTargetType = null;
-    private boolean pickupSeen = false;        // 拾取流程中是否曾检测到目标掉落物（消失=已捡到）
+    private int pickupBaseCount = 0;           // 进入拾取时背包中目标物品数量（计数+1即拾取完成，对齐 misaka）
+    private int pickupPathTicks = 0;           // 当前拾取寻路持续 tick（超过阈值强制取消重发，防无效路径卡死）
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
@@ -325,7 +327,8 @@ public class AutoMining extends Module {
         storingToEnder = false;
         pendingMiningTable = false;
         pendingTablePos = null;
-        pickupSeen = false;
+        pickupPathTicks = 0;
+        pickupBaseCount = 0;
     }
 
     @EventHandler
@@ -763,12 +766,11 @@ public class AutoMining extends Module {
         if (mineBlock(minePos)) {
             info("潜影盒已挖掉，准备拾取");
             minePos = null;
-            pickupTargetType = PickupTarget.SHULKER_BOX;
-            pickupTimeoutTicks = 0;
             // 钻石模式：存完盒后还需挖掉工作台（对齐 misaka：MINING_SHULKER→MINING_CRAFTING_TABLE）
             if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
                 pendingMiningTable = true;
             }
+            startPickup(PickupTarget.SHULKER_BOX);
             state = MiningState.PICKING_UP_ITEM;
         }
     }
@@ -782,8 +784,7 @@ public class AutoMining extends Module {
         if (mineBlock(placedPos)) {
             info("工作台已挖掉，准备拾取");
             placedPos = null;
-            pickupTargetType = PickupTarget.CRAFTING_TABLE;
-            pickupTimeoutTicks = 0;
+            startPickup(PickupTarget.CRAFTING_TABLE);
             state = MiningState.PICKING_UP_ITEM;
         }
     }
@@ -800,8 +801,7 @@ public class AutoMining extends Module {
             // 挖完立刻换回时运镐（V4.31 方案B：防下一轮挖矿用错工具）
             ensureFortunePickaxeHeld();
             placedPos = null;
-            pickupTargetType = PickupTarget.ENDER_CHEST;
-            pickupTimeoutTicks = 0;
+            startPickup(PickupTarget.ENDER_CHEST);
             state = MiningState.PICKING_UP_ITEM;
         }
     }
@@ -831,42 +831,101 @@ public class AutoMining extends Module {
         waitTicks(MiningState.STORING_IN_ENDER_CHEST, 10);
     }
 
-    /** PICKING_UP_ITEM：寻路拾取目标掉落物（10 格内检测，300 tick 超时断开） */
+    /** 进入拾取：记录目标类型、清超时/寻路计数、记录背包目标物品基数（计数+1即拾取完成，对齐 misaka） */
+    private void startPickup(PickupTarget target) {
+        pickupTargetType = target;
+        pickupTimeoutTicks = 0;
+        pickupPathTicks = 0;
+        pickupBaseCount = countTargetInInventory(target);
+    }
+
+    /** 背包中目标物品总数量（含堆栈合并后的数量） */
+    private int countTargetInInventory(PickupTarget target) {
+        int count = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (pickupItemMatches(s.getItem(), target)) count += s.getCount();
+        }
+        return count;
+    }
+
+    /** 物品是否匹配拾取目标 */
+    private boolean pickupItemMatches(Item item, PickupTarget target) {
+        return switch (target) {
+            case SHULKER_BOX -> isShulkerBoxItem(item);
+            case CRAFTING_TABLE -> item == Items.CRAFTING_TABLE;
+            case ENDER_CHEST -> item == Items.ENDER_CHEST;
+        };
+    }
+
+    /** PICKING_UP_ITEM：寻路拾取目标掉落物（10 格内检测，200 tick 超时；潜影盒超时断开，其余回挖矿重试） */
     private void pickingUpItem() {
         if (pickupTargetType == null) {
             state = MiningState.MINING;
             return;
         }
 
+        // ① 完成判定：背包目标物品计数 > 进入拾取时基数（misaka 语义，不受掉落物实体干扰）
+        if (countTargetInInventory(pickupTargetType) > pickupBaseCount) {
+            completePickup();
+            return;
+        }
+
         BlockPos drop = findPickupDrop(pickupTargetType);
         if (drop == null) {
-            if (pickupSeen) {
-                // 曾检测到掉落物、现在消失 = 已拾取完成（修复：捡到后走完成分支，不再误判超时）
-                pickupSeen = false;
-                completePickup();
-                return;
-            }
+            // 掉落物尚未生成/不可见：超时计数（不发起寻路，等生成）
             pickupTimeoutTicks++;
-            if (pickupTimeoutTicks > 300) {
-                info("拾取超时，重新开始挖掘");
-                pickupTargetType = null;
-                pickupSeen = false;
-                pendingMiningTable = false;
-                pendingTablePos = null;
-                state = MiningState.MINING;
-                return;
+            boolean wasShulker = pickupTargetType == PickupTarget.SHULKER_BOX;
+            switch (PickupTimeoutLogic.decide(wasShulker, pickupTimeoutTicks)) {
+                case WAIT -> {
+                    return;
+                }
+                case RETRY -> {
+                    // 工作台/末影箱超时：回挖矿重试
+                    info("拾取超时，重新开始挖掘");
+                    pickupTargetType = null;
+                    pendingMiningTable = false;
+                    pendingTablePos = null;
+                    state = MiningState.MINING;
+                    return;
+                }
+                case DISCONNECT -> {
+                    // ④ 潜影盒是核心资产：超时直接断开连接防丢（misaka 语义）
+                    info("拾取潜影盒超时，自动断开连接");
+                    pickupTargetType = null;
+                    pendingMiningTable = false;
+                    pendingTablePos = null;
+                    disconnect("§c拾取潜影盒超时，自动断开连接");
+                    return;
+                }
             }
             return;
         }
 
-        // 检测到掉落物（标记曾见过，用于拾取完成判定）
-        pickupSeen = true;
-
-        // 走到掉落物旁（自动拾取）
-        if (!PathManagers.get().isPathing()) {
-            PathManagers.get().moveTo(drop, false);
-            debug("正在前往拾取: " + drop.toShortString());
+        // ⑤ 周期性重发寻路（对齐 misaka：失败不死等）。寻路持续超过 2 秒未完成 → 强制取消重发
+        if (!PathManagers.get().isPathing() || pickupPathTicks > 40) {
+            if (pickupPathTicks > 40) {
+                PathManagers.get().stop();
+            }
+            // 掉落物 Y 非整数 → 寻路目标取上方格（GoalGetToBlock 目标在方块内部会寻路失败）
+            BlockPos goal = pickupGoalFor(pickupTargetType, drop);
+            PathManagers.get().moveTo(goal, false);
+            debug("正在前往拾取: " + goal.toShortString());
+            pickupPathTicks = 0;
         }
+        pickupPathTicks++;
+    }
+
+    /** 掉落物目标格修正：实体 Y 带小数 → 取上方格（对齐 misaka "掉落物Y坐标不是整数，先寻路到Y+1位置"） */
+    private BlockPos pickupGoalFor(PickupTarget target, BlockPos drop) {
+        for (Entity e : mc.world.getEntities()) {
+            if (!(e instanceof ItemEntity ie)) continue;
+            if (!pickupItemMatches(ie.getStack().getItem(), target)) continue;
+            if (!e.getBlockPos().equals(drop)) continue;
+            double y = e.getY();
+            return (Math.abs(y - Math.floor(y)) > 0.001) ? drop.up() : drop;
+        }
+        return drop;
     }
 
     /** 拾取完成公共收尾：回挖矿，或钻石模式接着挖工作台 */
@@ -874,6 +933,8 @@ public class AutoMining extends Module {
         PathManagers.get().stop();
         info("拾取完成");
         pickupTargetType = null;
+        pickupPathTicks = 0;
+        pickupBaseCount = 0;
         // 钻石模式：刚捡完潜影盒 → 接着挖工作台
         if (pendingMiningTable) {
             pendingMiningTable = false;
@@ -1043,6 +1104,15 @@ public class AutoMining extends Module {
 
         // 输出槽有钻石块 → 取出到背包，等 5 tick 完成
         if (!out.isEmpty() && out.getItem() == Items.DIAMOND_BLOCK) {
+            // V4.39 容量兜底（misaka 语义）：背包满时丢一组钻石腾出空间，保证产物能取走
+            if (!hasEmptyInventorySlot()) {
+                int dropDiamondSlot = findLargestDiamondSlot(h);
+                if (dropDiamondSlot != -1) {
+                    mc.interactionManager.clickSlot(h.syncId, dropDiamondSlot, 0, SlotActionType.PICKUP, mc.player);
+                    mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.PICKUP, mc.player);
+                    info("背包已满，丢弃一组钻石以腾出空间");
+                }
+            }
             mc.interactionManager.clickSlot(h.syncId, 0, 0, SlotActionType.QUICK_MOVE, mc.player);
             tookOutBlock = true;
             craftActionTicks = 5;
@@ -1353,6 +1423,14 @@ public class AutoMining extends Module {
     /** 找背包中指定物品槽（含快捷栏优先热键） */
     private int findInvSlot(Item item) {
         return findSlot(item);
+    }
+
+    /** 背包是否还有空槽 */
+    private boolean hasEmptyInventorySlot() {
+        for (int i = 0; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).isEmpty()) return true;
+        }
+        return false;
     }
 
     /** 潜影盒界面是否已满（27 格全非空） */
