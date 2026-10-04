@@ -4,7 +4,10 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.FlightFireworkLogic;
 import com.fo.addon.utils.ReturnPathLogic;
+import com.fo.addon.utils.SearchExpansionLogic;
+import com.fo.addon.utils.ShipFilterLogic;
 import com.fo.addon.utils.TrashDefaults;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
 import com.seedfinding.mccore.rand.ChunkRand;
@@ -179,6 +182,40 @@ public class ElytraCollector extends Module {
         .defaultValue(2.0)
         .min(0.5)
         .sliderRange(0.5, 10)
+        .build()
+    );
+
+    private final Setting<Double> takeoffPitch = sgFlight.add(new DoubleSetting.Builder()
+        .name("起飞拉升角度")
+        .description("首次起飞以及滑翔降到最低高度后的重新爬升角度（度）。达到最高高度后自动切换滑翔。")
+        .defaultValue(45.0)
+        .range(5.0, 80.0)
+        .sliderRange(5.0, 80.0)
+        .build()
+    );
+
+    private final Setting<Double> cruiseClimbPitch = sgFlight.add(new DoubleSetting.Builder()
+        .name("巡航爬升角度")
+        .description("长距离巡航到最低高度后使用的抬头角度（度）。")
+        .defaultValue(54.77)
+        .range(5.0, 80.0)
+        .sliderRange(5.0, 80.0)
+        .build()
+    );
+
+    private final Setting<Double> cruiseGlidePitch = sgFlight.add(new DoubleSetting.Builder()
+        .name("巡航滑翔角度")
+        .description("达到最高高度后使用的向下滑翔角度（度）。滑翔阶段不使用烟花，降到最低高度后重新爬升。")
+        .defaultValue(37.72)
+        .range(0.0, 70.0)
+        .sliderRange(0.0, 70.0)
+        .build()
+    );
+
+    private final Setting<Boolean> ignoreVisited = sgGeneral.add(new BoolSetting.Builder()
+        .name("忽略已访问记录")
+        .description("开启后重新扫描所有预测末地船，不使用旧的“已访问船”列表。适合旧版本记录异常时临时恢复搜索。")
+        .defaultValue(false)
         .build()
     );
 
@@ -548,42 +585,50 @@ public class ElytraCollector extends Module {
             int pz = (int) Math.floor(mc.player.getZ());
 
             int spacing = endCity.getSpacing();
-            int range = searchRange.get() + searchExtends * 500;
-            int regionRange = (range / (spacing * 16)) + 1;
+            int spacingBlocks = spacing * 16;
+            int baseRegionRange = SearchExpansionLogic.ringCount(searchRange.get(), spacingBlocks);
+            int maxRegionRange = SearchExpansionLogic.maxRing(spacingBlocks, baseRegionRange);
             int prx = Math.floorDiv(px >> 4, spacing);
             int prz = Math.floorDiv(pz >> 4, spacing);
 
             List<ShipTarget> found = new ArrayList<>();
+            int[] stats = new int[4]; // [0]=有船 [1]=可构造 [2]=排除(黑名单/已访问/会话) [3]=单点异常
 
-            for (int drx = -regionRange; drx <= regionRange; drx++) {
+            // 初始方形扫描
+            for (int drx = -baseRegionRange; drx <= baseRegionRange; drx++) {
                 if (searchCancelled || generation != searchGeneration) return;
-                for (int drz = -regionRange; drz <= regionRange; drz++) {
-                    int rx = prx + drx;
-                    int rz = prz + drz;
-                    CPos city = endCity.getInRegion(worldSeed, rx, rz, rand);
-                    if (city == null) continue;
-                    // 与 miku ElytraFinder 完全一致：seedfinding 生物群系判定 (末地中山/高岛)
-                    if (!endCity.canSpawn(city, biomeSource)) continue;
-                    // 与 miku ElytraFinder 完全一致：seedfinding 地形高度判定 (min(getHeightInGround) ≥ 60)
-                    if (!endCity.canGenerate(city, terrainGen)) continue;
-
-                    generator.generate(terrainGen, city.getX(), city.getZ(), rand);
-                    boolean hasShip = generator.hasShip();
-                    if (hasShip) {
-                        ShipTarget t = extractShip(generator, city);
-                        if (t != null && !isBlacklisted(t.headPos) && !sessionSkip.contains(blacklistKey(t.headPos))) {
-                            found.add(t);
-                            if (debugSetting.get()) {
-                                debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + t.facing
-                                    + " E=" + String.format("%.4f", endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
-                            }
-                        }
-                    }
-                    generator.reset();
+                for (int drz = -baseRegionRange; drz <= baseRegionRange; drz++) {
+                    ShipTarget t = scanShipCell(endCity, generator, rand, biomeSource, terrainGen, worldSeed, prx, prz, drx, drz, stats);
+                    if (t != null) found.add(t);
                 }
             }
 
             if (searchCancelled || generation != searchGeneration) return;
+
+            // 空结果 → 环形外扩 (对齐 Ying ElytraSearchFallback: square → ring 只扫新环带，不重扫旧区，上限 50000 格)
+            int expandedRange = searchRange.get();
+            if (found.isEmpty()) {
+                for (int ring = baseRegionRange + 1; ring <= maxRegionRange; ring++) {
+                    if (searchCancelled || generation != searchGeneration) return;
+                    int before = found.size();
+                    for (int drx = -ring; drx <= ring; drx++) {
+                        for (int drz = -ring; drz <= ring; drz++) {
+                            if (!SearchExpansionLogic.isRingBoundary(drx, drz, ring)) continue;
+                            ShipTarget t = scanShipCell(endCity, generator, rand, biomeSource, terrainGen, worldSeed, prx, prz, drx, drz, stats);
+                            if (t != null) found.add(t);
+                        }
+                    }
+                    expandedRange = ring * spacingBlocks;
+                    if (found.size() > before) break;
+                }
+            }
+
+            if (searchCancelled || generation != searchGeneration) return;
+
+            // 日志对齐 Ying 搜船回退口径
+            info("搜船回退: 基准=(" + px + "," + pz + "), 初始范围=" + searchRange.get() + ", 实际扩展范围=" + expandedRange
+                + ", 有船=" + stats[0] + ", 可构造=" + stats[1] + ", 排除=" + stats[2] + ", 恢复候选=" + found.size()
+                + ", 单点异常=" + stats[3] + ".");
 
             // 方向过滤：按玩家所在位置的方位过滤 (北/南/东/西 独立开关，可只搜单方向)
             {
@@ -611,16 +656,10 @@ public class ElytraCollector extends Module {
                 }
             }
 
-            info("找到 " + ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ").");
+            info("找到 " + ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + expandedRange + ").");
             if (ships.isEmpty()) {
-                if (searchExtends < 10) {
-                    searchExtends++;
-                    info("范围内没有末地船，扩大范围 +" + (searchExtends * 500) + " 格重新搜索...");
-                    launchSearch();
-                } else {
-                    searchExtends = 0;
-                    completeTask("范围内没有末地船，任务完成.");
-                }
+                searchExtends = 0;
+                completeTask("范围内没有末地船，任务完成.");
             } else {
                 searchExtends = 0;
                 if (state == State.SEARCHING) {
@@ -635,6 +674,50 @@ public class ElytraCollector extends Module {
                 state = State.IDLE;
                 btnOff();
             }
+        }
+    }
+
+    /**
+     * 扫描单个末地城单元格 (对齐 Ying ElytraSearchFallback.scanCell)：
+     * 单点异常跳过继续 (不中断整个搜索)，黑名单/已访问/本会话跳过按 ShipFilterLogic 判定。
+     * stats[0]=有船 [1]=可构造 [2]=排除 [3]=单点异常
+     */
+    private ShipTarget scanShipCell(EndCity endCity, EndCityGenerator generator, ChunkRand rand,
+                                    EndBiomeSource biomeSource, EndTerrainGenerator terrainGen,
+                                    long seed, int prx, int prz, int drx, int drz, int[] stats) {
+        int rx = prx + drx;
+        int rz = prz + drz;
+        CPos city = endCity.getInRegion(seed, rx, rz, rand);
+        if (city == null) return null;
+        // 与 miku ElytraFinder 完全一致：seedfinding 生物群系判定 (末地中山/高岛)
+        if (!endCity.canSpawn(city, biomeSource)) return null;
+        // 与 miku ElytraFinder 完全一致：seedfinding 地形高度判定 (min(getHeightInGround) ≥ 60)
+        if (!endCity.canGenerate(city, terrainGen)) return null;
+        try {
+            generator.generate(terrainGen, city.getX(), city.getZ(), rand);
+            boolean hasShip = generator.hasShip();
+            if (!hasShip) return null;
+            stats[0]++;
+            ShipTarget t = extractShip(generator, city);
+            if (t == null) return null;
+            stats[1]++;
+            // ③ 忽略已访问记录：开启时跳过黑名单过滤，重新扫描所有预测船
+            if (!ShipFilterLogic.shouldIncludeShip(ignoreVisited.get(), isBlacklisted(t.headPos), sessionSkip.contains(blacklistKey(t.headPos)))) {
+                stats[2]++;
+                return null;
+            }
+            if (debugSetting.get()) {
+                debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + t.facing
+                    + " E=" + String.format("%.4f", endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
+            }
+            return t;
+        } catch (Exception e) {
+            // 单点异常：跳过该城继续扫 (对齐 Ying scanCell 的 catch，不中断整个搜索)
+            stats[3]++;
+            if (debugSetting.get()) debugLog("单点异常跳过: city=(" + city.getX() + "," + city.getZ() + ") " + e.getMessage());
+            return null;
+        } finally {
+            generator.reset();
         }
     }
 
@@ -758,7 +841,7 @@ public class ElytraCollector extends Module {
                 rotateFastTo(recoveryYaw, mc.player.getPitch());
             } else {
                 // 阶段 1: pitch40 模式 (平滑转向 + 平缓下滑)，不用急速俯冲
-                rotateTo(yawTowards(waypoints.landing), 37.72f);
+                rotateTo(yawTowards(waypoints.landing), cruiseGlidePitch.get().floatValue());
             }
         } else if (takeoffFacing != null) {
             faceDirection(takeoffFacing);
@@ -766,7 +849,7 @@ public class ElytraCollector extends Module {
 
         // 降落恢复: 阶段 0 抬头爬升 (到降落点上方 25 格)；阶段 1 pitch40 模式下滑 (pitch 由 rotateTo 控制)；正常起飞抬头爬升
         if (!(landingRecover && recoverStage == 1)) {
-            mc.player.setPitch(-45f);
+            mc.player.setPitch(-(float) takeoffPitch.get().doubleValue());
         }
         mc.options.forwardKey.setPressed(true);
 
@@ -948,17 +1031,23 @@ public class ElytraCollector extends Module {
         } else {
             if (y <= minHeight.get()) climbing = true;
         }
-        float pitch = climbing ? -54.77f : 37.72f;
+        float pitch = climbing ? -(float) cruiseClimbPitch.get().doubleValue() : (float) cruiseGlidePitch.get().doubleValue();
 
         rotateTo(yaw, pitch);
         mc.options.forwardKey.setPressed(true);
+
+        // 对齐 Ying：巡航爬升阶段按间隔使用烟花加速 (防掉速)，滑翔/下滑阶段不烧烟花 (省消耗)
+        if (FlightFireworkLogic.shouldUseFirework(climbing, false, stateTick, lastFireworkTick, (int) Math.max(1, Math.round(fireworkInterval.get() * 20)))) {
+            useFirework();
+            lastFireworkTick = stateTick;
+        }
 
         // 先飞到降落点正上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
         if (frameAirEmpty) {
             if (mc.player.getY() < maxHeight.get()) {
                 climbing = true;
-                // 拉升时也要用烟花加速，否则速度掉光会坠落 (与 RISING 共用放烟花间隔)
-                if (stateTick - lastFireworkTick >= Math.max(1, Math.round(fireworkInterval.get() * 20))) {
+                // 紧急拉升：必须用烟花加速，否则速度掉光会坠落 (与 RISING 共用放烟花间隔)
+                if (FlightFireworkLogic.shouldUseFirework(climbing, true, stateTick, lastFireworkTick, (int) Math.max(1, Math.round(fireworkInterval.get() * 20)))) {
                     useFirework();
                     lastFireworkTick = stateTick;
                 }
