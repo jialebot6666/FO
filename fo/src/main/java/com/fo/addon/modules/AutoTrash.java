@@ -46,7 +46,7 @@ public class AutoTrash extends Module {
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
         .name("丢弃延迟")
         .description("每次丢弃之间的间隔（游戏刻）.")
-        .defaultValue(2)
+        .defaultValue(1)
         .min(1)
         .sliderMin(1)
         .sliderMax(20)

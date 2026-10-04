@@ -59,7 +59,7 @@ public class FOKillAura extends Module {
     private final Setting<Weapon> weapon = sgGeneral.add(new EnumSetting.Builder<Weapon>()
         .name("武器类型")
         .description("仅在手持指定武器时攻击实体")
-        .defaultValue(Weapon.All)
+        .defaultValue(Weapon.Sword)
         .build()
     );
 
@@ -73,7 +73,7 @@ public class FOKillAura extends Module {
     private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
         .name("自动切换")
         .description("攻击目标时自动切换到选定的武器")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
@@ -115,7 +115,7 @@ public class FOKillAura extends Module {
     public final Setting<Boolean> pauseOnCombat = sgGeneral.add(new BoolSetting.Builder()
         .name("暂停Baritone")
         .description("在攻击实体时暂时冻结 Baritone 自动寻路")
-        .defaultValue(true)
+        .defaultValue(false)
         .build()
     );
 
