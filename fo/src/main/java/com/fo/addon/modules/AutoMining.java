@@ -221,7 +221,6 @@ public class AutoMining extends Module {
     private PickupTarget pickupTargetType = null;
     private int pickupBaseCount = 0;           // 进入拾取时背包中目标物品数量（计数+1即拾取完成，对齐 misaka）
     private int pickupPathTicks = 0;           // 当前拾取寻路持续 tick（保留字段，V4.47 起不再用于门控）
-    private BlockPos pickupLastGoal = null;    // 上次拾取寻路目标（日志降噪：目标不变不重复打印）
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
@@ -849,7 +848,6 @@ public class AutoMining extends Module {
         pickupTargetType = target;
         pickupTimeoutTicks = 0;
         pickupPathTicks = 0;
-        pickupLastGoal = null;
         pickupBaseCount = countTargetInInventory(target);
     }
 
@@ -886,9 +884,15 @@ public class AutoMining extends Module {
             return;
         }
 
+        // ② V4.50 bug修复：改用 Baritone pickup 持续拾取（对齐挖沙 AutoMineSand 成功经验）。
+        //    原 moveTo(GoalGetToBlock) 只走到目标相邻格就停 → 玩家踩不到掉落物 → 拾取卡死"只发一次寻路"。
+        //    pickup 无距离限制（不受 findPickupDrop 10 格限制），捡完自动结束；重复调用 Baritone 内部复用不刷网络。
+        PathManagers.get().pickupItems(stack -> pickupItemMatches(stack.getItem(), pickupTargetType));
+
+        // ③ 超时兜底：掉落物实体不可见/已被别人捡走且背包计数未变 → 原超时逻辑
         BlockPos drop = findPickupDrop(pickupTargetType);
         if (drop == null) {
-            // 掉落物尚未生成/不可见：超时计数（不发起寻路，等生成）
+            // 掉落物尚未生成/不可见：超时计数（pickup 仍每 tick 发起，不因 drop 缺失而停止）
             pickupTimeoutTicks++;
             boolean wasShulker = pickupTargetType == PickupTarget.SHULKER_BOX;
             switch (PickupTimeoutLogic.decide(wasShulker, pickupTimeoutTicks)) {
@@ -899,6 +903,7 @@ public class AutoMining extends Module {
                     // V4.47 bug2a：对齐 misaka——拾取超时后，钻石模式还有待挖工作台 → 先挖工作台再回挖矿；
                     // 原逻辑直接清空 pendingTablePos 导致工作台被永久遗忘
                     info("拾取超时，重新开始挖掘");
+                    PathManagers.get().stop();
                     pickupTargetType = null;
                     if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
                         placedPos = pendingTablePos;
@@ -916,6 +921,7 @@ public class AutoMining extends Module {
                 case DISCONNECT -> {
                     // ④ 潜影盒是核心资产：超时直接断开连接防丢（misaka 语义）
                     info("拾取潜影盒超时，自动断开连接");
+                    PathManagers.get().stop();
                     pickupTargetType = null;
                     pendingMiningTable = false;
                     pendingTablePos = null;
@@ -926,27 +932,8 @@ public class AutoMining extends Module {
             return;
         }
 
-        // ⑤ V4.47 bug2b：对齐 misaka——找到实体就每 tick 无条件重发寻路（Baritone 对相同 goal 内部去重，
-        // 不刷网络）。不再依赖 isPathing()/40 tick 门控：Baritone 寻路进程挂起时旧逻辑会静默不再重发，
-        // 表现为"掉落物就在原地却只发了一次 moveTo"。日志只在目标变化时打一次，避免刷屏。
-        BlockPos goal = pickupGoalFor(pickupTargetType, drop);
-        PathManagers.get().moveTo(goal, false);
-        if (pickupLastGoal == null || !pickupLastGoal.equals(goal)) {
-            pickupLastGoal = goal;
-            debug("正在前往拾取: " + goal.toShortString());
-        }
-    }
-
-    /** 掉落物目标格修正：实体 Y 带小数 → 取上方格（对齐 misaka "掉落物Y坐标不是整数，先寻路到Y+1位置"） */
-    private BlockPos pickupGoalFor(PickupTarget target, BlockPos drop) {
-        for (Entity e : mc.world.getEntities()) {
-            if (!(e instanceof ItemEntity ie)) continue;
-            if (!pickupItemMatches(ie.getStack().getItem(), target)) continue;
-            if (!e.getBlockPos().equals(drop)) continue;
-            double y = e.getY();
-            return (Math.abs(y - Math.floor(y)) > 0.001) ? drop.up() : drop;
-        }
-        return drop;
+        // 有掉落物实体在 → 重置超时计数（pickup 进程持续追踪中）
+        pickupTimeoutTicks = 0;
     }
 
     /** 拾取完成公共收尾：V4.49 对齐 misaka case 0/1/2——满盒先换空盒（工作台延后），末影箱换完再挖工作台 */
@@ -1565,17 +1552,10 @@ public class AutoMining extends Module {
         return state.getFluidState().isEmpty();
     }
 
-    /** misaka x0023()：先玩家当前 Y 层在 safeSpot X/Z ±1 找 3×3，再 safeSpot 周围 3×3×3 */
+    /** 放置位置搜索（V4.50 对齐 misaka x0016：以 safeSpot 为中心 3x3x3 优先，不依赖玩家位置；
+     *  玩家在洞里/附近时再兜底玩家周围 3x3x3）——修复"拾取后玩家不在洞里导致放末影箱/放盒放不下" */
     private BlockPos findPlacePosition(BlockPos center) {
-        int playerY = mc.player.getBlockPos().getY();
-        // 第一轮：玩家所在 Y 层（玩家脚部通常站在实心地面上）
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                BlockPos p = new BlockPos(center.getX() + dx, playerY, center.getZ() + dz);
-                if (canPlaceAt(p)) return p;
-            }
-        }
-        // 第二轮：safeSpot 周围 3x3x3
+        // 第一轮（misaka x0016 语义）：safeSpot 周围 3x3x3，洞内总有可放格（工作台占位除外）
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
@@ -1584,15 +1564,29 @@ public class AutoMining extends Module {
                 }
             }
         }
+        // 第二轮兜底：玩家周围 3x3x3（玩家在洞里/附近时优先踩到的位置）
+        BlockPos playerPos = mc.player.getBlockPos();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos p = playerPos.add(dx, dy, dz);
+                    if (canPlaceAt(p)) return p;
+                }
+            }
+        }
         return null;
     }
 
-    /** 放置判定（misaka x0023(BlockPos)）：目标格空气 + 下方非空气/非液体 */
+    /** 放置判定纯逻辑（对齐 misaka x0023：目标格空气 + 下方非空气/非液体）——纯布尔可单测 */
+    public static boolean canPlaceOn(boolean targetIsAir, boolean belowIsAir, boolean belowFluidEmpty) {
+        return targetIsAir && !belowIsAir && belowFluidEmpty;
+    }
+
+    /** 放置判定（misaka x0023(BlockPos)：目标格空气 + 下方非空气/非液体） */
     private boolean canPlaceAt(BlockPos p) {
-        if (!mc.world.getBlockState(p).isAir()) return false;
+        BlockState target = mc.world.getBlockState(p);
         BlockState below = mc.world.getBlockState(p.down());
-        if (below.isAir()) return false;
-        return below.getFluidState().isEmpty();
+        return canPlaceOn(target.isAir(), below.isAir(), below.getFluidState().isEmpty());
     }
 
     /** 拾取目标掉落物（10 格内最近） */
