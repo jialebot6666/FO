@@ -5,7 +5,6 @@ import com.fo.addon.utils.RepairLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BlockPosSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -36,12 +35,13 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> yLevel = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> yLevel = sgGeneral.add(new IntSetting.Builder()
         .name("Y高度")
         .description("低于此 Y 自动下线.")
         .defaultValue(256)
         .min(-128)
-        .sliderRange(-128, 320)
+        .sliderMin(-128)
+        .sliderMax(320)
         .visible(logOnY::get)
         .build()
     );
@@ -61,12 +61,13 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> armorPercent = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> armorPercent = sgGeneral.add(new IntSetting.Builder()
         .name("护甲耐久阈值")
         .description("护甲剩余耐久低于此百分比时自动下线.")
         .defaultValue(5)
         .min(0)
-        .sliderRange(0, 100)
+        .sliderMin(0)
+        .sliderMax(100)
         .visible(logArmor::get)
         .build()
     );
@@ -103,11 +104,13 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> distance = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> distance = sgGeneral.add(new IntSetting.Builder()
         .name("触发距离")
         .description("距离坐标多远时自动下线.")
         .defaultValue(100)
-        .sliderRange(0, 1000)
+        .min(0)
+        .sliderMin(0)
+        .sliderMax(1000)
         .visible(logPosition::get)
         .build()
     );
@@ -153,11 +156,12 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> serverNotRespondingSecs = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> serverNotRespondingSecs = sgGeneral.add(new IntSetting.Builder()
         .name("无响应秒数")
         .description("服务器超过多少秒无响应自动下线.")
         .defaultValue(10)
         .min(1)
+        .sliderMin(1)
         .sliderMax(60)
         .visible(serverNotResponding::get)
         .build()
@@ -171,11 +175,12 @@ public class AutoLog extends Module {
         .build()
     );
 
-    private final Setting<Double> secondsToReconnect = sgGeneral.add(new DoubleSetting.Builder()
+    private final Setting<Integer> secondsToReconnect = sgGeneral.add(new IntSetting.Builder()
         .name("重连等待秒数")
         .description("重连前等待的秒数 (会临时覆盖 Meteor 的自动重连设置).")
         .defaultValue(60)
         .min(10)
+        .sliderMin(10)
         .sliderMax(60 * 5)
         .visible(() -> reconnectAfterNotResponding.get() && serverNotResponding.get())
         .build()
@@ -217,7 +222,7 @@ public class AutoLog extends Module {
                     autoReconnectEnabled = autoReconnect.isActive();
                     Setting<Double> delay = ((Setting<Double>) autoReconnect.settings.get("delay"));
                     oldDelay = delay.get();
-                    delay.set(secondsToReconnect.get());
+                    delay.set((double) secondsToReconnect.get());
                     if (!autoReconnectEnabled) {
                         autoReconnect.toggle();
                     }
