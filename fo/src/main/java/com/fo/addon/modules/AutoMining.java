@@ -6,6 +6,7 @@ import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.MiningGuard;
 import com.fo.addon.utils.CraftingSlotMath;
+import com.fo.addon.utils.PickupNextLogic;
 import com.fo.addon.utils.PickupTimeoutLogic;
 import com.fo.addon.utils.StartupCheckLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -880,7 +881,8 @@ public class AutoMining extends Module {
 
         // ① 完成判定：背包目标物品计数 > 进入拾取时基数（misaka 语义，不受掉落物实体干扰）
         if (countTargetInInventory(pickupTargetType) > pickupBaseCount) {
-            completePickup();
+            PickupTarget done = pickupTargetType; // 记录刚拾取的类型（completePickup 内会清空）
+            completePickup(done);
             return;
         }
 
@@ -947,23 +949,37 @@ public class AutoMining extends Module {
         return drop;
     }
 
-    /** 拾取完成公共收尾：回挖矿，或钻石模式接着挖工作台 */
-    private void completePickup() {
+    /** 拾取完成公共收尾：V4.49 对齐 misaka case 0/1/2——满盒先换空盒（工作台延后），末影箱换完再挖工作台 */
+    private void completePickup(PickupTarget done) {
         PathManagers.get().stop();
         info("拾取完成");
         pickupTargetType = null;
         pickupPathTicks = 0;
         pickupBaseCount = 0;
-        // 钻石模式：刚捡完潜影盒 → 接着挖工作台
-        if (pendingMiningTable) {
-            pendingMiningTable = false;
-            placedPos = pendingTablePos;
-            pendingTablePos = null;
-            info("拾取潜影盒完成，挖掉工作台");
-            state = MiningState.MINING_CRAFTING_TABLE;
-            return;
+
+        // 决策表（对齐 misaka x0275）：拾取类型 → 满盒/待挖工作台 → 下一步
+        switch (PickupNextLogic.decide(PickupNextLogic.PickupKind.valueOf(done.name()),
+            hasFullShulkerInInventory(), pendingMiningTable)) {
+            case PLACE_ENDER_CHEST -> {
+                // 拾取完潜影盒、背包仍有满盒 → 立即放末影箱换空盒（工作台留到换盒链完成后）
+                // 注意：不清 pendingTablePos/pendingMiningTable，换完盒后继续挖工作台
+                info("背包有满盒，先放置末影箱换空盒");
+                state = MiningState.PLACING_ENDER_CHEST;
+            }
+            case MINE_CRAFTING_TABLE -> {
+                // 末影箱换盒链完成 / 无满盒 → 接着挖工作台（对齐 misaka x0180 语义）
+                pendingMiningTable = false;
+                placedPos = pendingTablePos;
+                pendingTablePos = null;
+                info("拾取完成，挖掉工作台");
+                state = MiningState.MINING_CRAFTING_TABLE;
+            }
+            case MINING -> {
+                pendingMiningTable = false;
+                pendingTablePos = null;
+                state = MiningState.MINING;
+            }
         }
-        state = MiningState.MINING;
     }
 
     /** WAITING：倒计时后回上一状态 */
@@ -1479,6 +1495,27 @@ public class AutoMining extends Module {
             if (count >= 27 && allTarget) return i;
         }
         return -1;
+    }
+
+    /** 单个潜影盒堆是否为"满盒"（27 槽全满且无空槽）——纯逻辑，可单测；对齐 misaka x0024 */
+    public static boolean isShulkerFullStack(ItemStack stack) {
+        ContainerComponent c = stack.get(DataComponentTypes.CONTAINER);
+        if (c == null) return false;
+        int count = 0;
+        for (ItemStack inner : c.iterateNonEmpty()) {
+            count++;
+            if (inner.getCount() < inner.getMaxCount()) return false;
+        }
+        return count >= 27;
+    }
+
+    /** V4.49 对齐 misaka x0024：背包里是否有"满盒"（任何 27 槽全满的潜影盒）——拾取潜影盒后立即检测 */
+    private boolean hasFullShulkerInInventory() {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (isShulkerBoxItem(s.getItem()) && isShulkerFullStack(s)) return true;
+        }
+        return false;
     }
 
     /** 找容器空槽（0-26 范围） */
