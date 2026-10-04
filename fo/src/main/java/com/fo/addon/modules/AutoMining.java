@@ -219,7 +219,8 @@ public class AutoMining extends Module {
     private int repairPickaxeSlot = -1;        // 需要修复的镐子背包槽
     private PickupTarget pickupTargetType = null;
     private int pickupBaseCount = 0;           // 进入拾取时背包中目标物品数量（计数+1即拾取完成，对齐 misaka）
-    private int pickupPathTicks = 0;           // 当前拾取寻路持续 tick（超过阈值强制取消重发，防无效路径卡死）
+    private int pickupPathTicks = 0;           // 当前拾取寻路持续 tick（保留字段，V4.47 起不再用于门控）
+    private BlockPos pickupLastGoal = null;    // 上次拾取寻路目标（日志降噪：目标不变不重复打印）
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
@@ -613,7 +614,7 @@ public class AutoMining extends Module {
             mc.player.closeHandledScreen();
             // 记录工作台位置（后续存盒链会覆盖 placedPos），存完盒后回来挖掉
             pendingTablePos = placedPos;
-            info("钻石块合成完成，先放潜影盒存储");
+            info("合成阶段结束，先放潜影盒存储");
             state = MiningState.PLACING_SHULKER;
         }
     }
@@ -807,6 +808,11 @@ public class AutoMining extends Module {
             // 挖完立刻换回时运镐（V4.31 方案B：防下一轮挖矿用错工具）
             ensureFortunePickaxeHeld();
             placedPos = null;
+            // V4.47 bug1：对齐 misaka x0180 语义——末影箱链挖完同样挂"待挖工作台"标志，
+            // 拾取完成/超时后都先挖工作台，不再遗忘（原逻辑只有挖潜影盒时挂标志）
+            if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
+                pendingMiningTable = true;
+            }
             startPickup(PickupTarget.ENDER_CHEST);
             state = MiningState.PICKING_UP_ITEM;
         }
@@ -842,6 +848,7 @@ public class AutoMining extends Module {
         pickupTargetType = target;
         pickupTimeoutTicks = 0;
         pickupPathTicks = 0;
+        pickupLastGoal = null;
         pickupBaseCount = countTargetInInventory(target);
     }
 
@@ -887,12 +894,21 @@ public class AutoMining extends Module {
                     return;
                 }
                 case RETRY -> {
-                    // 工作台/末影箱超时：回挖矿重试
+                    // V4.47 bug2a：对齐 misaka——拾取超时后，钻石模式还有待挖工作台 → 先挖工作台再回挖矿；
+                    // 原逻辑直接清空 pendingTablePos 导致工作台被永久遗忘
                     info("拾取超时，重新开始挖掘");
                     pickupTargetType = null;
-                    pendingMiningTable = false;
-                    pendingTablePos = null;
-                    state = MiningState.MINING;
+                    if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
+                        placedPos = pendingTablePos;
+                        pendingTablePos = null;
+                        pendingMiningTable = false;
+                        info("拾取超时，先挖掉工作台");
+                        state = MiningState.MINING_CRAFTING_TABLE;
+                    } else {
+                        pendingMiningTable = false;
+                        pendingTablePos = null;
+                        state = MiningState.MINING;
+                    }
                     return;
                 }
                 case DISCONNECT -> {
@@ -908,18 +924,15 @@ public class AutoMining extends Module {
             return;
         }
 
-        // ⑤ 周期性重发寻路（对齐 misaka：失败不死等）。寻路持续超过 2 秒未完成 → 强制取消重发
-        if (!PathManagers.get().isPathing() || pickupPathTicks > 40) {
-            if (pickupPathTicks > 40) {
-                PathManagers.get().stop();
-            }
-            // 掉落物 Y 非整数 → 寻路目标取上方格（GoalGetToBlock 目标在方块内部会寻路失败）
-            BlockPos goal = pickupGoalFor(pickupTargetType, drop);
-            PathManagers.get().moveTo(goal, false);
+        // ⑤ V4.47 bug2b：对齐 misaka——找到实体就每 tick 无条件重发寻路（Baritone 对相同 goal 内部去重，
+        // 不刷网络）。不再依赖 isPathing()/40 tick 门控：Baritone 寻路进程挂起时旧逻辑会静默不再重发，
+        // 表现为"掉落物就在原地却只发了一次 moveTo"。日志只在目标变化时打一次，避免刷屏。
+        BlockPos goal = pickupGoalFor(pickupTargetType, drop);
+        PathManagers.get().moveTo(goal, false);
+        if (pickupLastGoal == null || !pickupLastGoal.equals(goal)) {
+            pickupLastGoal = goal;
             debug("正在前往拾取: " + goal.toShortString());
-            pickupPathTicks = 0;
         }
-        pickupPathTicks++;
     }
 
     /** 掉落物目标格修正：实体 Y 带小数 → 取上方格（对齐 misaka "掉落物Y坐标不是整数，先寻路到Y+1位置"） */
@@ -1134,8 +1147,11 @@ public class AutoMining extends Module {
 
         // 统计钻石（背包 + 合成格）
         if (diamondCount(h) < 9) {
-            debug("钻石不足9个，无法合成");
-            return false;
+            // V4.47 bug3：对齐 misaka——钻石不足 9 个视为"本轮合成结束"返回 true，关工作台进存储链，
+            // 防止永远卡在合成台退不出（原逻辑 return false 导致 CRAFTING 状态永不切换）
+            debug("钻石不足9个，无法合成，先存储现有钻石块");
+            tookOutBlock = false;
+            return true;
         }
 
         // 找最大钻石堆槽（背包）
