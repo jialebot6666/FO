@@ -1,0 +1,1489 @@
+package com.fo.addon.modules;
+
+import com.fo.addon.AddonTemplate;
+import com.fo.addon.pathing.PathManagers;
+import com.fo.addon.utils.FacingLogic;
+import com.fo.addon.utils.InteractionUtils;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.EnderChestBlock;
+import net.minecraft.block.ShulkerBoxBlock;
+import net.minecraft.client.gui.screen.ingame.CraftingScreen;
+import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.ContainerComponent;
+import net.minecraft.enchantment.EnchantmentHelper;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.ShulkerBoxScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.world.Heightmap;
+import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * AutoMining — FO 自动挖矿（V4.30）。
+ *
+ * <p>移植自 misaka AutoMiningModule 自动挖矿状态机（23 态），适配 Meteor Client 1.21.11：
+ * 钻石模式（主世界挖钻石矿，背包满后安全位置放工作台合成钻石块存入潜影盒）与
+ * 残骸模式（下界挖远古残骸直接存潜影盒，镐耐久低时挖石英合成石英块修镐）。
+ * Baritone 全部走 FO pathing 纯反射桥接；自动扔垃圾联动开启（白名单模式 + 确保含石英）。
+ *
+ * <p>模块名带 "FO " 前缀防重名冲突，前端全中文。
+ */
+public class AutoMining extends Module {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+
+    /** 挖矿模式 */
+    public enum MiningMode {
+        DIAMOND("钻石（主世界）"),
+        ANCIENT_DEBRIS("远古残骸（下界）");
+
+        private final String label;
+
+        MiningMode(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    /** 23 态状态机（对齐 misaka x0278） */
+    public enum MiningState {
+        IDLE,                    // 空闲（短暂等待后回到挖掘）
+        MINING,                  // 挖掘目标矿石
+        REPAIRING_PICKAXE,       // 挖石英修复镐子
+        INVENTORY_FULL,          // 背包满，寻找安全放置位置
+        FINDING_SAFE_SPOT,       // 重新寻找安全位置
+        PATHING_TO_SAFE_SPOT,    // 寻路前往安全位置
+        CLEARING_AREA,           // 挖掘 3x3x3 空间
+        PLACING_CRAFTING_TABLE,  // 放置工作台（钻石模式）
+        CRAFTING,                // 打开工作台合成钻石块
+        PLACING_SHULKER,         // 放置潜影盒
+        STORING_ITEMS,           // 往潜影盒存储目标物品
+        STORING_IN_ENDER_CHEST,  // 末影箱界面：存满盒 / 取空盒
+        MINING_SHULKER,          // 挖掉已装满的潜影盒
+        MINING_CRAFTING_TABLE,   // 挖掉工作台
+        MINING_ENDER_CHEST,      // 挖掉末影箱
+        PLACING_ENDER_CHEST,     // 放置末影箱
+        PICKING_UP_ITEM,         // 拾取掉落物（潜影盒/工作台/末影箱）
+        WAITING,                 // 等待 N tick 后回上一状态
+        PLACE_ROTATE_WAIT,       // 放置旋转等待（简化：直接放置）
+        PLACE_SNAPBACK_WAIT,     // 放置回弹等待（简化：直接恢复）
+        OPEN_ROTATE_WAIT,        // 打开容器旋转等待（简化：直接交互）
+        OPEN_SNAPBACK_WAIT,      // 打开回弹等待（简化：直接恢复）
+        ESCAPING_DEEP_DARK       // 逃离深暗之域（主世界）
+    }
+
+    /** 拾取目标类型 */
+    public enum PickupTarget {
+        SHULKER_BOX,
+        CRAFTING_TABLE,
+        ENDER_CHEST
+    }
+
+    private final Setting<MiningMode> miningMode = sgGeneral.add(new EnumSetting.Builder<MiningMode>()
+        .name("挖矿模式")
+        .description("钻石（主世界）或远古残骸（下界）.")
+        .defaultValue(MiningMode.DIAMOND)
+        .build());
+
+    private final Setting<Boolean> autoTrash = sgGeneral.add(new BoolSetting.Builder()
+        .name("自动扔垃圾")
+        .description("联动开启自动扔垃圾（白名单模式，确保石英在保留列表；石英块会主动丢弃）.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> debugOutput = sgGeneral.add(new BoolSetting.Builder()
+        .name("调试输出")
+        .description("在聊天栏输出详细状态信息.")
+        .defaultValue(false)
+        .build());
+
+    private final Setting<Boolean> avoidMobs = sgGeneral.add(new BoolSetting.Builder()
+        .name("怪物避让")
+        .description("设置 Baritone 怪物避让（探测半径/系数/刷怪笼避让）.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> avoidBlocks = sgGeneral.add(new BoolSetting.Builder()
+        .name("方块避让")
+        .description("设置 Baritone 避让深暗之域方块与刷怪笼，防止挖到监守者相关方块.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> avoidDeepDark = sgGeneral.add(new BoolSetting.Builder()
+        .name("深暗之域避让")
+        .description("主世界钻石模式下，检测到身处深暗之域（minecraft:deep_dark）时自动逃离到安全位置.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> pickaxeThreshold = sgGeneral.add(new IntSetting.Builder()
+        .name("镐子耐久阈值")
+        .description("镐子剩余耐久低于该值时，残骸模式自动挖石英修复（仅残骸模式生效）.")
+        .defaultValue(200)
+        .min(50)
+        .sliderMin(50)
+        .sliderMax(500)
+        .build());
+
+    private final Setting<Boolean> placeRotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("放置旋转")
+        .description("放置/打开容器前旋转视角对准目标，避免服务器视线回溯拒绝交互.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> craftWaitDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("合成等待延时")
+        .description("合成相关点击之间的等待刻数，避免点击过快被服务器忽略.")
+        .defaultValue(2)
+        .min(0)
+        .sliderMin(0)
+        .sliderMax(20)
+        .build());
+
+    // ===== 状态机 =====
+    private MiningState state = MiningState.IDLE;
+    private MiningState previousState = MiningState.IDLE;
+    private int stateWaitTicks = 0;
+    private int tickCount = 0;
+    private int lastPickaxeCheck = 0;
+    private int miningStartedTick = 0;
+    private int lastDeepDarkCheck = 0;
+    private int pathTimeoutTicks = 0;
+    private int pickupTimeoutTicks = 0;
+    private int craftActionTicks = 0;
+    private int placeActionTicks = 0;
+    private int lastTrashTick = -100;
+
+    // ===== 目标位置 =====
+    private BlockPos safeSpot = null;          // 安全放置位置（3x3x3 清理中心）
+    private BlockPos placeTarget = null;       // 待放置方块位置
+    private BlockPos placedPos = null;         // 已放置方块（工作台/潜影盒/末影箱）
+    private BlockPos minePos = null;           // 正在手动挖掘的方块
+    private BlockPos escapeTarget = null;      // 深暗之域逃离目标
+    private BlockPos openTarget = null;        // 待打开的容器
+
+    private int repairPickaxeSlot = -1;        // 需要修复的镐子背包槽
+    private PickupTarget pickupTargetType = null;
+    private boolean storingToEnder = false;    // 正在走末影箱取盒流程
+    private boolean disconnectFlag = false;
+    private String disconnectMsg = null;
+
+    // ===== 3x3x3 清理 =====
+    private final List<BlockPos> clearBlocks = new ArrayList<>();
+    private int clearIndex = 0;
+
+    public AutoMining() {
+        super(AddonTemplate.CATEGORY, "FO 自动挖矿", "自动挖矿：钻石/残骸模式全自动挖掘、合成、存储，参考 misaka AutoMining 移植.");
+    }
+
+    // ================= 生命周期 =================
+
+    @Override
+    public void onActivate() {
+        if (mc.player == null || mc.world == null) {
+            toggle();
+            return;
+        }
+
+        // 世界维度检查
+        boolean isNether = mc.world.getRegistryKey() == World.NETHER;
+        if (miningMode.get() == MiningMode.DIAMOND && isNether) {
+            error("钻石模式仅限主世界使用！");
+            toggle();
+            return;
+        }
+        if (miningMode.get() == MiningMode.ANCIENT_DEBRIS && !isNether) {
+            error("残骸模式仅限下界使用！");
+            toggle();
+            return;
+        }
+
+        // 必需品检查：时运镐 + 空潜影盒 + 工作台（钻石模式）+ 末影箱
+        if (findFortunePickaxeSlot() == -1) {
+            error("背包缺少必要物品！需要：时运镐");
+            toggle();
+            return;
+        }
+        if (findEmptyShulkerSlot() == -1) {
+            error("背包缺少必要物品！需要：空潜影盒");
+            toggle();
+            return;
+        }
+        if (miningMode.get() == MiningMode.DIAMOND && findSlot(Items.CRAFTING_TABLE) == -1) {
+            error("背包缺少必要物品！需要：工作台");
+            toggle();
+            return;
+        }
+        if (findSlot(Items.ENDER_CHEST) == -1) {
+            error("背包缺少必要物品！需要：末影箱");
+            toggle();
+            return;
+        }
+
+        // Baritone 避让设置
+        PathManagers.get().applyMiningAvoidance(avoidMobs.get(), avoidBlocks.get());
+
+        // 自动扔垃圾联动
+        if (autoTrash.get()) {
+            AutoTrash trash = Modules.get().get(AutoTrash.class);
+            if (trash != null) trash.enableForMineLink();
+        }
+
+        // 初始化状态
+        state = MiningState.MINING;
+        tickCount = 0;
+        miningStartedTick = 0;
+        lastPickaxeCheck = 0;
+        lastDeepDarkCheck = 0;
+        escapeTarget = null;
+        disconnectFlag = false;
+        startMining();
+        info("已启动（" + miningMode.get() + "）");
+    }
+
+    @Override
+    public void onDeactivate() {
+        // 恢复 Baritone 设置 + 关闭联动 + 停止寻路/挖掘
+        PathManagers.get().resetMiningAvoidance();
+        if (autoTrash.get()) {
+            AutoTrash trash = Modules.get().get(AutoTrash.class);
+            if (trash != null) trash.disableForMineLink();
+        }
+        PathManagers.get().stop();
+        state = MiningState.IDLE;
+        previousState = MiningState.IDLE;
+        safeSpot = null;
+        placeTarget = null;
+        placedPos = null;
+        escapeTarget = null;
+        clearBlocks.clear();
+        clearIndex = 0;
+        repairPickaxeSlot = -1;
+        pickupTargetType = null;
+        storingToEnder = false;
+    }
+
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        if (mc.player == null || mc.world == null) return;
+        tickCount++;
+
+        // 深暗之域检测（钻石模式 + 避让开启；每 100 tick 检测一次）
+        if (miningMode.get() == MiningMode.DIAMOND && avoidDeepDark.get()
+            && state != MiningState.ESCAPING_DEEP_DARK
+            && tickCount - lastDeepDarkCheck >= 100) {
+            lastDeepDarkCheck = tickCount;
+            if (isDeepDark(mc.player.getBlockPos())) {
+                PathManagers.get().stop();
+                info("检测到深暗之域，开始逃离");
+                escapeTarget = null;
+                state = MiningState.ESCAPING_DEEP_DARK;
+                return;
+            }
+        }
+
+        // 断开连接兜底
+        if (disconnectFlag) {
+            disconnect(disconnectMsg != null ? disconnectMsg : "自动挖矿异常，自动断开连接");
+            disconnectFlag = false;
+        }
+
+        // 状态机分发
+        switch (state) {
+            case IDLE -> idle();
+            case MINING -> mining();
+            case REPAIRING_PICKAXE -> repairingPickaxe();
+            case INVENTORY_FULL -> inventoryFull();
+            case FINDING_SAFE_SPOT -> findingSafeSpot();
+            case PATHING_TO_SAFE_SPOT -> pathingToSafeSpot();
+            case CLEARING_AREA -> clearingArea();
+            case PLACING_CRAFTING_TABLE -> placingCraftingTable();
+            case CRAFTING -> crafting();
+            case PLACING_SHULKER -> placingShulker();
+            case STORING_ITEMS -> storingItems();
+            case STORING_IN_ENDER_CHEST -> storingInEnderChest();
+            case MINING_SHULKER -> miningShulker();
+            case MINING_CRAFTING_TABLE -> miningCraftingTable();
+            case MINING_ENDER_CHEST -> miningEnderChest();
+            case PLACING_ENDER_CHEST -> placingEnderChest();
+            case PICKING_UP_ITEM -> pickingUpItem();
+            case WAITING -> waiting();
+            case PLACE_ROTATE_WAIT, PLACE_SNAPBACK_WAIT, OPEN_ROTATE_WAIT, OPEN_SNAPBACK_WAIT -> rotateWaitFallthrough();
+            case ESCAPING_DEEP_DARK -> escapingDeepDark();
+        }
+    }
+
+    // ================= 状态处理 =================
+
+    /** IDLE：短暂等待后回到挖掘 */
+    private void idle() {
+        if (tickCount % 2 == 0) {
+            state = MiningState.MINING;
+            startMining();
+        }
+    }
+
+    /** MINING：挖掘循环（每 100 tick 重启挖掘；背包满/镐耐久低时切换） */
+    private void mining() {
+        // 背包满 → 停挖 → 找安全位置
+        if (isInventoryFull()) {
+            PathManagers.get().stop();
+            info("背包已满，寻找安全位置存储");
+            state = MiningState.INVENTORY_FULL;
+            return;
+        }
+
+        // 残骸模式：每 20 tick 检查镐耐久
+        if (miningMode.get() == MiningMode.ANCIENT_DEBRIS && tickCount - lastPickaxeCheck >= 20) {
+            lastPickaxeCheck = tickCount;
+            int slot = findLowDurabilityPickaxe();
+            if (slot != -1) {
+                repairPickaxeSlot = slot;
+                PathManagers.get().stop();
+                info("镐子耐久不足，开始挖掘石英修复");
+                state = MiningState.REPAIRING_PICKAXE;
+                return;
+            }
+        }
+
+        // 每 100 tick 重启挖掘（misaka 行为：周期性刷新挖掘目标，防 Baritone 发呆）
+        if (tickCount - miningStartedTick >= 100) {
+            miningStartedTick = tickCount;
+            startMining();
+        }
+    }
+
+    /** REPAIRING_PICKAXE：挖石英 + 随身 2x2 合成石英块丢弃 + 修复判定 */
+    private void repairingPickaxe() {
+        if (repairPickaxeSlot == -1 || mc.player.getInventory().getStack(repairPickaxeSlot).isEmpty()) {
+            repairPickaxeSlot = -1;
+            state = MiningState.MINING;
+            return;
+        }
+
+        // 没在挖石英 → 启动挖掘
+        if (!PathManagers.get().isMining()) {
+            PathManagers.get().mine(Blocks.NETHER_QUARTZ_ORE);
+            info("开始挖掘石英矿修复镐子");
+        }
+
+        // 石英合成（静默 2x2，不需要打开界面）
+        craftQuartzBlock();
+
+        // 镐子已修复 → 回挖掘
+        if (isPickaxeRepaired()) {
+            PathManagers.get().stop();
+            info("镐子已完全修复，继续挖掘残骸");
+            repairPickaxeSlot = -1;
+            state = MiningState.MINING;
+        }
+    }
+
+    /** INVENTORY_FULL：找安全放置位置（玩家周围 5x5x5 全实体 → 就地 3x3x3；否则 32 格范围） */
+    private void inventoryFull() {
+        BlockPos playerPos = mc.player.getBlockPos();
+
+        // y 太低时（下界 y<6）优先找更高的安全点
+        int minY = mc.world.getRegistryKey() == World.NETHER ? 6 : -58;
+        if (playerPos.getY() - 2 < minY) {
+            BlockPos alt = findSafeSpot(playerPos, 32);
+            if (alt != null) {
+                safeSpot = alt;
+                debug("找到安全位置: " + alt.toShortString());
+                state = MiningState.PATHING_TO_SAFE_SPOT;
+                return;
+            }
+            debug("在32格范围内找不到合适的放置位置");
+        }
+
+        // 玩家周围 5x5x5 全是实体方块 → 就地清理 3x3x3
+        if (isSolidSurrounding(playerPos)) {
+            safeSpot = playerPos;
+            debug("玩家周围5x5x5全是实体方块，准备挖掘3x3x3空间");
+            state = MiningState.CLEARING_AREA;
+            return;
+        }
+
+        // 32 格范围找安全位置
+        BlockPos spot = findSafeSpot(playerPos, 32);
+        if (spot != null) {
+            safeSpot = spot;
+            debug("找到安全位置: " + spot.toShortString());
+            state = MiningState.PATHING_TO_SAFE_SPOT;
+        } else {
+            debug("在32格范围内找不到合适的放置位置");
+            state = MiningState.FINDING_SAFE_SPOT;
+        }
+    }
+
+    /** FINDING_SAFE_SPOT：重新找安全位置 */
+    private void findingSafeSpot() {
+        if (safeSpot == null) {
+            BlockPos spot = findSafeSpot(mc.player.getBlockPos(), 32);
+            if (spot != null) {
+                safeSpot = spot;
+                info("找到安全位置: " + spot.toShortString());
+            } else {
+                info("在32格范围内找不到合适的放置位置，等待后重试");
+                waitTicks(MiningState.FINDING_SAFE_SPOT, 40);
+                return;
+            }
+        }
+        double dist = mc.player.getBlockPos().getSquaredDistance(safeSpot);
+        if (dist < 4) {
+            state = MiningState.CLEARING_AREA;
+        } else {
+            state = MiningState.PATHING_TO_SAFE_SPOT;
+        }
+    }
+
+    /** PATHING_TO_SAFE_SPOT：寻路前往安全位置（600 tick 超时重新找） */
+    private void pathingToSafeSpot() {
+        if (safeSpot == null) {
+            state = MiningState.FINDING_SAFE_SPOT;
+            return;
+        }
+
+        if (!PathManagers.get().isPathing()) {
+            PathManagers.get().moveTo(safeSpot, false);
+            debug("正在前往安全位置: " + safeSpot.toShortString());
+            pathTimeoutTicks = 0;
+        } else {
+            pathTimeoutTicks++;
+            if (pathTimeoutTicks > 600) {
+                PathManagers.get().stop();
+                info("寻路超时，重新寻找安全位置");
+                safeSpot = null;
+                state = MiningState.FINDING_SAFE_SPOT;
+                return;
+            }
+        }
+
+        if (mc.player.getBlockPos().getSquaredDistance(safeSpot) < 4) {
+            PathManagers.get().stop();
+            state = MiningState.CLEARING_AREA;
+        }
+    }
+
+    /** CLEARING_AREA：挖出 3x3x3 空间（safeSpot 为中心） */
+    private void clearingArea() {
+        if (safeSpot == null) {
+            state = MiningState.FINDING_SAFE_SPOT;
+            return;
+        }
+
+        // 扫描 3x3x3 非空气方块
+        if (clearBlocks.isEmpty()) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        BlockPos p = safeSpot.add(dx, dy, dz);
+                        if (!mc.world.getBlockState(p).isAir()) {
+                            clearBlocks.add(p);
+                        }
+                    }
+                }
+            }
+            clearIndex = 0;
+            debug("需要清理 " + clearBlocks.size() + " 个方块（3x3x3空间）");
+        }
+
+        if (clearIndex < clearBlocks.size()) {
+            BlockPos target = clearBlocks.get(clearIndex);
+            debug("正在挖掘: " + target.toShortString() + " (" + (clearIndex + 1) + "/" + clearBlocks.size() + ")");
+            if (mineBlock(target)) {
+                clearIndex++;
+                debug("挖掘完成，进度: " + clearIndex + "/" + clearBlocks.size());
+            }
+            return;
+        }
+
+        // 清理完成 → 钻石模式放工作台，残骸模式直接放潜影盒
+        clearBlocks.clear();
+        clearIndex = 0;
+        info("3x3x3空间清理完成，准备放置方块");
+        if (miningMode.get() == MiningMode.DIAMOND) {
+            if (findSlot(Items.CRAFTING_TABLE) != -1) {
+                info("进入放置工作台状态");
+                state = MiningState.PLACING_CRAFTING_TABLE;
+            } else {
+                error("背包中没有工作台！");
+                toggle();
+            }
+        } else {
+            info("进入放置潜影盒状态");
+            state = MiningState.PLACING_SHULKER;
+        }
+    }
+
+    /** PLACING_CRAFTING_TABLE：找位置放工作台 → CRAFTING */
+    private void placingCraftingTable() {
+        if (safeSpot == null) {
+            state = MiningState.FINDING_SAFE_SPOT;
+            return;
+        }
+        int slot = findSlot(Items.CRAFTING_TABLE);
+        if (slot == -1) {
+            error("背包中没有工作台！");
+            toggle();
+            return;
+        }
+        BlockPos target = findPlacePosition(safeSpot);
+        if (target == null) {
+            error("找不到合适的放置位置！");
+            toggle();
+            return;
+        }
+        placeTarget = target;
+        placeBlockAt(target, slot);
+        placedPos = target;
+        waitTicks(MiningState.CRAFTING, 10);
+    }
+
+    /** CRAFTING：打开工作台 → 钻石合成 */
+    private void crafting() {
+        // 打开工作台（未打开时交互）
+        if (!(mc.currentScreen instanceof CraftingScreen)) {
+            openContainer(placedPos);
+            return;
+        }
+
+        if (craftDiamondBlock()) {
+            mc.player.closeHandledScreen();
+            placedPos = null;
+            info("钻石块合成完成，挖掉工作台");
+            state = MiningState.MINING_CRAFTING_TABLE;
+        }
+    }
+
+    /** PLACING_SHULKER：找空潜影盒放盒 → STORING_ITEMS；无空盒 → 末影箱流程 */
+    private void placingShulker() {
+        if (safeSpot == null) {
+            state = MiningState.FINDING_SAFE_SPOT;
+            return;
+        }
+        int slot = findEmptyShulkerSlot();
+        if (slot == -1) {
+            // 背包无空潜影盒 → 末影箱取盒流程
+            if (!storingToEnder) {
+                storingToEnder = true;
+                info("背包没有空潜影盒，从末影箱获取");
+                state = MiningState.PLACING_ENDER_CHEST;
+                return;
+            }
+            // 末影箱流程已走完仍无盒 → 断开
+            disconnectFlag = true;
+            disconnectMsg = "§c没有可用的空潜影盒，自动断开连接";
+            toggle();
+            return;
+        }
+        BlockPos target = findPlacePosition(safeSpot);
+        if (target == null) {
+            error("找不到合适的放置位置！");
+            toggle();
+            return;
+        }
+        placeTarget = target;
+        placeBlockAt(target, slot);
+        placedPos = target;
+        storingToEnder = false;
+        waitTicks(MiningState.STORING_ITEMS, 10);
+    }
+
+    /** STORING_ITEMS：打开潜影盒，把背包目标物品 QUICK_MOVE 进盒；盒满 → 挖盒 */
+    private void storingItems() {
+        if (placedPos == null) {
+            state = MiningState.MINING;
+            return;
+        }
+
+        // 打开潜影盒
+        if (!(mc.currentScreen instanceof ShulkerBoxScreen)) {
+            openContainer(placedPos);
+            return;
+        }
+
+        ShulkerBoxScreenHandler h = (ShulkerBoxScreenHandler) mc.player.currentScreenHandler;
+        Item target = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
+
+        // 盒已满 → 关界面 → 挖盒
+        if (isShulkerFull(h)) {
+            mc.player.closeHandledScreen();
+            info("潜影盒已满，挖掉潜影盒");
+            minePos = placedPos;
+            placedPos = null;
+            state = MiningState.MINING_SHULKER;
+            return;
+        }
+
+        // 找背包目标物品并移入盒内（一次一组）
+        int invSlot = findInvSlot(target);
+        if (invSlot == -1) {
+            // 背包没有可存储的目标物品 → 存完，挖盒
+            mc.player.closeHandledScreen();
+            info("背包中没有可存储的" + target.getName().getString() + "，挖掉潜影盒");
+            minePos = placedPos;
+            placedPos = null;
+            state = MiningState.MINING_SHULKER;
+            return;
+        }
+
+        // 背包槽 → 潜影盒界面屏幕槽（ShulkerBox: 主背包 27-53，热键 54-62）
+        int screenSlot = invSlot < 9 ? invSlot + 54 : invSlot + 18;
+        mc.interactionManager.clickSlot(h.syncId, screenSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
+        waitTicks(MiningState.STORING_ITEMS, 5);
+    }
+
+    /** STORING_IN_ENDER_CHEST：末影箱界面——存满盒入箱 / 取空盒 / 无可换则断开 */
+    private void storingInEnderChest() {
+        if (placedPos == null) {
+            storingToEnder = false;
+            state = MiningState.MINING;
+            return;
+        }
+
+        // 打开末影箱
+        if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen)) {
+            openContainer(placedPos);
+            return;
+        }
+
+        GenericContainerScreenHandler h = (GenericContainerScreenHandler) mc.player.currentScreenHandler;
+        Item target = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
+
+        // A. 背包有"装满目标物品的潜影盒" → 放入末影箱空槽
+        int fullBoxSlot = findFullTargetBoxSlot(target);
+        if (fullBoxSlot != -1) {
+            int emptyEcSlot = findEmptyContainerSlot(h, 0, 26);
+            if (emptyEcSlot != -1) {
+                // 背包槽 → 末影箱界面屏幕槽（主背包 27-53，热键 54-62）
+                int screenSlot = fullBoxSlot < 9 ? fullBoxSlot + 54 : fullBoxSlot + 18;
+                mc.interactionManager.clickSlot(h.syncId, screenSlot, 0, SlotActionType.PICKUP, mc.player);
+                mc.interactionManager.clickSlot(h.syncId, emptyEcSlot, 0, SlotActionType.PICKUP, mc.player);
+                debug("已将装满" + target.getName().getString() + "的潜影盒放入末影箱槽位 " + emptyEcSlot);
+                waitTicks(MiningState.STORING_IN_ENDER_CHEST, 4);
+                return;
+            }
+            // 末影箱满：找末影箱中的空潜影盒交换
+            int emptyBoxInEc = findEmptyShulkerInContainer(h);
+            if (emptyBoxInEc != -1) {
+                int screenSlot = fullBoxSlot < 9 ? fullBoxSlot + 54 : fullBoxSlot + 18;
+                mc.interactionManager.clickSlot(h.syncId, screenSlot, 0, SlotActionType.PICKUP, mc.player);
+                mc.interactionManager.clickSlot(h.syncId, emptyBoxInEc, 0, SlotActionType.PICKUP, mc.player);
+                debug("末影箱已满，与槽位 " + emptyBoxInEc + " 的空潜影盒交换");
+                waitTicks(MiningState.STORING_IN_ENDER_CHEST, 4);
+                return;
+            }
+            // 末影箱满且无可交换 → 断开
+            disconnectFlag = true;
+            disconnectMsg = "§c末影箱已满且没有可交换的潜影盒，自动断开连接";
+            toggle();
+            return;
+        }
+
+        // B. 取出末影箱中的空潜影盒到背包
+        int emptyBoxInEc = findEmptyShulkerInContainer(h);
+        if (emptyBoxInEc != -1) {
+            mc.interactionManager.clickSlot(h.syncId, emptyBoxInEc, 0, SlotActionType.QUICK_MOVE, mc.player);
+            debug("已从末影箱取出空潜影盒，继续放置");
+            waitTicks(MiningState.STORING_IN_ENDER_CHEST, 4);
+            return;
+        }
+
+        // C. 末影箱里也没有空盒 → 断开
+        disconnectFlag = true;
+        disconnectMsg = "§c末影箱中没有可用的空潜影盒，自动断开连接";
+        toggle();
+    }
+
+    /** MINING_SHULKER：挖掉放置的潜影盒 → 拾取 */
+    private void miningShulker() {
+        if (minePos == null) {
+            state = MiningState.MINING;
+            return;
+        }
+        if (mineBlock(minePos)) {
+            info("潜影盒已挖掉，准备拾取");
+            minePos = null;
+            pickupTargetType = PickupTarget.SHULKER_BOX;
+            pickupTimeoutTicks = 0;
+            state = MiningState.PICKING_UP_ITEM;
+        }
+    }
+
+    /** MINING_CRAFTING_TABLE：挖掉工作台 → 拾取 */
+    private void miningCraftingTable() {
+        if (placedPos == null) {
+            state = MiningState.MINING;
+            return;
+        }
+        if (mineBlock(placedPos)) {
+            info("工作台已挖掉，准备拾取");
+            placedPos = null;
+            pickupTargetType = PickupTarget.CRAFTING_TABLE;
+            pickupTimeoutTicks = 0;
+            state = MiningState.PICKING_UP_ITEM;
+        }
+    }
+
+    /** MINING_ENDER_CHEST：挖掉末影箱 → 拾取 */
+    private void miningEnderChest() {
+        if (placedPos == null) {
+            storingToEnder = false;
+            state = MiningState.MINING;
+            return;
+        }
+        if (mineBlock(placedPos)) {
+            info("末影箱已挖掉，准备拾取");
+            placedPos = null;
+            pickupTargetType = PickupTarget.ENDER_CHEST;
+            pickupTimeoutTicks = 0;
+            state = MiningState.PICKING_UP_ITEM;
+        }
+    }
+
+    /** PLACING_ENDER_CHEST：找位置放末影箱 → STORING_IN_ENDER_CHEST */
+    private void placingEnderChest() {
+        if (safeSpot == null) {
+            storingToEnder = false;
+            state = MiningState.FINDING_SAFE_SPOT;
+            return;
+        }
+        int slot = findSlot(Items.ENDER_CHEST);
+        if (slot == -1) {
+            error("背包中没有末影箱！");
+            toggle();
+            return;
+        }
+        BlockPos target = findPlacePosition(safeSpot);
+        if (target == null) {
+            error("找不到合适的放置位置！");
+            toggle();
+            return;
+        }
+        placeTarget = target;
+        placeBlockAt(target, slot);
+        placedPos = target;
+        waitTicks(MiningState.STORING_IN_ENDER_CHEST, 10);
+    }
+
+    /** PICKING_UP_ITEM：寻路拾取目标掉落物（10 格内检测，300 tick 超时断开） */
+    private void pickingUpItem() {
+        if (pickupTargetType == null) {
+            state = MiningState.MINING;
+            return;
+        }
+
+        BlockPos drop = findPickupDrop(pickupTargetType);
+        if (drop == null) {
+            pickupTimeoutTicks++;
+            if (pickupTimeoutTicks > 300) {
+                info("拾取超时，重新开始挖掘");
+                pickupTargetType = null;
+                state = MiningState.MINING;
+                return;
+            }
+            return;
+        }
+
+        // 走到掉落物旁（自动拾取）
+        if (!PathManagers.get().isPathing()) {
+            PathManagers.get().moveTo(drop, false);
+            debug("正在前往拾取: " + drop.toShortString());
+        }
+
+        // 已捡到（掉落物消失）
+        if (findPickupDrop(pickupTargetType) == null) {
+            PathManagers.get().stop();
+            info("拾取完成");
+            pickupTargetType = null;
+            state = MiningState.MINING;
+        }
+    }
+
+    /** WAITING：倒计时后回上一状态 */
+    private void waiting() {
+        if (stateWaitTicks > 0) {
+            stateWaitTicks--;
+            return;
+        }
+        state = previousState;
+    }
+
+    /** rotate 等待状态：FO 用 InteractionUtils 同步旋转+交互，直接转上一状态（保持枚举对齐 misaka） */
+    private void rotateWaitFallthrough() {
+        state = previousState != MiningState.IDLE ? previousState : MiningState.MINING;
+    }
+
+    /** ESCAPING_DEEP_DARK：128 格范围找 y>=0 最近安全点逃离 */
+    private void escapingDeepDark() {
+        if (escapeTarget == null) {
+            escapeTarget = findSafeEscapePoint();
+            if (escapeTarget == null) {
+                error("无法计算逃离方向，请手动离开深暗之域");
+                state = MiningState.MINING;
+                return;
+            }
+            PathManagers.get().moveTo(escapeTarget, false);
+            info("正在逃离深暗之域: " + escapeTarget.toShortString());
+            return;
+        }
+
+        // 已到达安全点（非深暗 biome）→ 继续挖掘
+        if (!isDeepDark(mc.player.getBlockPos()) && mc.player.getBlockPos().getSquaredDistance(escapeTarget) < 64) {
+            PathManagers.get().stop();
+            info("已逃离深暗之域，继续挖掘");
+            escapeTarget = null;
+            state = MiningState.MINING;
+        }
+    }
+
+    // ================= 挖掘 / 放置 / 打开 =================
+
+    /** 启动 Baritone 挖掘（按模式） */
+    private void startMining() {
+        switch (miningMode.get()) {
+            case DIAMOND -> PathManagers.get().mine(Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE);
+            case ANCIENT_DEBRIS -> PathManagers.get().mine(Blocks.ANCIENT_DEBRIS);
+        }
+    }
+
+    /**
+     * 手动挖一个方块（移植 misaka x0044）：距离 > 5 格先寻路；
+     * 在范围内自动换最佳工具并发包挖掘，方块变空气即完成。
+     */
+    private boolean mineBlock(BlockPos pos) {
+        if (mc.world.getBlockState(pos).isAir()) return true;
+        if (mc.world.getBlockState(pos).getHardness(mc.world, pos) < 0) {
+            debug("方块不可挖掘: " + pos.toShortString());
+            return true;
+        }
+
+        // 距离 > 5 格 → 寻路（每 tick 只发起一次）
+        if (mc.player.getBlockPos().getSquaredDistance(pos) > 25.0) {
+            if (minePos == null || !minePos.equals(pos)) {
+                minePos = pos;
+                PathManagers.get().moveTo(pos, false);
+                debug("距离方块太远，开始寻路: " + pos.toShortString());
+            }
+            return false;
+        }
+
+        // 选最佳工具（时运镐优先，其次最高效率工具，没有则当前槽）
+        int toolSlot = findBestToolSlot(pos);
+        if (toolSlot != -1 && toolSlot != mc.player.getInventory().getSelectedSlot()) {
+            if (toolSlot > 8) {
+                InvUtils.move().from(toolSlot).toHotbar(mc.player.getInventory().getSelectedSlot());
+            } else {
+                InvUtils.swap(toolSlot, false);
+                mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket(toolSlot));
+            }
+        }
+
+        // 朝向 + 发包挖掘
+        int faceIdx = FacingLogic.bestFaceIndex(
+            mc.player.getEyePos().x, mc.player.getEyePos().y, mc.player.getEyePos().z,
+            pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Direction face = Direction.values()[faceIdx];
+        mc.player.swingHand(Hand.MAIN_HAND);
+        mc.interactionManager.updateBlockBreakingProgress(pos, face);
+
+        return mc.world.getBlockState(pos).isAir();
+    }
+
+    /** 放置方块到 target（地面放置：点下方方块 UP 面）；放置旋转开关控制是否转头 */
+    private void placeBlockAt(BlockPos target, int invSlot) {
+        // 交换到快捷栏
+        if (invSlot > 8) {
+            InvUtils.move().from(invSlot).toHotbar(mc.player.getInventory().getSelectedSlot());
+        } else {
+            InvUtils.swap(invSlot, false);
+            mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket(invSlot));
+        }
+
+        BlockPos below = target.down();
+        if (placeRotate.get()) {
+            InteractionUtils.interactBlockSafely(below, Direction.UP);
+        } else {
+            if (mc.player == null || mc.world == null) return;
+            net.minecraft.util.hit.BlockHitResult hit = new net.minecraft.util.hit.BlockHitResult(
+                new net.minecraft.util.math.Vec3d(below.getX() + 0.5, below.getY() + 1.0, below.getZ() + 0.5),
+                Direction.UP, below, false);
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
+        }
+    }
+
+    /** 打开容器（潜影盒/工作台/末影箱）：六面检测选面，转头交互 */
+    private void openContainer(BlockPos pos) {
+        if (pos == null || mc.currentScreen != null) return;
+        if (mc.player.getBlockPos().getSquaredDistance(pos) > 9.0) {
+            PathManagers.get().moveTo(pos, false);
+            return;
+        }
+        int faceIdx = FacingLogic.bestFaceIndex(
+            mc.player.getEyePos().x, mc.player.getEyePos().y, mc.player.getEyePos().z,
+            pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Direction face = Direction.values()[faceIdx];
+        InteractionUtils.interactBlockSafely(pos, face);
+    }
+
+    // ================= 钻石合成（CraftingScreenHandler） =================
+
+    /**
+     * 钻石合成（移植 misaka x0035）：
+     * 输出槽有钻石块 → 取出（5 tick 等待）→ 完成；
+     * 钻石 ≥ 9 → 清空合成格 → 拖拽 9 钻石入 1-9 → 等待合成。
+     */
+    private boolean craftDiamondBlock() {
+        if (craftActionTicks > 0) {
+            craftActionTicks--;
+            return false;
+        }
+        if (!(mc.currentScreen instanceof CraftingScreen)) return false;
+
+        CraftingScreenHandler h = (CraftingScreenHandler) mc.player.currentScreenHandler;
+        ItemStack out = h.getSlot(0).getStack();
+
+        // 输出槽有钻石块 → 取出到背包，等 5 tick 完成
+        if (!out.isEmpty() && out.getItem() == Items.DIAMOND_BLOCK) {
+            mc.interactionManager.clickSlot(h.syncId, 0, 0, SlotActionType.QUICK_MOVE, mc.player);
+            tookOutBlock = true;
+            craftActionTicks = 5;
+            debug("取出钻石块");
+            return false;
+        }
+
+        // 取出等待结束（输出槽已空且上次取出动作完成）→ 本次合成完成
+        if (craftActionTicks == 0 && out.isEmpty() && tookOutBlock) {
+            tookOutBlock = false;
+            return true;
+        }
+
+        // 统计钻石（背包 + 合成格）
+        if (diamondCount(h) < 9) {
+            debug("钻石不足9个，无法合成");
+            return false;
+        }
+
+        // 找最大钻石堆槽（背包）
+        int diamondSlot = findLargestDiamondSlot(h);
+        if (diamondSlot == -1) return false;
+
+        // 清空合成格中的非钻石物品
+        clearCraftingGrid(h);
+        craftActionTicks = craftWaitDelay.get();
+
+        // 拖拽分配 9 钻石到合成格 1-9
+        mc.interactionManager.clickSlot(h.syncId, diamondSlot, 0, SlotActionType.PICKUP, mc.player);
+        mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.QUICK_CRAFT, mc.player);
+        for (int i = 1; i <= 9; i++) {
+            mc.interactionManager.clickSlot(h.syncId, i, 1, SlotActionType.QUICK_CRAFT, mc.player);
+        }
+        mc.interactionManager.clickSlot(h.syncId, -999, 2, SlotActionType.QUICK_CRAFT, mc.player);
+        // 光标剩余钻石放回（拿起后原槽已空，必能找到空槽）
+        returnCursorStack(h);
+        tookOutBlock = false;
+        info("合成格已填满，等待合成结果...");
+        return false;
+    }
+
+    private boolean tookOutBlock = false;
+
+    /** 统计钻石数量（背包 + 合成格） */
+    private int diamondCount(CraftingScreenHandler h) {
+        int count = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.getItem() == Items.DIAMOND) count += s.getCount();
+        }
+        for (int i = 1; i <= 9; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (s.getItem() == Items.DIAMOND) count += s.getCount();
+        }
+        return count;
+    }
+
+    /** 找背包中钻石数量最多的槽位（合成格槽位换算：n<9 → n+37，n>=9 → n+1） */
+    private int findLargestDiamondSlot(CraftingScreenHandler h) {
+        int best = -1;
+        int bestCount = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.getItem() == Items.DIAMOND && s.getCount() > bestCount) {
+                bestCount = s.getCount();
+                best = i;
+            }
+        }
+        return best == -1 ? -1 : (best < 9 ? best + 37 : best + 1);
+    }
+
+    /** 清空合成格中的非钻石物品（QUICK_MOVE 移回背包） */
+    private void clearCraftingGrid(CraftingScreenHandler h) {
+        for (int i = 1; i <= 9; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (!s.isEmpty() && s.getItem() != Items.DIAMOND) {
+                mc.interactionManager.clickSlot(h.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+            }
+        }
+    }
+
+    /** 光标剩余物品放回背包第一个空槽（原槽已空，必能找到） */
+    private void returnCursorStack(ScreenHandler h) {
+        if (h.getCursorStack().isEmpty()) return;
+        for (int i = 0; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).isEmpty()) {
+                int screenSlot = i < 9 ? i + 37 : i + 1; // CraftingScreenHandler 布局
+                mc.interactionManager.clickSlot(h.syncId, screenSlot, 0, SlotActionType.PICKUP, mc.player);
+                return;
+            }
+        }
+        // 无空槽（理论不发生）：丢弃
+        mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.PICKUP, mc.player);
+    }
+
+    // ================= 石英合成（PlayerScreenHandler 静默 2x2） =================
+
+    /**
+     * 石英合成（移植 misaka x0247）：随身 2x2 合成格 4 石英 → 1 石英块；
+     * 输出槽的石英块主动丢弃（白名单不含石英块，防占背包）。
+     */
+    private void craftQuartzBlock() {
+        PlayerScreenHandler h = mc.player.playerScreenHandler;
+
+        // 输出槽有石英块 → 丢弃
+        ItemStack out = h.getSlot(0).getStack();
+        if (!out.isEmpty() && out.getItem() == Items.QUARTZ_BLOCK) {
+            mc.interactionManager.clickSlot(h.syncId, 0, 0, SlotActionType.PICKUP, mc.player);
+            mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.PICKUP, mc.player);
+            returnCursorStackPlayer(h);
+            info("丢弃石英块");
+            return;
+        }
+
+        // 石英总量 < 4 → 等挖更多
+        if (countQuartz(h) < 4) return;
+
+        // 合成格（1-4）石英数 0< n <4 → 清空合成格
+        int gridQuartz = 0;
+        for (int i = 1; i <= 4; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (s.getItem() == Items.QUARTZ) gridQuartz += s.getCount();
+        }
+        if (gridQuartz > 0 && gridQuartz < 4) {
+            debug("合成栏石英不足4个，清空合成栏");
+            for (int i = 1; i <= 4; i++) {
+                if (!h.getSlot(i).getStack().isEmpty()) {
+                    mc.interactionManager.clickSlot(h.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                    return;
+                }
+            }
+            return;
+        }
+        if (gridQuartz >= 4) return; // 等合成结果
+
+        // 找背包（主背包 9-35 屏幕槽，热键 36-44 屏幕槽）中的石英
+        int quartzSlot = findQuartzScreenSlot(h);
+        if (quartzSlot == -1) return;
+
+        // 拖拽 4 石英入合成格 1-4
+        mc.interactionManager.clickSlot(h.syncId, quartzSlot, 0, SlotActionType.PICKUP, mc.player);
+        mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.QUICK_CRAFT, mc.player);
+        for (int i = 1; i <= 4; i++) {
+            mc.interactionManager.clickSlot(h.syncId, i, 1, SlotActionType.QUICK_CRAFT, mc.player);
+        }
+        mc.interactionManager.clickSlot(h.syncId, -999, 2, SlotActionType.QUICK_CRAFT, mc.player);
+        if (!h.getCursorStack().isEmpty()) {
+            mc.interactionManager.clickSlot(h.syncId, quartzSlot, 0, SlotActionType.PICKUP, mc.player);
+        }
+        returnCursorStackPlayer(h);
+        debug("放入石英到合成栏");
+    }
+
+    /** 统计石英数量（背包 + 合成格） */
+    private int countQuartz(PlayerScreenHandler h) {
+        int count = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.getItem() == Items.QUARTZ) count += s.getCount();
+        }
+        for (int i = 1; i <= 4; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (s.getItem() == Items.QUARTZ) count += s.getCount();
+        }
+        return count;
+    }
+
+    /** PlayerScreenHandler 布局找石英屏幕槽：主背包 9-35、热键 36-44 */
+    private int findQuartzScreenSlot(PlayerScreenHandler h) {
+        for (int i = 9; i <= 35; i++) {
+            if (h.getSlot(i).getStack().getItem() == Items.QUARTZ) return i;
+        }
+        for (int i = 36; i <= 44; i++) {
+            if (h.getSlot(i).getStack().getItem() == Items.QUARTZ) return i;
+        }
+        return -1;
+    }
+
+    /** 光标剩余放回（PlayerScreenHandler 布局：主背包屏幕 9-35，热键 36-44） */
+    private void returnCursorStackPlayer(PlayerScreenHandler h) {
+        if (h.getCursorStack().isEmpty()) return;
+        for (int i = 9; i <= 35; i++) {
+            if (h.getSlot(i).getStack().isEmpty()) {
+                mc.interactionManager.clickSlot(h.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                return;
+            }
+        }
+        for (int i = 36; i <= 44; i++) {
+            if (h.getSlot(i).getStack().isEmpty()) {
+                mc.interactionManager.clickSlot(h.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                return;
+            }
+        }
+        mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.PICKUP, mc.player);
+    }
+
+    // ================= 背包 / 容器判定 =================
+
+    /** 背包满：主背包 9-35 全非空（纯逻辑，可单测） */
+    public static boolean isInventoryFull(int[] mainInventoryCounts) {
+        for (int i = 9; i < 36; i++) {
+            if (mainInventoryCounts[i] <= 0) return false;
+        }
+        return true;
+    }
+
+    private boolean isInventoryFull() {
+        int[] counts = new int[36];
+        for (int i = 0; i < 36; i++) {
+            counts[i] = mc.player.getInventory().getStack(i).getCount();
+        }
+        return isInventoryFull(counts);
+    }
+
+    /** 时运等级（1.21.11：Enchantments.FORTUNE 是 RegistryKey，需经注册表取 RegistryEntry） */
+    private int getFortuneLevel(ItemStack stack) {
+        if (mc.world == null) return 0;
+        var reg = mc.world.getRegistryManager().getOrThrow(net.minecraft.registry.RegistryKeys.ENCHANTMENT);
+        var entry = reg.getEntry(reg.get(Enchantments.FORTUNE));
+        return EnchantmentHelper.getLevel(entry, stack);
+    }
+
+    /** 找时运镐（fortune > 0 的镐子）背包槽 */
+    private int findFortunePickaxeSlot() {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (isPickaxe(s.getItem()) && getFortuneLevel(s) > 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 找低耐久镐子（剩余耐久 < 阈值）背包槽 */
+    private int findLowDurabilityPickaxe() {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (isPickaxe(s.getItem()) && isPickaxeDurabilityLow(s.getMaxDamage(), s.getDamage(), pickaxeThreshold.get())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean isPickaxeRepaired() {
+        if (repairPickaxeSlot == -1 || repairPickaxeSlot >= mc.player.getInventory().size()) return false;
+        ItemStack s = mc.player.getInventory().getStack(repairPickaxeSlot);
+        if (s.isEmpty() || !isPickaxe(s.getItem())) return false;
+        return s.getMaxDamage() - s.getDamage() >= pickaxeThreshold.get();
+    }
+
+    /** 镐子判定（纯逻辑，可单测） */
+    public static boolean isPickaxe(Item item) {
+        return item == Items.DIAMOND_PICKAXE || item == Items.NETHERITE_PICKAXE
+            || item == Items.IRON_PICKAXE || item == Items.STONE_PICKAXE
+            || item == Items.WOODEN_PICKAXE || item == Items.GOLDEN_PICKAXE;
+    }
+
+    /** 镐子剩余耐久低于阈值（纯逻辑，可单测） */
+    public static boolean isPickaxeDurabilityLow(int maxDamage, int damage, int threshold) {
+        return maxDamage - damage < threshold;
+    }
+
+    /** 背包槽 → CraftingScreenHandler 屏幕槽（主背包 10-36，热键 37-45） */
+    public static int invSlotToCraftingScreen(int invSlot) {
+        return invSlot < 9 ? invSlot + 37 : invSlot + 1;
+    }
+
+    /** 背包槽 → ShulkerBox/GenericContainer 屏幕槽（主背包 27-53，热键 54-62） */
+    public static int invSlotToContainerScreen(int invSlot) {
+        return invSlot < 9 ? invSlot + 54 : invSlot + 18;
+    }
+
+    /** 钻石合成条件：钻石 >= 9（纯逻辑，可单测） */
+    public static boolean canCraftDiamondBlock(int diamondCount) {
+        return diamondCount >= 9;
+    }
+
+    /** 石英合成条件：石英 >= 4（纯逻辑，可单测） */
+    public static boolean canCraftQuartzBlock(int quartzCount) {
+        return quartzCount >= 4;
+    }
+
+    /** 找空潜影盒背包槽（含 CONTAINER 组件且 0 物品，或组件为 null） */
+    private int findEmptyShulkerSlot() {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (isShulkerBoxItem(s.getItem()) && isShulkerEmpty(s)) return i;
+        }
+        return -1;
+    }
+
+    /** 潜影盒是否为空（纯逻辑，可单测） */
+    public static boolean isShulkerEmpty(ItemStack stack) {
+        ContainerComponent c = stack.get(DataComponentTypes.CONTAINER);
+        if (c == null) return true;
+        return !c.iterateNonEmpty().iterator().hasNext();
+    }
+
+    /** 找背包中指定物品槽 */
+    private int findSlot(Item item) {
+        for (int i = 0; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).getItem() == item) return i;
+        }
+        return -1;
+    }
+
+    /** 找背包中指定物品槽（含快捷栏优先热键） */
+    private int findInvSlot(Item item) {
+        return findSlot(item);
+    }
+
+    /** 潜影盒界面是否已满（27 格全非空） */
+    private boolean isShulkerFull(ShulkerBoxScreenHandler h) {
+        for (int i = 0; i < 27; i++) {
+            if (h.getSlot(i).getStack().isEmpty()) return false;
+        }
+        return true;
+    }
+
+    /** 找背包中"装满目标物品的潜影盒"槽（27 格全满且全为目标物品） */
+    private int findFullTargetBoxSlot(Item target) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (!isShulkerBoxItem(s.getItem())) continue;
+            ContainerComponent c = s.get(DataComponentTypes.CONTAINER);
+            if (c == null) continue;
+            int count = 0;
+            boolean allTarget = true;
+            for (ItemStack inner : c.iterateNonEmpty()) {
+                count++;
+                if (inner.getItem() != target) allTarget = false;
+            }
+            if (count >= 27 && allTarget) return i;
+        }
+        return -1;
+    }
+
+    /** 找容器空槽（0-26 范围） */
+    private int findEmptyContainerSlot(GenericContainerScreenHandler h, int from, int to) {
+        for (int i = from; i <= to; i++) {
+            if (h.getSlot(i).getStack().isEmpty()) return i;
+        }
+        return -1;
+    }
+
+    /** 找容器中的空潜影盒槽 */
+    private int findEmptyShulkerInContainer(GenericContainerScreenHandler h) {
+        for (int i = 0; i < 27; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (isShulkerBoxItem(s.getItem()) && isShulkerEmpty(s)) return i;
+        }
+        return -1;
+    }
+
+    /** 潜影盒物品判定（纯逻辑，可单测） */
+    public static boolean isShulkerBoxItem(Item item) {
+        return item instanceof BlockItem && ((BlockItem) item).getBlock() instanceof ShulkerBoxBlock;
+    }
+
+    // ================= 位置搜索 =================
+
+    /** 玩家周围 5x5x5 是否全是实体方块 */
+    private boolean isSolidSurrounding(BlockPos center) {
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    if (!mc.world.getBlockState(center.add(dx, dy, dz)).isSolid()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** 在 range 格范围内找安全位置：实心方块 + 上方 2 格空气 + 非液体（移植 misaka findSafeSpot） */
+    private BlockPos findSafeSpot(BlockPos center, int range) {
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int dx = -range; dx <= range; dx++) {
+            for (int dy = -8; dy <= 8; dy++) {
+                for (int dz = -range; dz <= range; dz++) {
+                    BlockPos p = center.add(dx, dy, dz);
+                    if (!mc.world.getBlockState(p).isSolid()) continue;
+                    if (!mc.world.getBlockState(p.up()).isAir() || !mc.world.getBlockState(p.up(2)).isAir()) continue;
+                    if (!mc.world.getBlockState(p).getFluidState().isEmpty()) continue;
+                    double d = p.getSquaredDistance(center);
+                    if (d < bestDist) {
+                        bestDist = d;
+                        best = p;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /** 在 safeSpot 周围 3x3 找可放置位置：空气 + 下方实心 + 非液体 */
+    private BlockPos findPlacePosition(BlockPos center) {
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                BlockPos p = center.add(dx, 0, dz);
+                if (p.equals(mc.player.getBlockPos())) continue;
+                if (!mc.world.getBlockState(p).isAir()) continue;
+                if (!mc.world.getBlockState(p.down()).isSolid()) continue;
+                if (!mc.world.getBlockState(p).getFluidState().isEmpty()) continue;
+                double d = p.getSquaredDistance(mc.player.getBlockPos());
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = p;
+                }
+            }
+        }
+        return best;
+    }
+
+    /** 拾取目标掉落物（10 格内最近） */
+    private BlockPos findPickupDrop(PickupTarget target) {
+        BlockPos best = null;
+        double bestDist = 100.0; // 10 格
+        for (Entity e : mc.world.getEntities()) {
+            if (!(e instanceof ItemEntity ie)) continue;
+            Item item = ie.getStack().getItem();
+            boolean match = switch (target) {
+                case SHULKER_BOX -> isShulkerBoxItem(item);
+                case CRAFTING_TABLE -> item == Items.CRAFTING_TABLE;
+                case ENDER_CHEST -> item == Items.ENDER_CHEST;
+            };
+            if (!match) continue;
+            double d = e.getBlockPos().getSquaredDistance(mc.player.getBlockPos());
+            if (d < bestDist) {
+                bestDist = d;
+                best = e.getBlockPos();
+            }
+        }
+        return best;
+    }
+
+    /** 深暗之域判定（纯逻辑可单测困难，依赖 MC；保留模块内） */
+    private boolean isDeepDark(BlockPos pos) {
+        RegistryKey<Biome> key = mc.world.getBiome(pos).getKey().orElse(null);
+        return key != null && key.equals(RegistryKey.of(RegistryKeys.BIOME, Identifier.of("minecraft", "deep_dark")));
+    }
+
+    /** 128 格范围找 y>=0 最近非深暗地面点（移植 misaka x0273 语义） */
+    private BlockPos findSafeEscapePoint() {
+        BlockPos p = mc.player.getBlockPos();
+        for (int r = 16; r <= 128; r += 16) {
+            for (int dx = -r; dx <= r; dx += 8) {
+                for (int dz = -r; dz <= r; dz += 8) {
+                    if (Math.abs(dx) != r && Math.abs(dz) != r) continue; // 只扫边缘环
+                    BlockPos probe = p.add(dx, 0, dz);
+                    if (isDeepDark(probe)) continue;
+                    int top = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, probe.getX(), probe.getZ());
+                    int groundY = top - 1;
+                    if (groundY < 0) continue;
+                    BlockPos ground = new BlockPos(probe.getX(), groundY, probe.getZ());
+                    if (isDeepDark(ground)) continue;
+                    return ground;
+                }
+            }
+        }
+        return null;
+    }
+
+    // ================= 工具 =================
+
+    private void waitTicks(MiningState backTo, int ticks) {
+        previousState = backTo;
+        stateWaitTicks = ticks;
+        state = MiningState.WAITING;
+    }
+
+    private void debug(String msg) {
+        if (debugOutput.get()) info(msg);
+    }
+
+    private void disconnect(String msg) {
+        if (mc.player != null && mc.player.networkHandler != null) {
+            mc.player.networkHandler.getConnection().disconnect(Text.literal(msg));
+        }
+    }
+
+    /** 选最佳挖掘工具：时运镐优先（挖矿石掉落），其次最高效率工具；没有返回 -1（用当前槽） */
+    private int findBestToolSlot(BlockPos target) {
+        net.minecraft.block.BlockState bs = mc.world.getBlockState(target);
+        int fortuneSlot = -1;
+        int bestEffSlot = -1;
+        float bestEff = 1.0f;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.isEmpty()) continue;
+            if (isPickaxe(s.getItem())) {
+                if (getFortuneLevel(s) > 0 && fortuneSlot == -1) {
+                    fortuneSlot = i;
+                }
+            }
+            float speed = s.getMiningSpeedMultiplier(bs);
+            if (speed > bestEff) {
+                bestEff = speed;
+                bestEffSlot = i;
+            }
+        }
+        return fortuneSlot != -1 ? fortuneSlot : bestEffSlot;
+    }
+}

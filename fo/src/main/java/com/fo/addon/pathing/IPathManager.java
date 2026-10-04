@@ -29,4 +29,17 @@ public interface IPathManager {
     void pickupItems(Predicate<ItemStack> filter);
 
     void protectShulkerBoxes(boolean protect);
+
+    /** 挖掘进程是否正在工作（IMineProcess.isActive） */
+    boolean isMining();
+
+    /**
+     * 应用自动挖矿需要的 Baritone 避让/挖掘设置（V4.30，移植 misaka AutoMining）：
+     * 怪物避让（avoidance + 半径/系数 + 刷怪笼半径）+ 方块避让（深暗之域方块 + 刷怪笼）。
+     * 实现类反射访问 BaritoneSettings；失败时静默跳过（版本差异不崩）。
+     */
+    void applyMiningAvoidance(boolean avoidMobs, boolean avoidBlocks);
+
+    /** 恢复调用 applyMiningAvoidance 前备份的 Baritone 设置 */
+    void resetMiningAvoidance();
 }

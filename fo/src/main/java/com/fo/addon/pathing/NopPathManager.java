@@ -31,4 +31,17 @@ public class NopPathManager implements IPathManager {
     @Override
     public void protectShulkerBoxes(boolean protect) {
     }
+
+    @Override
+    public boolean isMining() {
+        return false;
+    }
+
+    @Override
+    public void applyMiningAvoidance(boolean avoidMobs, boolean avoidBlocks) {
+    }
+
+    @Override
+    public void resetMiningAvoidance() {
+    }
 }
