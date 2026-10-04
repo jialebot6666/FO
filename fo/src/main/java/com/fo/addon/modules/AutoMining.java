@@ -208,7 +208,7 @@ public class AutoMining extends Module {
     private int clearIndex = 0;
 
     public AutoMining() {
-        super(AddonTemplate.CATEGORY, "FO 自动挖矿", "自动挖矿：钻石/残骸模式全自动挖掘、合成、存储，参考 misaka AutoMining 移植.");
+        super(AddonTemplate.CATEGORY, "FO 自动挖矿", "自动挖矿：钻石/残骸模式全自动挖掘、合成、存储、精准回收末影箱、深暗之域逃离。");
     }
 
     // ================= 生命周期 =================
