@@ -210,6 +210,8 @@ public class AutoMining extends Module {
     private int repairPickaxeSlot = -1;        // 需要修复的镐子背包槽
     private PickupTarget pickupTargetType = null;
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
+    private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
+    private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
     private boolean disconnectFlag = false;
     private String disconnectMsg = null;
 
@@ -319,6 +321,8 @@ public class AutoMining extends Module {
         repairPickaxeSlot = -1;
         pickupTargetType = null;
         storingToEnder = false;
+        pendingMiningTable = false;
+        pendingTablePos = null;
     }
 
     @EventHandler
@@ -590,7 +594,7 @@ public class AutoMining extends Module {
         waitTicks(MiningState.CRAFTING, 10);
     }
 
-    /** CRAFTING：打开工作台 → 钻石合成 */
+    /** CRAFTING：打开工作台 → 钻石合成 → 放潜影盒存钻石块（对齐 misaka：CRAFTING→PLACING_SHULKER） */
     private void crafting() {
         // 打开工作台（未打开时交互）
         if (!(mc.currentScreen instanceof CraftingScreen)) {
@@ -600,9 +604,10 @@ public class AutoMining extends Module {
 
         if (craftDiamondBlock()) {
             mc.player.closeHandledScreen();
-            placedPos = null;
-            info("钻石块合成完成，挖掉工作台");
-            state = MiningState.MINING_CRAFTING_TABLE;
+            // 记录工作台位置（后续存盒链会覆盖 placedPos），存完盒后回来挖掉
+            pendingTablePos = placedPos;
+            info("钻石块合成完成，先放潜影盒存储");
+            state = MiningState.PLACING_SHULKER;
         }
     }
 
@@ -757,6 +762,10 @@ public class AutoMining extends Module {
             minePos = null;
             pickupTargetType = PickupTarget.SHULKER_BOX;
             pickupTimeoutTicks = 0;
+            // 钻石模式：存完盒后还需挖掉工作台（对齐 misaka：MINING_SHULKER→MINING_CRAFTING_TABLE）
+            if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
+                pendingMiningTable = true;
+            }
             state = MiningState.PICKING_UP_ITEM;
         }
     }
@@ -832,6 +841,8 @@ public class AutoMining extends Module {
             if (pickupTimeoutTicks > 300) {
                 info("拾取超时，重新开始挖掘");
                 pickupTargetType = null;
+                pendingMiningTable = false;
+                pendingTablePos = null;
                 state = MiningState.MINING;
                 return;
             }
@@ -849,6 +860,15 @@ public class AutoMining extends Module {
             PathManagers.get().stop();
             info("拾取完成");
             pickupTargetType = null;
+            // 钻石模式：刚捡完潜影盒 → 接着挖工作台
+            if (pendingMiningTable) {
+                pendingMiningTable = false;
+                placedPos = pendingTablePos;
+                pendingTablePos = null;
+                info("拾取潜影盒完成，挖掉工作台");
+                state = MiningState.MINING_CRAFTING_TABLE;
+                return;
+            }
             state = MiningState.MINING;
         }
     }
