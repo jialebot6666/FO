@@ -81,7 +81,7 @@ public class AutoMineSand extends Module {
         .defaultValue(4).min(1).max(6).sliderMin(1).sliderMax(6).build());
 
     private final Setting<Integer> nukerMaxInstaMine = sgGeneral.add(new IntSetting.Builder()
-        .name("核爆发包上限").description("每 tick 最多连续发包次数（SlimefunHelper 原版 30，防踢）")
+        .name("核爆发包上限").description("每 tick 最多连续发包次数（默认 30，防服务器踢出）")
         .defaultValue(30).min(1).max(60).sliderMin(1).sliderMax(60).build());
 
     private final Setting<Integer> nukerMinDy = sgGeneral.add(new IntSetting.Builder()
@@ -93,7 +93,7 @@ public class AutoMineSand extends Module {
         .defaultValue(6).min(-6).max(6).sliderMin(-6).sliderMax(6).build());
 
     private final Setting<Boolean> nukerRotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("核爆自动转头").description("Nuker 模式下自动转头看向目标方块（SlimefunHelper 默认 NO_BYPASS 不转头更防踢）")
+        .name("核爆自动转头").description("Nuker 模式下自动转头看向目标方块（默认不转头，更防踢）")
         .defaultValue(false).build());
 
     private final Setting<String> supplyBoxName = sgSupply.add(new StringSetting.Builder()
