@@ -48,4 +48,8 @@ public class NopPathManager implements IPathManager {
     @Override
     public void setAutoTool(boolean enabled) {
     }
+
+    @Override
+    public void setMineScanDroppedItems(boolean enabled) {
+    }
 }

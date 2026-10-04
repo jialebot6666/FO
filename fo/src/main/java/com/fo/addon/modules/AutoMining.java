@@ -163,6 +163,12 @@ public class AutoMining extends Module {
         .defaultValue(true)
         .build());
 
+    private final Setting<Boolean> pickDroppedItems = sgGeneral.add(new BoolSetting.Builder()
+        .name("捡取挖掘掉落物")
+        .description("开启后让 Baritone 在挖矿找不到新矿时把地面掉落物当目标捡起，兜住挖了没捡到的钻石/残骸.")
+        .defaultValue(true)
+        .build());
+
     private final Setting<Integer> pickaxeThreshold = sgGeneral.add(new IntSetting.Builder()
         .name("镐子耐久阈值")
         .description("镐子剩余耐久低于该值时，残骸模式自动挖石英修复（仅残骸模式生效）.")
@@ -267,6 +273,8 @@ public class AutoMining extends Module {
         // Baritone 避让设置 + 关闭自动换工具（V4.31 方案B：FO 自己锁时运镐，防 Baritone 选精准采集镐挖钻石掉原矿）
         PathManagers.get().applyMiningAvoidance(avoidMobs.get(), avoidBlocks.get());
         PathManagers.get().setAutoTool(false);
+        // V4.42：挖矿找不到新矿时把掉落物当目标捡起（兜住挖了没捡到钻石）
+        PathManagers.get().setMineScanDroppedItems(pickDroppedItems.get());
 
         // 自动扔垃圾联动
         if (autoTrash.get()) {

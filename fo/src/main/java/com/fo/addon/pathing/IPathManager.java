@@ -49,4 +49,10 @@ public interface IPathManager {
      * 选中精准采集镐挖钻石 → 掉原矿）。关闭模块时随 resetMiningAvoidance 一起恢复。
      */
     void setAutoTool(boolean enabled);
+
+    /**
+     * 设置 Baritone mineScanDroppedItems（V4.42）：mine 进程找不到新矿石时，
+     * 把地面掉落物也当目标走过去捡起（兜住"挖了没捡到钻石"）。关闭模块时随 resetMiningAvoidance 恢复。
+     */
+    void setMineScanDroppedItems(boolean enabled);
 }

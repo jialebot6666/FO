@@ -307,4 +307,17 @@ public class BaritonePathManager implements IPathManager {
             e.printStackTrace();
         }
     }
+
+    /** V4.42：mine 找不到新矿时把地面掉落物当目标捡起（兜住挖了没捡到钻石） */
+    @Override
+    public void setMineScanDroppedItems(boolean enabled) {
+        try {
+            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
+            Object settings = api.getMethod("getSettings").invoke(null);
+            backupSetting(settings, "mineScanDroppedItems");
+            setSettingValue(settings, "mineScanDroppedItems", enabled);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }
