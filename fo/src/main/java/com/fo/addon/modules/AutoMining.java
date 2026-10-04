@@ -180,6 +180,7 @@ public class AutoMining extends Module {
     private int stateWaitTicks = 0;
     private int tickCount = 0;
     private int lastPickaxeCheck = 0;
+    private int lastToolCheck = 0;             // V4.31：锁时运镐节流计数
     private int miningStartedTick = 0;
     private int lastDeepDarkCheck = 0;
     private int pathTimeoutTicks = 0;
@@ -254,8 +255,9 @@ public class AutoMining extends Module {
             return;
         }
 
-        // Baritone 避让设置
+        // Baritone 避让设置 + 关闭自动换工具（V4.31 方案B：FO 自己锁时运镐，防 Baritone 选精准采集镐挖钻石掉原矿）
         PathManagers.get().applyMiningAvoidance(avoidMobs.get(), avoidBlocks.get());
+        PathManagers.get().setAutoTool(false);
 
         // 自动扔垃圾联动
         if (autoTrash.get()) {
@@ -268,6 +270,7 @@ public class AutoMining extends Module {
         tickCount = 0;
         miningStartedTick = 0;
         lastPickaxeCheck = 0;
+        lastToolCheck = 0;
         lastDeepDarkCheck = 0;
         escapeTarget = null;
         disconnectFlag = false;
@@ -367,6 +370,12 @@ public class AutoMining extends Module {
             return;
         }
 
+        // V4.31 方案B：每 20 tick 确认手持时运镐（防精准采集镐被选中挖钻石 → 掉原矿）
+        if (tickCount - lastToolCheck >= 20) {
+            lastToolCheck = tickCount;
+            ensureFortunePickaxeHeld();
+        }
+
         // 残骸模式：每 20 tick 检查镐耐久
         if (miningMode.get() == MiningMode.ANCIENT_DEBRIS && tickCount - lastPickaxeCheck >= 20) {
             lastPickaxeCheck = tickCount;
@@ -393,6 +402,12 @@ public class AutoMining extends Module {
             repairPickaxeSlot = -1;
             state = MiningState.MINING;
             return;
+        }
+
+        // V4.31 方案B：挖石英也锁时运镐（石英吃时运，掉更多石英）
+        if (tickCount - lastToolCheck >= 20) {
+            lastToolCheck = tickCount;
+            ensureFortunePickaxeHeld();
         }
 
         // 没在挖石英 → 启动挖掘
@@ -767,8 +782,10 @@ public class AutoMining extends Module {
             state = MiningState.MINING;
             return;
         }
-        if (mineBlock(placedPos)) {
+        if (mineBlockWithSilkTouch(placedPos)) {
             info("末影箱已挖掉，准备拾取");
+            // 挖完立刻换回时运镐（V4.31 方案B：防下一轮挖矿用错工具）
+            ensureFortunePickaxeHeld();
             placedPos = null;
             pickupTargetType = PickupTarget.ENDER_CHEST;
             pickupTimeoutTicks = 0;
@@ -887,6 +904,19 @@ public class AutoMining extends Module {
      * 在范围内自动换最佳工具并发包挖掘，方块变空气即完成。
      */
     private boolean mineBlock(BlockPos pos) {
+        return mineBlockWithTool(pos, findBestToolSlot(pos));
+    }
+
+    /** 挖末影箱专用：优先精准采集镐（回收末影箱本体），没有则回退普通挖（消耗式） */
+    private boolean mineBlockWithSilkTouch(BlockPos pos) {
+        boolean hasSilk = findSilkTouchPickaxeSlot() != -1;
+        ToolStrategy s = pickaxeStrategy(false, true, hasSilk);
+        int toolSlot = (s == ToolStrategy.SILK_TOUCH) ? findSilkTouchPickaxeSlot() : findBestToolSlot(pos);
+        return mineBlockWithTool(pos, toolSlot);
+    }
+
+    /** 挖掘共用流程：工具切换（-1 表示保持当前槽）→ 朝向 → 发包挖掘 */
+    private boolean mineBlockWithTool(BlockPos pos, int toolSlot) {
         if (mc.world.getBlockState(pos).isAir()) return true;
         if (mc.world.getBlockState(pos).getHardness(mc.world, pos) < 0) {
             debug("方块不可挖掘: " + pos.toShortString());
@@ -903,8 +933,7 @@ public class AutoMining extends Module {
             return false;
         }
 
-        // 选最佳工具（时运镐优先，其次最高效率工具，没有则当前槽）
-        int toolSlot = findBestToolSlot(pos);
+        // 切换工具
         if (toolSlot != -1 && toolSlot != mc.player.getInventory().getSelectedSlot()) {
             if (toolSlot > 8) {
                 InvUtils.move().from(toolSlot).toHotbar(mc.player.getInventory().getSelectedSlot());
@@ -1485,5 +1514,48 @@ public class AutoMining extends Module {
             }
         }
         return fortuneSlot != -1 ? fortuneSlot : bestEffSlot;
+    }
+
+    // ================= V4.31 方案B：工具策略（锁时运 / 精准采集挖末影箱） =================
+
+    /** 挖箱/挖矿工具选择策略（纯逻辑，可单测）。
+     *  @param miningOre    正在挖矿（钻石/残骸/石英）——必须时运，防止精准采集把钻石挖成原矿
+     *  @param enderChest   正在挖末影箱——有精准采集镐就用精准（回收本体），没有就消耗式时运
+     *  @param hasSilkPickaxe 背包是否有精准采集镐
+     */
+    public enum ToolStrategy { FORTUNE, SILK_TOUCH, ANY }
+
+    public static ToolStrategy pickaxeStrategy(boolean miningOre, boolean enderChest, boolean hasSilkPickaxe) {
+        if (enderChest) return hasSilkPickaxe ? ToolStrategy.SILK_TOUCH : ToolStrategy.FORTUNE;
+        if (miningOre) return ToolStrategy.FORTUNE;
+        return ToolStrategy.ANY;
+    }
+
+    /** 确保手持时运镐（挖矿状态每 20 tick 调用；防 Baritone/手动挖选中精准采集镐挖钻石 → 掉原矿） */
+    private void ensureFortunePickaxeHeld() {
+        ItemStack held = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
+        if (isPickaxe(held.getItem()) && getFortuneLevel(held) > 0) return;
+        int slot = findFortunePickaxeSlot();
+        if (slot >= 0) {
+            if (slot > 8) {
+                InvUtils.move().from(slot).toHotbar(mc.player.getInventory().getSelectedSlot());
+            } else {
+                InvUtils.swap(slot, false);
+                mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket(slot));
+            }
+        }
+    }
+
+    /** 找"镐子 + 精准采集"背包槽（挖末影箱回收本体用），找不到返回 -1 */
+    private int findSilkTouchPickaxeSlot() {
+        if (mc.world == null) return -1;
+        var reg = mc.world.getRegistryManager().getOrThrow(net.minecraft.registry.RegistryKeys.ENCHANTMENT);
+        var entry = reg.getEntry(reg.get(Enchantments.SILK_TOUCH));
+        for (int i = 0; i < 36; i++) {
+            ItemStack st = mc.player.getInventory().getStack(i);
+            if (st.isEmpty()) continue;
+            if (isPickaxe(st.getItem()) && EnchantmentHelper.getLevel(entry, st) > 0) return i;
+        }
+        return -1;
     }
 }

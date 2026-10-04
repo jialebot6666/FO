@@ -89,4 +89,32 @@ public class AutoMiningLogicTest {
         assertEquals(27, AutoMining.invSlotToContainerScreen(9));
         assertEquals(53, AutoMining.invSlotToContainerScreen(35));
     }
+
+    // ---- V4.31 方案B：工具策略（挖矿锁时运 / 挖末影箱精准采集）----
+
+    @Test
+    void miningOreAlwaysFortune() {
+        // 挖矿（钻石/残骸/石英）：无论有没有精准采集镐，必须时运（防钻石被挖成原矿）
+        assertEquals(AutoMining.ToolStrategy.FORTUNE, AutoMining.pickaxeStrategy(true, false, false));
+        assertEquals(AutoMining.ToolStrategy.FORTUNE, AutoMining.pickaxeStrategy(true, false, true));
+    }
+
+    @Test
+    void enderChestPrefersSilkTouchWhenAvailable() {
+        // 挖末影箱：有精准采集镐 → 精准回收本体
+        assertEquals(AutoMining.ToolStrategy.SILK_TOUCH, AutoMining.pickaxeStrategy(false, true, true));
+    }
+
+    @Test
+    void enderChestFallsBackToFortuneWithoutSilk() {
+        // 挖末影箱：没有精准采集镐 → 消耗式（时运挖，掉 8 黑曜石）
+        assertEquals(AutoMining.ToolStrategy.FORTUNE, AutoMining.pickaxeStrategy(false, true, false));
+    }
+
+    @Test
+    void nonOreNonEnderChestAnyTool() {
+        // 挖潜影盒/工作台：什么工具都掉本体，不挑
+        assertEquals(AutoMining.ToolStrategy.ANY, AutoMining.pickaxeStrategy(false, false, false));
+        assertEquals(AutoMining.ToolStrategy.ANY, AutoMining.pickaxeStrategy(false, false, true));
+    }
 }

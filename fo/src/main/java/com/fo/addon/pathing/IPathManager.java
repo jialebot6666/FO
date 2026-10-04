@@ -42,4 +42,11 @@ public interface IPathManager {
 
     /** 恢复调用 applyMiningAvoidance 前备份的 Baritone 设置 */
     void resetMiningAvoidance();
+
+    /**
+     * 设置 Baritone 自动换工具（autoTool）。V4.31 方案 B：自动挖矿开启时设为 false，
+     * 让 Baritone 只用当前手持工具挖掘，由 FO 自己锁定时运镐（防止 Baritone 扫热键栏
+     * 选中精准采集镐挖钻石 → 掉原矿）。关闭模块时随 resetMiningAvoidance 一起恢复。
+     */
+    void setAutoTool(boolean enabled);
 }

@@ -44,4 +44,8 @@ public class NopPathManager implements IPathManager {
     @Override
     public void resetMiningAvoidance() {
     }
+
+    @Override
+    public void setAutoTool(boolean enabled) {
+    }
 }

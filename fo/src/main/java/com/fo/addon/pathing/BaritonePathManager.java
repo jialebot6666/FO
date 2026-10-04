@@ -290,4 +290,28 @@ public class BaritonePathManager implements IPathManager {
         }
         avoidanceBackup.clear();
     }
+
+    @Override
+    public void setAutoTool(boolean enabled) {
+        try {
+            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
+            Object settings = api.getMethod("getSettings").invoke(null);
+            Object settingObj = settings.getClass().getField("autoTool").get(settings);
+            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
+            // 只在首次调用时备份（避免重复开关叠加备份）
+            boolean backed = false;
+            for (Object[] e : avoidanceBackup) {
+                if ("autoTool".equals(e[1])) {
+                    backed = true;
+                    break;
+                }
+            }
+            if (!backed) {
+                avoidanceBackup.add(new Object[]{settingObj, "autoTool", vf.get(settingObj)});
+            }
+            vf.set(settingObj, enabled);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }
