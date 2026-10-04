@@ -5,6 +5,7 @@ import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
 import com.fo.addon.utils.MiningGuard;
+import com.fo.addon.utils.CraftingSlotMath;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
@@ -1099,7 +1100,7 @@ public class AutoMining extends Module {
         return count;
     }
 
-    /** 找背包中钻石数量最多的槽位 → 返回合成台界面屏幕槽（CraftingScreenHandler 布局：0输出/1-9合成格/10-45主背包/46-53热键；背包 n<9热键→n+46，n≥9主背包→n+10） */
+    /** 找背包中钻石数量最多的槽位 → 返回合成台界面屏幕槽（换算见 CraftingSlotMath，对齐 misaka x0005） */
     private int findLargestDiamondSlot(CraftingScreenHandler h) {
         int best = -1;
         int bestCount = 0;
@@ -1110,7 +1111,7 @@ public class AutoMining extends Module {
                 best = i;
             }
         }
-        return best == -1 ? -1 : (best < 9 ? best + 46 : best + 10);
+        return best == -1 ? -1 : CraftingSlotMath.inventoryIndexToCraftingScreenSlot(best);
     }
 
     /** 清空合成格中的非钻石物品（QUICK_MOVE 移回背包） */
