@@ -209,6 +209,7 @@ public class AutoMining extends Module {
 
     private int repairPickaxeSlot = -1;        // 需要修复的镐子背包槽
     private PickupTarget pickupTargetType = null;
+    private boolean pickupSeen = false;        // 拾取流程中是否曾检测到目标掉落物（消失=已捡到）
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
@@ -323,6 +324,7 @@ public class AutoMining extends Module {
         storingToEnder = false;
         pendingMiningTable = false;
         pendingTablePos = null;
+        pickupSeen = false;
     }
 
     @EventHandler
@@ -837,10 +839,17 @@ public class AutoMining extends Module {
 
         BlockPos drop = findPickupDrop(pickupTargetType);
         if (drop == null) {
+            if (pickupSeen) {
+                // 曾检测到掉落物、现在消失 = 已拾取完成（修复：捡到后走完成分支，不再误判超时）
+                pickupSeen = false;
+                completePickup();
+                return;
+            }
             pickupTimeoutTicks++;
             if (pickupTimeoutTicks > 300) {
                 info("拾取超时，重新开始挖掘");
                 pickupTargetType = null;
+                pickupSeen = false;
                 pendingMiningTable = false;
                 pendingTablePos = null;
                 state = MiningState.MINING;
@@ -849,28 +858,31 @@ public class AutoMining extends Module {
             return;
         }
 
+        // 检测到掉落物（标记曾见过，用于拾取完成判定）
+        pickupSeen = true;
+
         // 走到掉落物旁（自动拾取）
         if (!PathManagers.get().isPathing()) {
             PathManagers.get().moveTo(drop, false);
             debug("正在前往拾取: " + drop.toShortString());
         }
+    }
 
-        // 已捡到（掉落物消失）
-        if (findPickupDrop(pickupTargetType) == null) {
-            PathManagers.get().stop();
-            info("拾取完成");
-            pickupTargetType = null;
-            // 钻石模式：刚捡完潜影盒 → 接着挖工作台
-            if (pendingMiningTable) {
-                pendingMiningTable = false;
-                placedPos = pendingTablePos;
-                pendingTablePos = null;
-                info("拾取潜影盒完成，挖掉工作台");
-                state = MiningState.MINING_CRAFTING_TABLE;
-                return;
-            }
-            state = MiningState.MINING;
+    /** 拾取完成公共收尾：回挖矿，或钻石模式接着挖工作台 */
+    private void completePickup() {
+        PathManagers.get().stop();
+        info("拾取完成");
+        pickupTargetType = null;
+        // 钻石模式：刚捡完潜影盒 → 接着挖工作台
+        if (pendingMiningTable) {
+            pendingMiningTable = false;
+            placedPos = pendingTablePos;
+            pendingTablePos = null;
+            info("拾取潜影盒完成，挖掉工作台");
+            state = MiningState.MINING_CRAFTING_TABLE;
+            return;
         }
+        state = MiningState.MINING;
     }
 
     /** WAITING：倒计时后回上一状态 */
@@ -1087,7 +1099,7 @@ public class AutoMining extends Module {
         return count;
     }
 
-    /** 找背包中钻石数量最多的槽位（合成格槽位换算：n<9 → n+37，n>=9 → n+1） */
+    /** 找背包中钻石数量最多的槽位 → 返回合成台界面屏幕槽（CraftingScreenHandler 布局：0输出/1-9合成格/10-45主背包/46-53热键；背包 n<9热键→n+46，n≥9主背包→n+10） */
     private int findLargestDiamondSlot(CraftingScreenHandler h) {
         int best = -1;
         int bestCount = 0;
@@ -1098,7 +1110,7 @@ public class AutoMining extends Module {
                 best = i;
             }
         }
-        return best == -1 ? -1 : (best < 9 ? best + 37 : best + 1);
+        return best == -1 ? -1 : (best < 9 ? best + 46 : best + 10);
     }
 
     /** 清空合成格中的非钻石物品（QUICK_MOVE 移回背包） */

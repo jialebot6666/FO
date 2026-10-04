@@ -148,21 +148,26 @@ public class AutoTrash extends Module {
      * V4.30: 供 AutoMining 自动挖矿联动调用。强制白名单 + 确保列表含石英（残骸模式挖石英
      * 修镐，白名单缺石英会把石英一起丢掉，镐子永远修不好）。石英块刻意不进名单——
      * 修镐逻辑会主动把合成出的石英块丢弃（参考 misaka AutoMining 行为）。
+     * V4.37: 同时确保钻石/钻石块/远古残骸在保留列表——钻石模式合成出的钻石块若不在
+     * 白名单会被联动扔垃圾丢掉，导致"背包没有可存储的钻石块"、存盒链中断。
      */
     public void enableForMineLink() {
         mode.set(TrashLogic.Mode.WHITELIST);
         java.util.List<Item> list = new java.util.ArrayList<>(items.get());
-        if (!list.contains(Items.QUARTZ)) {
-            list.add(Items.QUARTZ);
-            items.set(list);
+        // 挖掘产物与原料必须保留：石英（修镐）、钻石/钻石块（钻石模式存盒）、远古残骸（残骸模式存盒）
+        for (Item keep : List.of(Items.QUARTZ, Items.DIAMOND, Items.DIAMOND_BLOCK, Items.ANCIENT_DEBRIS)) {
+            if (!list.contains(keep)) {
+                list.add(keep);
+            }
         }
+        items.set(list);
         linkedByMining = true;
         if (!isActive()) toggle();
 
         try {
             MeteorToast toast = new MeteorToast.Builder("已联动开启 FO 自动扔垃圾（自动挖矿）")
                 .icon(Items.SHULKER_BOX)
-                .text("白名单模式，已确保石英在保留列表（" + list.size() + " 项）")
+                .text("白名单模式，已确保石英/钻石/钻石块/残骸在保留列表（" + list.size() + " 项）")
                 .build();
             mc.getToastManager().add(toast);
         } catch (Exception ignored) {
