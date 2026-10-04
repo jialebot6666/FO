@@ -186,17 +186,6 @@ public class BaritonePathManager implements IPathManager {
     // 备份对象：{settingsObj, 字段名, 原 value}
     private final List<Object[]> avoidanceBackup = new java.util.ArrayList<>();
 
-    /** 读取某个 BaritoneSettings 字段的 Setting 对象，返回其 value 字段引用；找不到返回 null */
-    private java.lang.reflect.Field settingValueField(Object settingsObj, String fieldName) {
-        try {
-            java.lang.reflect.Field f = settingsObj.getClass().getField(fieldName);
-            Object setting = f.get(settingsObj);
-            return setting.getClass().getField("value");
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     @Override
     public void applyMiningAvoidance(boolean avoidMobs, boolean avoidBlocks) {
         try {
@@ -204,29 +193,14 @@ public class BaritonePathManager implements IPathManager {
             Object settings = api.getMethod("getSettings").invoke(null);
 
             // 最小挖掘 Y（主世界基岩上 6 格起挖，与 misaka 一致）
-            java.lang.reflect.Field f = settingValueField(settings, "minYLevelWhileMining");
-            if (f != null) {
-                try {
-                    f.set(f.get(settings), 6);
-                } catch (Exception ignored) {
-                }
-            }
+            // V4.41 修复：原实现拿 value 字段却对 settings 对象 get/set，抛异常被吞 → 设置从未生效
+            backupSetting(settings, "minYLevelWhileMining");
+            setSettingValue(settings, "minYLevelWhileMining", 6);
 
             if (avoidMobs) {
                 String[] mobFields = {"avoidance", "mobAvoidanceRadius", "mobAvoidanceCoefficient", "mobSpawnerAvoidanceRadius"};
                 for (String name : mobFields) {
-                    java.lang.reflect.Field vf = settingValueField(settings, name);
-                    if (vf == null) continue;
-                    Object settingObj = null;
-                    try {
-                        settingObj = settings.getClass().getField(name).get(settings);
-                    } catch (Exception ignored) {
-                    }
-                    if (settingObj == null) continue;
-                    try {
-                        avoidanceBackup.add(new Object[]{settingObj, name, vf.get(settingObj)});
-                    } catch (Exception ignored) {
-                    }
+                    backupSetting(settings, name);
                 }
                 setSettingValue(settings, "avoidance", Boolean.TRUE);
                 setSettingValue(settings, "mobAvoidanceRadius", 12);
@@ -235,44 +209,63 @@ public class BaritonePathManager implements IPathManager {
             }
 
             if (avoidBlocks) {
-                java.lang.reflect.Field bf = settingValueField(settings, "blocksToAvoid");
-                if (bf != null) {
-                    Object settingObj = null;
-                    try {
-                        settingObj = settings.getClass().getField("blocksToAvoid").get(settings);
-                    } catch (Exception ignored) {
-                    }
-                    if (settingObj != null) {
-                        try {
-                            avoidanceBackup.add(new Object[]{settingObj, "blocksToAvoid", bf.get(settingObj)});
-                        } catch (Exception ignored) {
-                        }
-                    }
-                    List<Block> avoid = new java.util.ArrayList<>();
-                    avoid.add(net.minecraft.block.Blocks.SCULK_SENSOR);
-                    avoid.add(net.minecraft.block.Blocks.SCULK);
-                    avoid.add(net.minecraft.block.Blocks.SCULK_VEIN);
-                    avoid.add(net.minecraft.block.Blocks.SCULK_CATALYST);
-                    avoid.add(net.minecraft.block.Blocks.SCULK_SHRIEKER);
-                    avoid.add(net.minecraft.block.Blocks.TRIAL_SPAWNER);
-                    avoid.add(net.minecraft.block.Blocks.SPAWNER);
-                    try {
-                        bf.set(bf.get(settings), avoid);
-                    } catch (Exception ignored) {
-                    }
-                }
+                backupSetting(settings, "blocksToAvoid");
+                List<Block> avoid = new java.util.ArrayList<>();
+                avoid.add(net.minecraft.block.Blocks.SCULK_SENSOR);
+                avoid.add(net.minecraft.block.Blocks.SCULK);
+                avoid.add(net.minecraft.block.Blocks.SCULK_VEIN);
+                avoid.add(net.minecraft.block.Blocks.SCULK_CATALYST);
+                avoid.add(net.minecraft.block.Blocks.SCULK_SHRIEKER);
+                avoid.add(net.minecraft.block.Blocks.TRIAL_SPAWNER);
+                avoid.add(net.minecraft.block.Blocks.SPAWNER);
+                setSettingValue(settings, "blocksToAvoid", avoid);
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private void setSettingValue(Object settingsObj, String fieldName, Object value) {
+    /** 拿 Settings 上的 Setting 对象（反射，任何失败返回 null） */
+    private Object getSettingObject(Object settings, String fieldName) {
         try {
-            java.lang.reflect.Field vf = settingValueField(settingsObj, fieldName);
-            if (vf == null) return;
-            vf.set(vf.get(settingsObj), value);
+            return settings.getClass().getField(fieldName).get(settings);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 备份某个 Setting 当前值（供 resetMiningAvoidance 恢复） */
+    private void backupSetting(Object settings, String fieldName) {
+        try {
+            Object settingObj = getSettingObject(settings, fieldName);
+            if (settingObj == null) return;
+            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
+            avoidanceBackup.add(new Object[]{settingObj, fieldName, vf.get(settingObj)});
         } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * 设置 Baritone 设置值（对 Setting 对象操作，非 settings 对象）。
+     * V4.41 修复原实现 bug：value 字段定义在 Setting 类上，却对 settings 对象 get/set → 抛异常被吞，设置从未生效。
+     * 类型适配：部分 Baritone Y 类设置是 Long，传 Integer 会类型不匹配。
+     */
+    private boolean setSettingValue(Object settings, String fieldName, Object value) {
+        try {
+            Object settingObj = getSettingObject(settings, fieldName);
+            if (settingObj == null) return false;
+            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
+            Class<?> type = vf.getType();
+            if (value instanceof Integer && (type == Long.class || type == long.class)) {
+                vf.set(settingObj, ((Integer) value).longValue());
+            } else if (value instanceof Integer && (type == Integer.class || type == int.class)) {
+                vf.set(settingObj, value);
+            } else {
+                vf.set(settingObj, value);
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 
