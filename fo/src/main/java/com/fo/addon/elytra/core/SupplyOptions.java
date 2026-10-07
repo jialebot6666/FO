@@ -15,6 +15,7 @@ public record SupplyOptions(
     boolean autoPickupEnderChest,
     boolean useBaritoneMine,
     boolean storeLoot,
+    boolean freeSlotWhenFull,
     List<Item> storeItems,
     List<Item> foodItems,
     boolean debug,
@@ -43,6 +44,6 @@ public record SupplyOptions(
     ) {
         this(targetFireworkStacks, targetXpBottles, targetFoodCount, targetTotems, targetElytraCount,
             minEnderChests, maxShulkers, placeRadius, actionDelay, autoPlaceEnderChest,
-            autoPickupEnderChest, useBaritoneMine, storeLoot, storeItems, foodItems, debug, List.of());
+            autoPickupEnderChest, useBaritoneMine, storeLoot, false, storeItems, foodItems, debug, List.of());
     }
 }

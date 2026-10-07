@@ -126,6 +126,14 @@ public final class SupplyTask {
     private int shScreenWaitTicks;   // 等潜影盒界面出现
     private int shBreakWaitTicks;    // 等潜影盒被挖掉并进背包
     private int ecBreakWaitTicks;    // 等末影箱被挖掉并进背包
+    /** 交挖之前的潜影盒槽位快照（V5.2：用来判断盒子是不是真进背包了）。 */
+    private InventoryPickupLogic.Snapshot shulkerBefore;
+    /** 本 tick 是否正被火球纠缠（V5.2：被火球打断时不该算挖掘超时）。 */
+    private boolean threatActive;
+    /** 本次挖回已经丢了几件垃圾腾位（V5.2，防止失控连丢）。 */
+    private int freeSlotDrops;
+    /** 每挖回一个方块最多丢几件腾位。 */
+    private static final int MAX_FREE_SLOT_DROPS = 9;
     private int walkTicks;
     private int screenHoldTicks;
     private int openRetries;
@@ -1292,6 +1300,8 @@ public final class SupplyTask {
             breakTicks = 0;
             pickupWait = 0;
             shBreakWaitTicks = 0;
+            freeSlotDrops = 0;
+            shulkerBefore = snapshotShulkers(mc);
             shulkerBreakTarget = ItemHelper.countShulkers(mc.player) + 1;
             Block block = mc.world.getBlockState(shulkerPos).getBlock();
             if (opts.useBaritoneMine() && BaritoneHook.available() && hasPickaxe(mc)) {
@@ -1324,8 +1334,18 @@ public final class SupplyTask {
     }
     private void waitBreakShulker(MinecraftClient mc) {
         boolean gone = mc.world.getBlockState(shulkerPos).isAir();
-        boolean gotIt = ItemHelper.countShulkers(mc.player) >= shulkerBreakTarget;
-        shBreakWaitTicks++;
+        // V5.2：槽位差 + 数量差取或。只看数量会漏掉「叠放进原来那摞」，只看槽位会漏掉叠放本身。
+        boolean gotIt = InventoryPickupLogic.pickedUp(shulkerBefore, snapshotShulkers(mc))
+            || ItemHelper.countShulkers(mc.player) >= shulkerBreakTarget;
+        if (threatActive) {
+            // 被火球纠缠时不推进挖掘超时（Baritone 这时本来也被暂停了）
+            if (shBreakWaitTicks != 0) {
+                FOElytraLog.detail("被火球打断，挖掘等待计数清零（原 %d tick）", shBreakWaitTicks);
+            }
+            shBreakWaitTicks = 0;
+        } else {
+            shBreakWaitTicks++;
+        }
         MineWaitLogic.Outcome outcome =
             MineWaitLogic.evaluate(gone, gotIt, shBreakWaitTicks, MineWaitLogic.SHULKER_TIMEOUT_TICKS);
         if (outcome == MineWaitLogic.Outcome.COLLECTED) {
@@ -1336,6 +1356,8 @@ public final class SupplyTask {
             next(State.REOPEN_EC, opts.actionDelay());
             return;
         }
+        // 方块已经没了但盒子还没进背包 —— 很可能是背包满了，主动丢垃圾腾位（V5.2）
+        if (gone && !gotIt) freeSlotForPickup(mc);
         // 方块还在 = Baritone 正常在挖（寻路/挖掘/捡拾），不要插手中断；方块没了才进入拾取窗口收尾。
         stopMiningAfterPickupWindow(gone);
         if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
@@ -1425,6 +1447,7 @@ public final class SupplyTask {
             breakTicks = 0;
             pickupWait = 0;
             ecBreakWaitTicks = 0;
+            freeSlotDrops = 0;
             ecItemBefore = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
             obsidianBefore = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
             boolean silk = hasSilkTouch(mc);
@@ -1465,7 +1488,11 @@ public final class SupplyTask {
         int ecNow = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
         int obsidianNow = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
         boolean gotIt = ecNow > ecItemBefore || obsidianNow > obsidianBefore;
-        ecBreakWaitTicks++;
+        if (threatActive) {
+            ecBreakWaitTicks = 0;   // 被火球纠缠时不推进挖掘超时
+        } else {
+            ecBreakWaitTicks++;
+        }
         MineWaitLogic.Outcome outcome =
             MineWaitLogic.evaluate(gone, gotIt, ecBreakWaitTicks, MineWaitLogic.ENDER_CHEST_TIMEOUT_TICKS);
         if (outcome == MineWaitLogic.Outcome.COLLECTED) {
@@ -1475,6 +1502,8 @@ public final class SupplyTask {
             next(State.DONE, 0);
             return;
         }
+        // 末影箱同理：方块没了但还没进背包，先腾位（V5.2）
+        if (gone && !gotIt) freeSlotForPickup(mc);
         // 同潜影盒：方块还在就交给 Baritone 慢慢挖（黑曜石很硬），方块没了才进拾取窗口收尾。
         stopMiningAfterPickupWindow(gone);
         if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
@@ -1502,6 +1531,85 @@ public final class SupplyTask {
         shScreenWaitTicks = 0;
         shBreakWaitTicks = 0;
         ecBreakWaitTicks = 0;
+    }
+    /**
+     * 由「自动鞘翅飞行」每 tick 告知：当前是否正被火球纠缠。
+     *
+     * <p>被火球打断的时候挖掘本来就推进不下去，不该把这个时间算进挖掘超时里，
+     * 否则「一边挨火球一边挖」会被误判成「挖不动了」。</p>
+     */
+    public void setThreatActive(boolean active) {
+        this.threatActive = active;
+    }
+    /** 按槽位统计潜影盒数量（V5.2 用来做槽位差判定）。 */
+    private InventoryPickupLogic.Snapshot snapshotShulkers(MinecraftClient mc) {
+        int[] perSlot = new int[36];
+        if (mc.player != null) {
+            var inv = mc.player.getInventory();
+            for (int i = 0; i < 36; i++) {
+                ItemStack s = inv.getStack(i);
+                perSlot[i] = ItemHelper.isShulkerBox(s) ? s.getCount() : 0;
+            }
+        }
+        return InventoryPickupLogic.of(perSlot);
+    }
+    /** 丢弃腾位时「绝对不丢」的物品。沿用 FO 已有的必需品判断，再补上鞘翅与满摞经验瓶。 */
+    private boolean isDropProtected(ItemStack s) {
+        if (s.isEmpty()) return true;
+        if (s.isOf(Items.ELYTRA)) return true;
+        if (s.isOf(Items.EXPERIENCE_BOTTLE) && s.getCount() >= s.getMaxCount()) return true;
+        return isEssentialHotbar(s);
+    }
+    /**
+     * 背包满、东西捡不起来时，丢掉一个杂物腾出格子（V5.2）。
+     *
+     * <p>安全闸（任何一条不满足就什么都不做）：</p>
+     * <ol>
+     *   <li>开关打开；</li>
+     *   <li><b>当前没有开任何容器</b> —— 否则同一批原始槽位号指向别的东西，点下去会误操作；</li>
+     *   <li>背包确实一格空位都没有（有空位就不用丢）；</li>
+     *   <li>本次挖回还没丢满 {@link #MAX_FREE_SLOT_DROPS} 件。</li>
+     * </ol>
+     */
+    private void freeSlotForPickup(MinecraftClient mc) {
+        if (!opts.freeSlotWhenFull()) return;
+        if (mc.player == null || mc.interactionManager == null) return;
+        // 开着容器时原始槽位号会指向容器那半边，绝对不能动手
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler) return;
+        if (freeSlotDrops >= MAX_FREE_SLOT_DROPS) return;
+
+        boolean[] empty = new boolean[FreeSlotLogic.INVENTORY_SIZE];
+        boolean[] protectedSlot = new boolean[FreeSlotLogic.INVENTORY_SIZE];
+        var inv = mc.player.getInventory();
+        for (int i = 0; i < FreeSlotLogic.INVENTORY_SIZE; i++) {
+            ItemStack s = inv.getStack(i);
+            empty[i] = s.isEmpty();
+            protectedSlot[i] = isDropProtected(s);
+        }
+        if (FreeSlotLogic.hasEmptySlot(empty)) return;   // 还有空位，不需要丢
+
+        int slot = FreeSlotLogic.pickDroppableSlot(empty, protectedSlot, inv.getSelectedSlot());
+        if (slot < 0) {
+            if (freeSlotDrops == 0) {
+                FOElytraLog.warn("背包满了，但剩下的全是保护物品（镐/剑/食物/图腾/烟花/鞘翅/末影箱/潜影盒），没有东西可以丢来腾位");
+            }
+            return;
+        }
+        int raw = FreeSlotLogic.rawPlayerSlotId(slot);
+        if (raw < 0) return;
+        ItemStack stack = inv.getStack(slot);
+        String name = stack.getName().getString();
+        int count = stack.getCount();
+        try {
+            mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId, raw, 1,
+                net.minecraft.screen.slot.SlotActionType.THROW, mc.player);
+            freeSlotDrops++;
+            FOElytraLog.warn("背包满，丢掉 %s x1 腾位（第 %d/%d 件，格 %d）",
+                name, freeSlotDrops, MAX_FREE_SLOT_DROPS, slot);
+        } catch (Throwable t) {
+            freeSlotDrops = MAX_FREE_SLOT_DROPS;   // 出错就别再试了
+            FOElytraLog.warn("丢弃 %s 腾位失败：%s", name, t);
+        }
     }
     private boolean hasSilkTouch(MinecraftClient mc) {
         ItemStack selected = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());

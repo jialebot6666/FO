@@ -621,9 +621,17 @@ public class AutoElytraFlight extends FOElytraModule {
 
     private final BoolSetting autoPickupEnderChest = SettingHelper.bool(sgSupplyExec, "用后回收末影箱","补给完成后把末影箱挖回来（否则会消耗末影箱）。默认开。", true);
 
-    private final BoolSetting useBaritoneMine = SettingHelper.bool(sgSupplyExec, "用 Baritone 挖方块","挖潜影盒/末影箱交给 Baritone：它会走过去按住挖，并捡回掉落物。默认开。", true);
+    private final BoolSetting useBaritoneMine = SettingHelper.bool(sgSupplyExec, "用 Baritone 挖方块","挖潜影盒/末影箱交给 Baritone 的挖掘进程（它会自己走过去按住挖、并捡回掉落物）。\n"
+        + "默认关：盒子是 FO 自己放在身边 2 格内的，用 FO 自己的挖掘（瞄准 + 逐 tick 破坏 + 200 tick 超时）更可控，\n"
+        + "也不会出现「Baritone 为了凑数量跑去挖别的同类方块」「进程一直 active 被误判成超时」这类问题。\n"
+        + "只有在盒子被放在够不到的地方时才建议打开。", false);
 
     private final BoolSetting storeLoot = SettingHelper.bool(sgSupplyExec, "顺路存战利品","取物资时，把背包里的杂物（或下面的白名单物品）shift 进当前打开的潜影盒，腾出空间。默认关。", false);
+
+    private final BoolSetting freeSlotWhenFull = SettingHelper.bool(sgSupplyExec, "背包满时丢垃圾腾位","挖回潜影盒/末影箱时如果背包满、盒子捡不起来，就丢掉一个杂物腾出格子。默认开。\n"
+        + "受保护的物品永远不会被丢：镐、剑、食物、不死图腾、烟花、鞘翅、末影箱、潜影盒、满摞的经验瓶，\n"
+        + "以及你当前手上拿着的那一格。丢弃会先在背包(9-35)里找，尽量不动快捷栏。\n"
+        + "每挖回一个盒子最多丢 9 件；开着容器界面时绝不丢（避免点错格子）。", true);
 
     private final ItemListSetting storeItems = SettingHelper.items(sgSupplyExec, "要存放的物品","只有这些物品会被存进潜影盒。", List.of(), false);
 
@@ -3378,6 +3386,7 @@ public class AutoElytraFlight extends FOElytraModule {
             autoPickupEnderChest.get(),
             useBaritoneMine.get(),
             storeLoot.get(),
+            freeSlotWhenFull.get(),
             storeItems.get() == null ? List.<Item>of() : storeItems.get(),
             supplyFoodItems.get() == null ? List.<Item>of() : supplyFoodItems.get(),
             debugMessages.get(),
@@ -3443,6 +3452,8 @@ public class AutoElytraFlight extends FOElytraModule {
 
         if (InvHelper.screenOpen()) PlayerAction.restoreHeldKeys();
 
+        // V5.2：把「正被火球纠缠」告诉补给状态机，让它不要把这段时间算成挖掘超时
+        supplyTask.setThreatActive(fireballs.isEngaging());
         supplyTask.tick();
         TaskStatus status = supplyTask.status();
 
