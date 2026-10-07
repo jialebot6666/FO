@@ -8,7 +8,6 @@ import com.fo.addon.utils.MiningGuard;
 import com.fo.addon.utils.CraftingSlotMath;
 import com.fo.addon.utils.PickupNextLogic;
 import com.fo.addon.utils.PickupTimeoutLogic;
-import com.fo.addon.utils.StartupCheckLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
@@ -207,7 +206,6 @@ public class AutoMining extends Module {
     private int lastPickaxeCheck = 0;
     private int lastToolCheck = 0;             // V4.31：锁时运镐节流计数
     private int miningStartedTick = 0;
-    private int lastDeepDarkCheck = 0;
     private int pathTimeoutTicks = 0;
     private int pickupTimeoutTicks = 0;
     private int craftActionTicks = 0;
@@ -262,16 +260,10 @@ public class AutoMining extends Module {
             return;
         }
 
-        // 必需品检查：时运镐 + 空潜影盒（或末影箱取盒兜底）+ 工作台（钻石模式）+ 末影箱
-        String missing = StartupCheckLogic.missingItem(
-            findFortunePickaxeSlot() != -1,
-            findEmptyShulkerSlot() != -1,
-            findSlot(Items.ENDER_CHEST) != -1,
-            miningMode.get() == MiningMode.DIAMOND,
-            findSlot(Items.CRAFTING_TABLE) != -1
-        );
-        if (missing != null) {
-            error("背包缺少必要物品！需要：" + missing);
+        // V4.54 对齐 misaka 启动检查：只保留时运镐强制（方案B锁镐前提，防精准采集挖钻石掉原矿）；
+        // 潜影盒/末影箱/工作台不再强制要求（misaka 宽松语义，运行时存储链兜底：无盒→末影箱取盒→无可取则断开）
+        if (findFortunePickaxeSlot() == -1) {
+            error("背包缺少必要物品！需要：时运镐");
             toggle();
             return;
         }
@@ -300,7 +292,6 @@ public class AutoMining extends Module {
         miningStartedTick = 0;
         lastPickaxeCheck = 0;
         lastToolCheck = 0;
-        lastDeepDarkCheck = 0;
         escapeTarget = null;
         disconnectFlag = false;
         startMining();
@@ -343,18 +334,15 @@ public class AutoMining extends Module {
         if (mc.player == null || mc.world == null) return;
         tickCount++;
 
-        // 深暗之域检测（钻石模式 + 避让开启；每 100 tick 检测一次）
+        // 深暗之域检测（V4.54 对齐 misaka 主 tick：每 tick 检测，仅钻石模式 + 避让开启 + 非逃离状态）
         if (miningMode.get() == MiningMode.DIAMOND && avoidDeepDark.get()
             && state != MiningState.ESCAPING_DEEP_DARK
-            && tickCount - lastDeepDarkCheck >= 100) {
-            lastDeepDarkCheck = tickCount;
-            if (isDeepDark(mc.player.getBlockPos())) {
-                PathManagers.get().stop();
-                info("检测到深暗之域，开始逃离");
-                escapeTarget = null;
-                state = MiningState.ESCAPING_DEEP_DARK;
-                return;
-            }
+            && isDeepDark(mc.player.getBlockPos())) {
+            PathManagers.get().stop();
+            info("检测到深暗之域，开始逃离");
+            escapeTarget = null;
+            state = MiningState.ESCAPING_DEEP_DARK;
+            return;
         }
 
         // 断开连接兜底
@@ -412,6 +400,11 @@ public class AutoMining extends Module {
         if (tickCount - lastToolCheck >= 20) {
             lastToolCheck = tickCount;
             ensureFortunePickaxeHeld();
+        }
+
+        // V4.54 对齐 misaka x0230：残骸模式每 tick 静默合成石英块并丢弃（防石英占满背包）
+        if (miningMode.get() == MiningMode.ANCIENT_DEBRIS) {
+            craftQuartzBlock();
         }
 
         // 残骸模式：每 20 tick 检查镐耐久
@@ -867,10 +860,10 @@ public class AutoMining extends Module {
         waitTicks(MiningState.STORING_IN_ENDER_CHEST, 10);
     }
 
-    /** 进入拾取：记录目标类型、清超时/寻路计数、记录背包目标物品基数（计数+1即拾取完成，对齐 misaka） */
+    /** 进入拾取：记录目标类型、设 200 tick 超时倒计时、记录背包目标物品基数（计数+1即拾取完成，对齐 misaka x0016） */
     private void startPickup(PickupTarget target) {
         pickupTargetType = target;
-        pickupTimeoutTicks = 0;
+        pickupTimeoutTicks = PickupTimeoutLogic.MAX_TIMEOUT_TICKS;
         pickupPathTicks = 0;
         pickupBaseCount = countTargetInInventory(target);
     }
@@ -894,7 +887,7 @@ public class AutoMining extends Module {
         };
     }
 
-    /** PICKING_UP_ITEM：寻路拾取目标掉落物（10 格内检测，200 tick 超时；潜影盒超时断开，其余回挖矿重试） */
+    /** PICKING_UP_ITEM：寻路拾取目标掉落物（200 tick 固定倒计时超时，对齐 misaka x0016；潜影盒超时断开，其余回挖矿重试） */
     private void pickingUpItem() {
         if (pickupTargetType == null) {
             state = MiningState.MINING;
@@ -913,51 +906,43 @@ public class AutoMining extends Module {
         //    pickup 无距离限制（不受 findPickupDrop 10 格限制），捡完自动结束；重复调用 Baritone 内部复用不刷网络。
         PathManagers.get().pickupItems(stack -> pickupItemMatches(stack.getItem(), pickupTargetType));
 
-        // ③ 超时兜底：掉落物实体不可见/已被别人捡走且背包计数未变 → 原超时逻辑
-        BlockPos drop = findPickupDrop(pickupTargetType);
-        if (drop == null) {
-            // 掉落物尚未生成/不可见：超时计数（pickup 仍每 tick 发起，不因 drop 缺失而停止）
-            pickupTimeoutTicks++;
-            boolean wasShulker = pickupTargetType == PickupTarget.SHULKER_BOX;
-            switch (PickupTimeoutLogic.decide(wasShulker, pickupTimeoutTicks)) {
-                case WAIT -> {
-                    return;
-                }
-                case RETRY -> {
-                    // V4.47 bug2a：对齐 misaka——拾取超时后，钻石模式还有待挖工作台 → 先挖工作台再回挖矿；
-                    // 原逻辑直接清空 pendingTablePos 导致工作台被永久遗忘
-                    info("拾取超时，重新开始挖掘");
-                    PathManagers.get().stop();
-                    pickupTargetType = null;
-                    if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
-                        placedPos = pendingTablePos;
-                        pendingTablePos = null;
-                        pendingMiningTable = false;
-                        info("拾取超时，先挖掉工作台");
-                        state = MiningState.MINING_CRAFTING_TABLE;
-                    } else {
-                        pendingMiningTable = false;
-                        pendingTablePos = null;
-                        state = MiningState.MINING;
-                    }
-                    return;
-                }
-                case DISCONNECT -> {
-                    // ④ 潜影盒是核心资产：超时直接断开连接防丢（misaka 语义）
-                    info("拾取潜影盒超时，自动断开连接");
-                    PathManagers.get().stop();
-                    pickupTargetType = null;
+        // ③ V4.54 对齐 misaka x0016：进入拾取即 200 tick 固定倒计时，每 tick 递减（不看掉落物是否可见）
+        pickupTimeoutTicks--;
+        boolean wasShulker = pickupTargetType == PickupTarget.SHULKER_BOX;
+        switch (PickupTimeoutLogic.decide(wasShulker, pickupTimeoutTicks)) {
+            case WAIT -> {
+                return;
+            }
+            case RETRY -> {
+                // V4.47 bug2a：对齐 misaka——拾取超时后，钻石模式还有待挖工作台 → 先挖工作台再回挖矿；
+                // 原逻辑直接清空 pendingTablePos 导致工作台被永久遗忘
+                info("拾取超时，重新开始挖掘");
+                PathManagers.get().stop();
+                pickupTargetType = null;
+                if (miningMode.get() == MiningMode.DIAMOND && pendingTablePos != null) {
+                    placedPos = pendingTablePos;
+                    pendingTablePos = null;
+                    pendingMiningTable = false;
+                    info("拾取超时，先挖掉工作台");
+                    state = MiningState.MINING_CRAFTING_TABLE;
+                } else {
                     pendingMiningTable = false;
                     pendingTablePos = null;
-                    disconnect("§c拾取潜影盒超时，自动断开连接");
-                    return;
+                    state = MiningState.MINING;
                 }
+                return;
             }
-            return;
+            case DISCONNECT -> {
+                // ④ 潜影盒是核心资产：超时直接断开连接防丢（misaka 语义）
+                info("拾取潜影盒超时，自动断开连接");
+                PathManagers.get().stop();
+                pickupTargetType = null;
+                pendingMiningTable = false;
+                pendingTablePos = null;
+                disconnect("§c拾取潜影盒超时，自动断开连接");
+                return;
+            }
         }
-
-        // 有掉落物实体在 → 重置超时计数（pickup 进程持续追踪中）
-        pickupTimeoutTicks = 0;
     }
 
     /** 拾取完成公共收尾：V4.49 对齐 misaka case 0/1/2——满盒先换空盒（工作台延后），末影箱换完再挖工作台 */
@@ -1007,10 +992,10 @@ public class AutoMining extends Module {
         state = previousState != MiningState.IDLE ? previousState : MiningState.MINING;
     }
 
-    /** ESCAPING_DEEP_DARK：128 格范围找 y>=0 最近安全点逃离 */
+    /** ESCAPING_DEEP_DARK：深暗质心反向 128 格逃离（V4.54 对齐 misaka x0005/x0076/x0273） */
     private void escapingDeepDark() {
         if (escapeTarget == null) {
-            escapeTarget = findSafeEscapePoint();
+            escapeTarget = computeEscapeTargetPos();
             if (escapeTarget == null) {
                 error("无法计算逃离方向，请手动离开深暗之域");
                 state = MiningState.MINING;
@@ -1021,13 +1006,59 @@ public class AutoMining extends Module {
             return;
         }
 
-        // 已到达安全点（非深暗 biome）→ 继续挖掘
-        if (!isDeepDark(mc.player.getBlockPos()) && mc.player.getBlockPos().getSquaredDistance(escapeTarget) < 64) {
+        // 已到达安全点（非深暗 biome 且距离 < 100 格，对齐 misaka x0273）→ 继续挖掘
+        if (!isDeepDark(mc.player.getBlockPos()) && mc.player.getBlockPos().getSquaredDistance(escapeTarget) < 100) {
             PathManagers.get().stop();
             info("已逃离深暗之域，继续挖掘");
             escapeTarget = null;
             state = MiningState.MINING;
         }
+    }
+
+    /** 逃离目标计算（V4.54 对齐 misaka x0005()）：周围 ±64 格、步长 16 采样深暗点质心，方向 = 玩家 − 质心，归一化 ×128 */
+    private BlockPos computeEscapeTargetPos() {
+        BlockPos p = mc.player.getBlockPos();
+        int[] deepX = new int[81];
+        int[] deepZ = new int[81];
+        int count = 0;
+        for (int ox = -64; ox <= 64; ox += 16) {
+            for (int oz = -64; oz <= 64; oz += 16) {
+                if (isDeepDark(p.add(ox, 0, oz))) {
+                    deepX[count] = p.getX() + ox;
+                    deepZ[count] = p.getZ() + oz;
+                    count++;
+                }
+            }
+        }
+        int[] target = computeEscapeTarget(p.getX(), p.getY(), p.getZ(), deepX, deepZ, count);
+        if (target == null) return null;
+        return new BlockPos(target[0], target[1], target[2]);
+    }
+
+    /** 深暗逃离目标计算（纯逻辑，可单测；V4.54 对齐 misaka x0005()）：
+     *  深暗采样点质心 → 反向方向（玩家−质心）归一化 ×128，Y = max(玩家Y, 0)；
+     *  无深暗点 → null；方向长度 < 1 → 兜底 (1, 0)。返回 {x, y, z}。 */
+    public static int[] computeEscapeTarget(int playerX, int playerY, int playerZ, int[] deepX, int[] deepZ, int count) {
+        if (count <= 0) return null;
+        long sumX = 0, sumZ = 0;
+        for (int i = 0; i < count; i++) {
+            sumX += deepX[i];
+            sumZ += deepZ[i];
+        }
+        int avgX = (int) (sumX / count);
+        int avgZ = (int) (sumZ / count);
+        int dx = playerX - avgX;
+        int dz = playerZ - avgZ;
+        double dist = Math.sqrt((double) dx * dx + (double) dz * dz);
+        if (dist < 1.0) {
+            dx = 1;
+            dz = 0;
+            dist = 1.0;
+        }
+        int tx = playerX + (int) ((double) dx / dist * 128.0);
+        int tz = playerZ + (int) ((double) dz / dist * 128.0);
+        int ty = Math.max(playerY, 0);
+        return new int[]{tx, ty, tz};
     }
 
     // ================= 挖掘 / 放置 / 打开 =================
@@ -1412,11 +1443,12 @@ public class AutoMining extends Module {
         return -1;
     }
 
+    /** 镐子是否已完全修复（V4.54 对齐 misaka x0038：修到 damage==0 满耐久才算修好） */
     private boolean isPickaxeRepaired() {
         if (repairPickaxeSlot == -1 || repairPickaxeSlot >= mc.player.getInventory().size()) return false;
         ItemStack s = mc.player.getInventory().getStack(repairPickaxeSlot);
         if (s.isEmpty() || !isPickaxe(s.getItem())) return false;
-        return s.getMaxDamage() - s.getDamage() >= pickaxeThreshold.get();
+        return s.getDamage() == 0;
     }
 
     /** 镐子判定（纯逻辑，可单测） */
@@ -1559,20 +1591,34 @@ public class AutoMining extends Module {
         return true;
     }
 
-    /** 找背包中"装满目标物品的潜影盒"槽（27 格全满且全为目标物品） */
+    /** 找背包中"含目标物且 27 格全满堆叠"的潜影盒槽（V4.54 对齐 misaka x0092：只存含目标物的满盒进末影箱） */
     private int findFullTargetBoxSlot(Item target) {
+        boolean[] fullStack = new boolean[36];
+        boolean[] containsTarget = new boolean[36];
         for (int i = 0; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
             if (!isShulkerBoxItem(s.getItem())) continue;
             ContainerComponent c = s.get(DataComponentTypes.CONTAINER);
             if (c == null) continue;
             int count = 0;
-            boolean allTarget = true;
+            boolean allFull = true;
+            boolean hasTarget = false;
             for (ItemStack inner : c.iterateNonEmpty()) {
                 count++;
-                if (inner.getItem() != target) allTarget = false;
+                if (inner.getCount() < inner.getMaxCount()) allFull = false;
+                if (inner.getItem() == target) hasTarget = true;
             }
-            if (count >= 27 && allTarget) return i;
+            if (count >= 27 && allFull) fullStack[i] = true;
+            containsTarget[i] = hasTarget;
+        }
+        return findFullTargetBoxSlotPure(fullStack, containsTarget);
+    }
+
+    /** 纯逻辑版：返回第一个"27 格满堆叠且含目标物"的盒槽（可单测；对齐 misaka x0092） */
+    public static int findFullTargetBoxSlotPure(boolean[] fullStack, boolean[] containsTarget) {
+        int len = Math.min(fullStack.length, containsTarget.length);
+        for (int i = 0; i < len; i++) {
+            if (fullStack[i] && containsTarget[i]) return i;
         }
         return -1;
     }
@@ -1779,53 +1825,10 @@ public class AutoMining extends Module {
         return canPlaceOn(target.isAir(), below.isAir(), below.getFluidState().isEmpty());
     }
 
-    /** 拾取目标掉落物（10 格内最近） */
-    private BlockPos findPickupDrop(PickupTarget target) {
-        BlockPos best = null;
-        double bestDist = 100.0; // 10 格
-        for (Entity e : mc.world.getEntities()) {
-            if (!(e instanceof ItemEntity ie)) continue;
-            Item item = ie.getStack().getItem();
-            boolean match = switch (target) {
-                case SHULKER_BOX -> isShulkerBoxItem(item);
-                case CRAFTING_TABLE -> item == Items.CRAFTING_TABLE;
-                case ENDER_CHEST -> item == Items.ENDER_CHEST;
-            };
-            if (!match) continue;
-            double d = e.getBlockPos().getSquaredDistance(mc.player.getBlockPos());
-            if (d < bestDist) {
-                bestDist = d;
-                best = e.getBlockPos();
-            }
-        }
-        return best;
-    }
-
-    /** 深暗之域判定（纯逻辑可单测困难，依赖 MC；保留模块内） */
+    /** 深暗之域判定（依赖 MC biome，保留模块内） */
     private boolean isDeepDark(BlockPos pos) {
         RegistryKey<Biome> key = mc.world.getBiome(pos).getKey().orElse(null);
         return key != null && key.equals(RegistryKey.of(RegistryKeys.BIOME, Identifier.of("minecraft", "deep_dark")));
-    }
-
-    /** 128 格范围找 y>=0 最近非深暗地面点（移植 misaka x0273 语义） */
-    private BlockPos findSafeEscapePoint() {
-        BlockPos p = mc.player.getBlockPos();
-        for (int r = 16; r <= 128; r += 16) {
-            for (int dx = -r; dx <= r; dx += 8) {
-                for (int dz = -r; dz <= r; dz += 8) {
-                    if (Math.abs(dx) != r && Math.abs(dz) != r) continue; // 只扫边缘环
-                    BlockPos probe = p.add(dx, 0, dz);
-                    if (isDeepDark(probe)) continue;
-                    int top = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, probe.getX(), probe.getZ());
-                    int groundY = top - 1;
-                    if (groundY < 0) continue;
-                    BlockPos ground = new BlockPos(probe.getX(), groundY, probe.getZ());
-                    if (isDeepDark(ground)) continue;
-                    return ground;
-                }
-            }
-        }
-        return null;
     }
 
     // ================= 工具 =================

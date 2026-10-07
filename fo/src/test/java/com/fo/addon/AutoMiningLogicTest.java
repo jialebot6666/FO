@@ -117,4 +117,60 @@ public class AutoMiningLogicTest {
         assertEquals(AutoMining.ToolStrategy.ANY, AutoMining.pickaxeStrategy(false, false, false));
         assertEquals(AutoMining.ToolStrategy.ANY, AutoMining.pickaxeStrategy(false, false, true));
     }
+
+    // ---- V4.54 对齐 misaka x0005：深暗逃离目标计算（质心反向 128 格）----
+
+    @Test
+    void escapeTargetAwayFromDeepDarkCentroid() {
+        // 玩家 (0,64,0)，深暗采样单点 (100,0)：质心 (100,0) → 方向 (−100,0) 归一化 ×128 → 目标 (−128,64,0)
+        int[] t = AutoMining.computeEscapeTarget(0, 64, 0, new int[]{100}, new int[]{0}, 1);
+        assertArrayEquals(new int[]{-128, 64, 0}, t);
+    }
+
+    @Test
+    void escapeTargetMultiPointCentroid() {
+        // 深暗点 (64,0) (96,0)：质心 (80,0) → 方向 (−80,0) ×128 → (−128,10,0)，Y = max(10,0)
+        int[] t = AutoMining.computeEscapeTarget(0, 10, 0, new int[]{64, 96}, new int[]{0, 0}, 2);
+        assertArrayEquals(new int[]{-128, 10, 0}, t);
+    }
+
+    @Test
+    void escapeTargetFallsBackWhenDirectionTiny() {
+        // 玩家恰在质心 → 方向长度 < 1 → 兜底 (1,0) 方向 ×128：X +128，Z 不变；Y = max(−10,0) = 0
+        int[] t = AutoMining.computeEscapeTarget(50, -10, 50, new int[]{50}, new int[]{50}, 1);
+        assertEquals(50 + 128, t[0]);
+        assertEquals(0, t[1]);
+        assertEquals(50, t[2]);
+    }
+
+    @Test
+    void escapeTargetNullWithoutDeepDarkSamples() {
+        assertNull(AutoMining.computeEscapeTarget(0, 64, 0, new int[0], new int[0], 0));
+    }
+
+    // ---- V4.54 对齐 misaka x0092：满盒槽判定（含目标物 + 27 格满堆叠）----
+
+    @Test
+    void fullTargetBoxSlotRequiresFullStackAndTarget() {
+        // 槽 3：满堆叠 + 含目标物 → 命中
+        boolean[] full = {false, false, false, true, false};
+        boolean[] hasTarget = {false, false, false, true, false};
+        assertEquals(3, AutoMining.findFullTargetBoxSlotPure(full, hasTarget));
+    }
+
+    @Test
+    void fullStackWithoutTargetIsSkipped() {
+        // 满堆叠但无目标物（如杂物满盒）→ 不存进末影箱
+        boolean[] full = {true, false};
+        boolean[] hasTarget = {false, false};
+        assertEquals(-1, AutoMining.findFullTargetBoxSlotPure(full, hasTarget));
+    }
+
+    @Test
+    void targetBoxNotFullStackIsSkipped() {
+        // 含目标物但未满堆叠（还能继续装）→ 不存
+        boolean[] full = {false};
+        boolean[] hasTarget = {true};
+        assertEquals(-1, AutoMining.findFullTargetBoxSlotPure(full, hasTarget));
+    }
 }
