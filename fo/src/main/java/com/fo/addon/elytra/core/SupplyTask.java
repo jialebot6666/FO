@@ -120,7 +120,12 @@ public final class SupplyTask {
     private int ecItemBefore;
     private int obsidianBefore;
     private int pickupWait;
-    private int waitTicks;
+    // V5.1：等待计数按用途拆开。原来四个「等待」共用一个 waitTicks，
+    // 谁忘了在进入状态前清零就会读到上一段的残留值（潜影盒挖回就是这么每次误报 40 tick 的）。
+    private int ecScreenWaitTicks;   // 等末影箱界面出现
+    private int shScreenWaitTicks;   // 等潜影盒界面出现
+    private int shBreakWaitTicks;    // 等潜影盒被挖掉并进背包
+    private int ecBreakWaitTicks;    // 等末影箱被挖掉并进背包
     private int walkTicks;
     private int screenHoldTicks;
     private int openRetries;
@@ -162,7 +167,7 @@ public final class SupplyTask {
         emptyBoxStrikes = 0;
         boxPickCount.clear();
         boxBlacklist.clear();
-        waitTicks = 0;
+        waitTicksReset();
         walkTicks = 0;
         screenHoldTicks = 0;
         openRetries = 0;
@@ -569,7 +574,7 @@ public final class SupplyTask {
             return;
         }
         InvHelper.interactBlock(ecPos);
-        waitTicks = 0;
+        ecScreenWaitTicks = 0;
         next(pendingReturn ? State.WAIT_EC_RETURN : State.WAIT_EC, 1);
     }
     private void waitEnderChest(MinecraftClient mc, State onSuccess) {
@@ -579,8 +584,8 @@ public final class SupplyTask {
             next(onSuccess, opts.actionDelay());
             return;
         }
-        if (waitTicks++ > SCREEN_WAIT_TICKS) {
-            waitTicks = 0;
+        if (ecScreenWaitTicks++ > SCREEN_WAIT_TICKS) {
+            ecScreenWaitTicks = 0;
             if (openRetries++ >= OPEN_RETRY) {
                 fail("末影箱界面打不开（标题不匹配或服务器拦截）");
                 return;
@@ -957,7 +962,7 @@ public final class SupplyTask {
             placeWaitTicks = 0;
             placeRetries = 0;
             InvHelper.interactBlock(shulkerPos);
-            waitTicks = 0;
+            shScreenWaitTicks = 0;
             next(State.WAIT_SH, 1);
             return;
         }
@@ -1001,7 +1006,7 @@ public final class SupplyTask {
                 return;
             }
         }
-        if (waitTicks++ > SCREEN_WAIT_TICKS) {
+        if (shScreenWaitTicks++ > SCREEN_WAIT_TICKS) {
             if (openRetries++ >= OPEN_RETRY) {
                 fail("潜影盒界面打不开");
                 return;
@@ -1286,6 +1291,7 @@ public final class SupplyTask {
         if (!breakRequested) {
             breakTicks = 0;
             pickupWait = 0;
+            shBreakWaitTicks = 0;
             shulkerBreakTarget = ItemHelper.countShulkers(mc.player) + 1;
             Block block = mc.world.getBlockState(shulkerPos).getBlock();
             if (opts.useBaritoneMine() && BaritoneHook.available() && hasPickaxe(mc)) {
@@ -1312,14 +1318,17 @@ public final class SupplyTask {
                 next(State.REOPEN_EC, opts.actionDelay());
                 return;
             }
-            waitTicks = 0;
+            shBreakWaitTicks = 0;
             next(State.WAIT_BREAK_SH, 2);
         }
     }
     private void waitBreakShulker(MinecraftClient mc) {
         boolean gone = mc.world.getBlockState(shulkerPos).isAir();
         boolean gotIt = ItemHelper.countShulkers(mc.player) >= shulkerBreakTarget;
-        if (gone && gotIt) {
+        shBreakWaitTicks++;
+        MineWaitLogic.Outcome outcome =
+            MineWaitLogic.evaluate(gone, gotIt, shBreakWaitTicks, MineWaitLogic.SHULKER_TIMEOUT_TICKS);
+        if (outcome == MineWaitLogic.Outcome.COLLECTED) {
             BaritoneHook.stop();
             breakRequested = false;
             FOElytraLog.tip("潜影盒已收回（背包 %d 个）", ItemHelper.countShulkers(mc.player));
@@ -1327,13 +1336,9 @@ public final class SupplyTask {
             next(State.REOPEN_EC, opts.actionDelay());
             return;
         }
+        // 方块还在 = Baritone 正常在挖（寻路/挖掘/捡拾），不要插手中断；方块没了才进入拾取窗口收尾。
         stopMiningAfterPickupWindow(gone);
-        waitTicks++;
-        if (waitTicks == 40 && BaritoneHook.isMining()) {
-            FOElytraLog.warn("挖掘异常？取消挖掘");
-            BaritoneHook.stop();
-        }
-        if (waitTicks > 120) {
+        if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
             FOElytraLog.warn("挖掘补给箱失败!（盒子没进背包：可能掉在远处/被水冲走/背包满）");
             BaritoneHook.stop();
             breakRequested = false;
@@ -1393,7 +1398,7 @@ public final class SupplyTask {
         }
         planIndex++;
         if (planIndex < plan.size() && needs.needsAnyItem() && emptyBoxStrikes < 2) {
-            waitTicks = 0;
+            shScreenWaitTicks = 0;
             pendingReturn = false;
             next(State.OPEN_EC, 0);
             return;
@@ -1419,6 +1424,7 @@ public final class SupplyTask {
         if (!breakRequested) {
             breakTicks = 0;
             pickupWait = 0;
+            ecBreakWaitTicks = 0;
             ecItemBefore = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
             obsidianBefore = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
             boolean silk = hasSilkTouch(mc);
@@ -1431,7 +1437,7 @@ public final class SupplyTask {
                 if (BaritoneHook.mine(ecBreakTarget, block)) {
                     breakRequested = true;
                     if (!silk) FOElytraLog.tip("让 Baritone 挖回末影箱（目标：黑曜石 %d 个）", ecBreakTarget);
-                    waitTicks = 0;
+                    ecBreakWaitTicks = 0;
                     next(State.WAIT_BREAK_EC, 1);
                     return;
                 }
@@ -1450,7 +1456,7 @@ public final class SupplyTask {
                 next(State.DONE, 0);
                 return;
             }
-            waitTicks = 0;
+            ecBreakWaitTicks = 0;
             next(State.WAIT_BREAK_EC, 2);
         }
     }
@@ -1459,20 +1465,19 @@ public final class SupplyTask {
         int ecNow = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
         int obsidianNow = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
         boolean gotIt = ecNow > ecItemBefore || obsidianNow > obsidianBefore;
-        if (gone && gotIt) {
+        ecBreakWaitTicks++;
+        MineWaitLogic.Outcome outcome =
+            MineWaitLogic.evaluate(gone, gotIt, ecBreakWaitTicks, MineWaitLogic.ENDER_CHEST_TIMEOUT_TICKS);
+        if (outcome == MineWaitLogic.Outcome.COLLECTED) {
             BaritoneHook.stop();
             breakRequested = false;
             FOElytraLog.tip("末影箱已收回（末影箱 %d 个 / 黑曜石 %d 个）", ecNow, obsidianNow);
             next(State.DONE, 0);
             return;
         }
+        // 同潜影盒：方块还在就交给 Baritone 慢慢挖（黑曜石很硬），方块没了才进拾取窗口收尾。
         stopMiningAfterPickupWindow(gone);
-        waitTicks++;
-        if (waitTicks == 100 && BaritoneHook.isMining()) {
-            FOElytraLog.warn("挖掘异常？取消挖掘!!");
-            BaritoneHook.stop();
-        }
-        if (waitTicks > 200) {
+        if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
             FOElytraLog.warn("末影箱可能没捡起来（背包满？掉在远处？用的是精准采集但没捡到末影箱？）");
             BaritoneHook.stop();
             breakRequested = false;
@@ -1485,10 +1490,18 @@ public final class SupplyTask {
             return;
         }
         pickupWait++;
-        if (pickupWait == 40 && BaritoneHook.isMining()) {
+        if (MineWaitLogic.shouldStopMining(true, pickupWait, MineWaitLogic.PICKUP_WINDOW_TICKS,
+            BaritoneHook.isMining())) {
             BaritoneHook.stop();
-            FOElytraLog.debug("方块已消失，停掉挖掘进程等掉落物进背包");
+            FOElytraLog.debug("方块已消失，停挖等掉落物进背包");
         }
+    }
+    /** 把四个「等待」计数器一起清零（每个状态进入前都会自己清零，这里是开局兜底）。 */
+    private void waitTicksReset() {
+        ecScreenWaitTicks = 0;
+        shScreenWaitTicks = 0;
+        shBreakWaitTicks = 0;
+        ecBreakWaitTicks = 0;
     }
     private boolean hasSilkTouch(MinecraftClient mc) {
         ItemStack selected = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
