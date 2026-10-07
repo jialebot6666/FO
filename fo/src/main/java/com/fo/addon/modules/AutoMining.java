@@ -235,6 +235,7 @@ public class AutoMining extends Module {
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
     private int openContainerTicks = 0;          // V4.58：打开容器等待 tick（20 秒超时报错断开，防界面残留卡死）
+    private String appliedYRange = null;          // V4.61：当前已应用的 Baritone Y 范围（"min~max"），变化才弹通知
     private boolean disconnectFlag = false;
     private String disconnectMsg = null;
 
@@ -342,6 +343,7 @@ public class AutoMining extends Module {
         escapeTarget = null;
         standingTarget = null;
         openContainerTicks = 0;
+        appliedYRange = null;
         clearBlocks.clear();
         clearIndex = 0;
         repairPickaxeSlot = -1;
@@ -454,20 +456,22 @@ public class AutoMining extends Module {
         }
 
         // V4.55 方案C：不再 FO 自锁时运镐（AutoTool 时运优先挖矿/精准采集末影箱/铲斧自动切换）
-        // 没在挖石英 → 启动挖掘
+        // 没在挖石英 → 启动挖掘（V4.61：放开到石英生成区间 10~117，不受残骸 8~22 限制，防石英少卡修镐/挖到基岩层）
         if (!PathManagers.get().isMining()) {
-            PathManagers.get().mine(Blocks.NETHER_QUARTZ_ORE);
             info("开始挖掘石英矿修复镐子");
+            applyYRange(10, 117, "修镐石英");
+            PathManagers.get().mine(Blocks.NETHER_QUARTZ_ORE);
         }
 
         // 石英合成（静默 2x2，不需要打开界面）
         craftQuartzBlock();
 
-        // 镐子已修复 → 回挖掘
+        // 镐子已修复 → 立即恢复残骸 Y 范围并继续挖掘
         if (isPickaxeRepaired()) {
             PathManagers.get().stop();
             info("镐子已完全修复，继续挖掘残骸");
             repairPickaxeSlot = -1;
+            startMining(); // 内部 applyYRange 恢复残骸范围（变化才弹）
             state = MiningState.MINING;
         }
     }
@@ -1116,16 +1120,33 @@ public class AutoMining extends Module {
 
     // ================= 挖掘 / 放置 / 打开 =================
 
-    /** 启动 Baritone 挖掘（按模式；V4.60 残骸模式接入 Y 范围限制） */
+    /** 启动 Baritone 挖掘（按模式；V4.60 残骸模式接入 Y 范围限制，V4.61 切钻石恢复不限制） */
     private void startMining() {
         switch (miningMode.get()) {
-            case DIAMOND -> PathManagers.get().mine(Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE);
+            case DIAMOND -> {
+                applyYRange(6, 256, "钻石挖掘"); // 消除 maxY 残留，钻石不限制（minY=6 防挖穿基岩，与 misaka 一致）
+                PathManagers.get().mine(Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE);
+            }
             case ANCIENT_DEBRIS -> {
                 int[] range = debrisYRange(debrisYRange.get());
-                PathManagers.get().setMiningYRange(range[0], range[1]);
+                applyYRange(range[0], range[1], "残骸挖掘");
                 PathManagers.get().mine(Blocks.ANCIENT_DEBRIS);
             }
         }
+    }
+
+    /** V4.61：应用 Baritone Y 范围，范围变化才弹中文通知（修镐石英 10~117 / 残骸 8~22 / 钻石 6~256） */
+    private void applyYRange(int minY, int maxY, String label) {
+        PathManagers.get().setMiningYRange(minY, maxY);
+        if (isYRangeChanged(appliedYRange, minY, maxY)) {
+            appliedYRange = minY + "~" + maxY;
+            info("Y范围已切换：" + label + "（" + minY + "~" + maxY + "）");
+        }
+    }
+
+    /** V4.61 范围变化判定（纯逻辑可测）：appliedKey 与目标范围不同 → 需要弹通知 */
+    public static boolean isYRangeChanged(String appliedKey, int minY, int maxY) {
+        return !(minY + "~" + maxY).equals(appliedKey);
     }
 
     /** V4.60 残骸 Y 范围（纯逻辑可测）：限制开 → [8,22]（残骸生成区间）；关 → [6,256]（仅防挖穿基岩） */

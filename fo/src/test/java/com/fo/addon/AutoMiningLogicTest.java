@@ -244,4 +244,27 @@ public class AutoMiningLogicTest {
         assertEquals(6, r[0]);   // 仅防挖穿下界基岩
         assertEquals(256, r[1]); // 无上限
     }
+
+    // ---- V4.61：Y 范围变化才弹通知判定 ----
+
+    @Test
+    void yRangeChangedFirstTime() {
+        // 首次应用（appliedKey=null）→ 变化 → 弹
+        assertTrue(AutoMining.isYRangeChanged(null, 8, 22));
+    }
+
+    @Test
+    void yRangeChangedOnSwitch() {
+        // 从残骸 8~22 切到石英 10~117 → 变化 → 弹
+        assertTrue(AutoMining.isYRangeChanged("8~22", 10, 117));
+        // 切回钻石 6~256 → 变化 → 弹
+        assertTrue(AutoMining.isYRangeChanged("10~117", 6, 256));
+    }
+
+    @Test
+    void yRangeUnchangedNoNotify() {
+        // 每 100 tick 重启挖掘，范围相同 → 不弹（防刷屏）
+        assertFalse(AutoMining.isYRangeChanged("8~22", 8, 22));
+        assertFalse(AutoMining.isYRangeChanged("6~256", 6, 256));
+    }
 }
