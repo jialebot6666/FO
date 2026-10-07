@@ -3,7 +3,7 @@
   "id": "fo",
   "version": "${version}",
   "name": "FO",
-  "description": "FO 生存辅助全自动插件：鞘翅全自动采集、自动种树、自动扔垃圾。",
+  "description": "FO 生存辅助全自动插件：鞘翅全自动采集、自动鞘翅飞行、自动开宝库、实时速度 HUD、自动种树、自动扔垃圾。",
   "authors": [
     "jialebot6666"
   ],
