@@ -227,6 +227,7 @@ public class AutoMining extends Module {
     private boolean storingToEnder = false;    // 正在走末影箱取盒流程
     private boolean pendingMiningTable = false; // 钻石模式：挖完潜影盒拾取后还需挖工作台
     private BlockPos pendingTablePos = null;    // 钻石模式：合成用的工作台位置（存盒链完成后挖掉）
+    private int openContainerTicks = 0;          // V4.58：打开容器等待 tick（20 秒超时报错断开，防界面残留卡死）
     private boolean disconnectFlag = false;
     private String disconnectMsg = null;
 
@@ -323,6 +324,7 @@ public class AutoMining extends Module {
         placedPos = null;
         escapeTarget = null;
         standingTarget = null;
+        openContainerTicks = 0;
         clearBlocks.clear();
         clearIndex = 0;
         repairPickaxeSlot = -1;
@@ -602,11 +604,19 @@ public class AutoMining extends Module {
 
     /** CRAFTING：打开工作台 → 钻石合成 → 放潜影盒存钻石块（对齐 misaka：CRAFTING→PLACING_SHULKER） */
     private void crafting() {
-        // 打开工作台（未打开时交互）
+        // 打开工作台（未打开时交互；V4.58：先关残留界面 + 20 秒超时报错断开）
         if (!(mc.currentScreen instanceof CraftingScreen)) {
+            closeScreenIfOpen(CraftingScreen.class);
             openContainer(placedPos);
+            if (++openContainerTicks >= OPEN_CONTAINER_TIMEOUT_TICKS) {
+                info("打开工作台超时，自动断开连接");
+                disconnect("§c打开工作台超时，自动断开连接");
+                toggle();
+                return;
+            }
             return;
         }
+        openContainerTicks = 0;
 
         if (craftDiamondBlock()) {
             mc.player.closeHandledScreen();
@@ -676,11 +686,19 @@ public class AutoMining extends Module {
             return;
         }
 
-        // 打开潜影盒
+        // 打开潜影盒（V4.58：先关残留界面 + 20 秒超时报错断开）
         if (!(mc.currentScreen instanceof ShulkerBoxScreen)) {
+            closeScreenIfOpen(ShulkerBoxScreen.class);
             openContainer(placedPos);
+            if (++openContainerTicks >= OPEN_CONTAINER_TIMEOUT_TICKS) {
+                info("打开潜影盒超时，自动断开连接");
+                disconnect("§c打开潜影盒超时，自动断开连接");
+                toggle();
+                return;
+            }
             return;
         }
+        openContainerTicks = 0;
 
         ShulkerBoxScreenHandler h = (ShulkerBoxScreenHandler) mc.player.currentScreenHandler;
         Item target = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
@@ -721,11 +739,19 @@ public class AutoMining extends Module {
             return;
         }
 
-        // 打开末影箱
+        // 打开末影箱（V4.58：先关残留界面 + 20 秒超时报错断开）
         if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen)) {
+            closeScreenIfOpen(net.minecraft.client.gui.screen.ingame.GenericContainerScreen.class);
             openContainer(placedPos);
+            if (++openContainerTicks >= OPEN_CONTAINER_TIMEOUT_TICKS) {
+                info("打开末影箱超时，自动断开连接");
+                disconnect("§c打开末影箱超时，自动断开连接");
+                toggle();
+                return;
+            }
             return;
         }
+        openContainerTicks = 0;
 
         GenericContainerScreenHandler h = (GenericContainerScreenHandler) mc.player.currentScreenHandler;
         Item target = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
@@ -1159,6 +1185,21 @@ public class AutoMining extends Module {
     }
 
     /** 打开容器（潜影盒/工作台/末影箱）：六面检测选面，转头交互 */
+    /** V4.58：界面守卫——当前界面非目标容器且非空 → 强制关闭（客户端同步清 currentScreen），
+     *  防容器残留导致 openContainer 静默 return 卡死（如工作台界面没关干净就进存储链） */
+    private void closeScreenIfOpen(Class<?> target) {
+        if (mc.currentScreen != null && !target.isInstance(mc.currentScreen)) {
+            mc.player.closeHandledScreen();
+        }
+    }
+
+    /** V4.58：打开容器超时判定（20 秒 = 400 tick），超时报错断开连接，绝不无限卡 */
+    public static final int OPEN_CONTAINER_TIMEOUT_TICKS = 20 * 20;
+
+    public static boolean isOpenContainerTimeout(int waitedTicks) {
+        return waitedTicks >= OPEN_CONTAINER_TIMEOUT_TICKS;
+    }
+
     private void openContainer(BlockPos pos) {
         if (pos == null || mc.currentScreen != null) return;
         if (mc.player.getBlockPos().getSquaredDistance(pos) > 9.0) {

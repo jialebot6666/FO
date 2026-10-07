@@ -197,4 +197,14 @@ public class AutoMiningLogicTest {
         }
         assertEquals(8, usable);
     }
+
+    // ---- V4.58：打开容器 20 秒超时（400 tick）判定 ----
+
+    @Test
+    void openContainerTimeoutBoundary() {
+        assertEquals(400, AutoMining.OPEN_CONTAINER_TIMEOUT_TICKS); // 20 秒 × 20 tick
+        assertFalse(AutoMining.isOpenContainerTimeout(399));         // 未超时
+        assertTrue(AutoMining.isOpenContainerTimeout(400));          // 恰好超时 → 断开
+        assertTrue(AutoMining.isOpenContainerTimeout(500));          // 超时
+    }
 }
