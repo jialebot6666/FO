@@ -210,6 +210,7 @@ public class AutoMining extends Module {
     private int placeActionTicks = 0;
     private int lastTrashTick = -100;
     private int placeRetryTicks = 0;             // V4.56：放置格被占用时"挪开一格重试"窗口
+    private BlockPos standingTarget = null;      // V4.57：放置前强制回洞里的目标站立格
 
     // ===== 目标位置 =====
     private BlockPos safeSpot = null;          // 安全放置位置（3x3x3 清理中心）
@@ -321,6 +322,7 @@ public class AutoMining extends Module {
         placeTarget = null;
         placedPos = null;
         escapeTarget = null;
+        standingTarget = null;
         clearBlocks.clear();
         clearIndex = 0;
         repairPickaxeSlot = -1;
@@ -574,6 +576,8 @@ public class AutoMining extends Module {
             state = MiningState.FINDING_SAFE_SPOT;
             return;
         }
+        // V4.57：放置前强制回洞里固定站位，到位才放（防洞沿/乱位放工作台撞头）
+        if (!ensureStandingInHole()) return;
         int slot = findSlot(Items.CRAFTING_TABLE);
         if (slot == -1) {
             error("背包中没有工作台！");
@@ -592,6 +596,7 @@ public class AutoMining extends Module {
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
+        debug("已到位，放置工作台到: " + target.toShortString());
         waitTicks(MiningState.CRAFTING, 10);
     }
 
@@ -618,6 +623,8 @@ public class AutoMining extends Module {
             state = MiningState.FINDING_SAFE_SPOT;
             return;
         }
+        // V4.57：放置前强制回洞里固定站位，到位才放（防洞沿/乱位放盒撞头）
+        if (!ensureStandingInHole()) return;
         Item targetItem = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
 
         // V4.53 对齐 misaka x0235：放盒前先查背包满盒 → 有满盒直接去末影箱换盒（不把满盒放地上再挖）
@@ -657,6 +664,7 @@ public class AutoMining extends Module {
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
+        debug("已到位，放置潜影盒到: " + target.toShortString());
         storingToEnder = false;
         waitTicks(MiningState.STORING_ITEMS, 10);
     }
@@ -838,6 +846,8 @@ public class AutoMining extends Module {
             state = MiningState.FINDING_SAFE_SPOT;
             return;
         }
+        // V4.57：放置前强制回洞里固定站位，到位才放（防"拾取后原地放末影箱撞头回弹"）
+        if (!ensureStandingInHole()) return;
         int slot = findSlot(Items.ENDER_CHEST);
         if (slot == -1) {
             error("背包中没有末影箱！");
@@ -856,6 +866,7 @@ public class AutoMining extends Module {
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
+        debug("已到位，放置末影箱到: " + target.toShortString());
         waitTicks(MiningState.STORING_IN_ENDER_CHEST, 10);
     }
 
@@ -1787,35 +1798,51 @@ public class AutoMining extends Module {
         return true;
     }
 
-    /** 放置位置搜索（V4.56 修复：跳过玩家脚底格——玩家挖完洞站在洞里时，洞底格（下方有支撑）
-     *  恰好就是脚底所在的空气格，放盒/放末影箱会被自身碰撞箱顶住放不出来；
-     *  排除脚底后洞底 3x3 还剩 8 个可用格，必然有解） */
+    /** 放置位置搜索（V4.57：跳过玩家整个碰撞箱——脚底格 + 头顶格。
+     *  玩家站洞里（脚踩洞底实体、头占洞底层）时，洞底层正是"下方有支撑"的放格层，
+     *  选中它会被自身 AABB 顶住 → 服务端拒绝 → 放盒/末影箱回弹（手动放也放不下）） */
     private BlockPos findPlacePosition(BlockPos center) {
         BlockPos playerFeet = mc.player.getBlockPos();
-        // 第一轮（misaka 语义）：safeSpot 周围 3x3x3，跳过玩家脚底格
+        BlockPos playerHead = playerFeet.up();
+        // 第一轮（misaka 语义）：safeSpot 周围 3x3x3，跳过玩家身体格（脚底+头顶）
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     BlockPos p = center.add(dx, dy, dz);
-                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet))) return p;
+                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet) || p.equals(playerHead))) return p;
                 }
             }
         }
-        // 第二轮兜底：玩家周围 3x3x3，同样跳过脚底格
+        // 第二轮兜底：玩家周围 3x3x3，同样跳过身体格
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     BlockPos p = playerFeet.add(dx, dy, dz);
-                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet))) return p;
+                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet) || p.equals(playerHead))) return p;
                 }
             }
         }
         return null;
     }
 
-    /** 放置候选格判定（V4.56，纯逻辑可单测）：目标格可放置 且 不是玩家脚底格 */
-    public static boolean isPlaceableSlot(boolean placeable, boolean isPlayerFeet) {
-        return placeable && !isPlayerFeet;
+    /** 放置候选格判定（V4.57，纯逻辑可单测）：目标格可放置 且 不被玩家身体（脚底/头顶）阻挡 */
+    public static boolean isPlaceableSlot(boolean placeable, boolean isBlockedByPlayer) {
+        return placeable && !isBlockedByPlayer;
+    }
+
+    /** V4.57 放置前强制站位：玩家必须在洞里固定站立格（safeSpot 正下方洞底格）1.5 格内，
+     *  否则 moveTo 回去并提示；返回 true 表示已到位可放置。
+     *  解决"拾取后玩家在洞里乱位/洞沿 → 放盒/末影箱撞头回弹" */
+    private boolean ensureStandingInHole() {
+        if (safeSpot == null) return false;
+        BlockPos standPos = safeSpot.add(0, -1, 0);
+        if (mc.player.getBlockPos().getSquaredDistance(standPos) <= 2.25) return true;
+        if (!PathManagers.get().isPathing() || !standPos.equals(standingTarget)) {
+            standingTarget = standPos;
+            PathManagers.get().moveTo(standPos, false);
+            info("返回放置位置: " + standPos.toShortString());
+        }
+        return false;
     }
 
     /** 放置格找不到时的兜底：先挪开一格（玩家可能占满可放格），40 tick 重试窗口；
