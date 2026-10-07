@@ -207,4 +207,25 @@ public class AutoMiningLogicTest {
         assertTrue(AutoMining.isOpenContainerTimeout(400));          // 恰好超时 → 断开
         assertTrue(AutoMining.isOpenContainerTimeout(500));          // 超时
     }
+
+    // ---- V4.59：启动检查强制物品（时运镐 + 末影箱 + 工作台 + 精准采集镐）----
+
+    @Test
+    void startupCheckAllPresent() {
+        assertNull(AutoMining.firstMissingStartupItem(true, true, true, true)); // 全齐 → 可启动
+    }
+
+    @Test
+    void startupCheckMissingEachInOrder() {
+        assertEquals("时运镐", AutoMining.firstMissingStartupItem(false, true, true, true));
+        assertEquals("末影箱", AutoMining.firstMissingStartupItem(true, false, true, true));
+        assertEquals("工作台", AutoMining.firstMissingStartupItem(true, true, false, true));
+        assertEquals("精准采集镐", AutoMining.firstMissingStartupItem(true, true, true, false));
+    }
+
+    @Test
+    void startupCheckOnlyFirstMissingReported() {
+        // 多缺时只报第一个（顺序：时运 → 末影箱 → 工作台 → 精准）
+        assertEquals("时运镐", AutoMining.firstMissingStartupItem(false, false, false, false));
+    }
 }

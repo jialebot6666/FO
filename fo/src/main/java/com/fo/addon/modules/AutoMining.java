@@ -261,12 +261,22 @@ public class AutoMining extends Module {
             return;
         }
 
-        // V4.54 对齐 misaka 启动检查：只保留时运镐强制（方案B锁镐前提，防精准采集挖钻石掉原矿）；
-        // 潜影盒/末影箱/工作台不再强制要求（misaka 宽松语义，运行时存储链兜底：无盒→末影箱取盒→无可取则断开）
-        if (findFortunePickaxeSlot() == -1) {
-            error("背包缺少必要物品！需要：时运镐");
+        // V4.59 启动检查强制：时运镐 + 末影箱 + 工作台 + 精准采集镐（顺序判定，缺一不开）
+        String missing = firstMissingStartupItem(
+            findFortunePickaxeSlot() != -1,
+            findSlot(Items.ENDER_CHEST) != -1,
+            findSlot(Items.CRAFTING_TABLE) != -1,
+            findSilkTouchPickaxeSlot() != -1);
+        if (missing != null) {
+            error("背包缺少必要物品！需要：" + missing);
             toggle();
             return;
+        }
+
+        // V4.59：提醒打开自动LogPlus（自动下线保护，只提醒不强制）
+        AutoLog logPlus = Modules.get().get(AutoLog.class);
+        if (logPlus != null && !logPlus.isActive()) {
+            info("建议打开自动LogPlus 模块（血量/图腾过低自动下线保护）");
         }
 
         // Baritone 避让设置 + 关闭自动换工具（V4.31 起：关 Baritone autoTool，防其选"速度最优但不保时运"的工具挖钻石掉原矿）
@@ -1934,6 +1944,16 @@ public class AutoMining extends Module {
         if (mc.player != null && mc.player.networkHandler != null) {
             mc.player.networkHandler.getConnection().disconnect(Text.literal(msg));
         }
+    }
+
+    /** V4.59 启动检查缺失物品判定（纯逻辑，可单测）：按顺序返回首个缺失项中文名，齐全返回 null */
+    public static String firstMissingStartupItem(boolean hasFortunePick, boolean hasEnderChest,
+                                                 boolean hasCraftingTable, boolean hasSilkPick) {
+        if (!hasFortunePick) return "时运镐";
+        if (!hasEnderChest) return "末影箱";
+        if (!hasCraftingTable) return "工作台";
+        if (!hasSilkPick) return "精准采集镐";
+        return null;
     }
 
     /** 选最佳挖掘工具：时运镐优先（挖矿石掉落），其次最高效率工具；没有返回 -1（用当前槽） */
