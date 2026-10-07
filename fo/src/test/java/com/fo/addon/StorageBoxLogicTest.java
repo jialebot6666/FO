@@ -62,4 +62,77 @@ public class StorageBoxLogicTest {
         boolean[] allTarget = {false, true, false};
         assertEquals(1, AutoMining.pickStorageBox(counts, empty, allTarget));
     }
+
+    // ===== V4.53 对齐 misaka x0034/x0230/x0005：满堆叠判定 + 末影箱可取盒 + 交换取盒 =====
+
+    @Test
+    public void shulkerFullWhenAllSlotsFullStacks() {
+        // 27 格全非空且全满堆叠 → 满
+        int[] counts = new int[27];
+        int[] maxs = new int[27];
+        java.util.Arrays.fill(counts, 64);
+        java.util.Arrays.fill(maxs, 64);
+        assertEquals(true, AutoMining.isShulkerFull(counts, maxs));
+    }
+
+    @Test
+    public void shulkerNotFullWhenLastSlotPartial() {
+        // 本次 bug 场景：26 格满堆叠 + 最后一格 13 个（未满堆叠）→ 未满，应继续填充
+        int[] counts = new int[27];
+        int[] maxs = new int[27];
+        java.util.Arrays.fill(counts, 64);
+        java.util.Arrays.fill(maxs, 64);
+        counts[26] = 13;
+        assertEquals(false, AutoMining.isShulkerFull(counts, maxs));
+    }
+
+    @Test
+    public void shulkerNotFullWhenEmptySlotExists() {
+        // 存在空格 → 未满
+        int[] counts = {64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 0};
+        int[] maxs = new int[27];
+        java.util.Arrays.fill(maxs, 64);
+        assertEquals(false, AutoMining.isShulkerFull(counts, maxs));
+    }
+
+    @Test
+    public void takablePrefersEmptyBoxInOrder() {
+        // 槽0 空盒 → 优先取空盒（misaka x0230 遍历顺序语义）
+        boolean[] empty = {true, false};
+        boolean[] allTarget = {false, true};
+        int[] filled = {0, 20};
+        assertEquals(0, AutoMining.pickTakableShulker(empty, allTarget, filled));
+    }
+
+    @Test
+    public void takableAcceptsPartialAllTargetBox() {
+        // 无空盒：槽1 是全目标物未满盒（filled<27）→ 可取
+        boolean[] empty = {false, false, false};
+        boolean[] allTarget = {false, true, false};
+        int[] filled = {5, 20, 0};
+        assertEquals(1, AutoMining.pickTakableShulker(empty, allTarget, filled));
+    }
+
+    @Test
+    public void takableSkipsFullAndMixedBoxes() {
+        // 槽0 满盒（filled=27 全目标）、槽1 混杂物 → 均不可取 → -1
+        boolean[] empty = {false, false, false};
+        boolean[] allTarget = {true, false, false};
+        int[] filled = {27, 10, 0};
+        assertEquals(-1, AutoMining.pickTakableShulker(empty, allTarget, filled));
+    }
+
+    @Test
+    public void tradeSlotFindsFirstTarget() {
+        // 背包 36 槽：槽5 是目标物 → 返回 5
+        boolean[] matches = new boolean[36];
+        matches[5] = true;
+        assertEquals(5, AutoMining.findTradeSlot(matches));
+    }
+
+    @Test
+    public void tradeSlotMinusOneWhenNoTarget() {
+        // 背包没有目标物 → -1（调用方断开）
+        assertEquals(-1, AutoMining.findTradeSlot(new boolean[36]));
+    }
 }

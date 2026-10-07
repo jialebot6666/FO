@@ -631,6 +631,17 @@ public class AutoMining extends Module {
             return;
         }
         Item targetItem = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
+
+        // V4.53 对齐 misaka x0235：放盒前先查背包满盒 → 有满盒直接去末影箱换盒（不把满盒放地上再挖）
+        if (hasFullShulkerInInventory()) {
+            if (!storingToEnder) {
+                storingToEnder = true;
+                info("背包有已装满的潜影盒，先放入末影箱换空盒");
+                state = MiningState.PLACING_ENDER_CHEST;
+                return;
+            }
+        }
+
         int slot = findStorageBoxSlot(targetItem);
         if (slot == -1) {
             // 背包无空潜影盒 → 末影箱取盒流程
@@ -750,23 +761,30 @@ public class AutoMining extends Module {
             return;
         }
 
-        // B. 取出末影箱中的空潜影盒到背包
-        int emptyBoxInEc = findEmptyShulkerInContainer(h);
-        if (emptyBoxInEc != -1) {
-            mc.interactionManager.clickSlot(h.syncId, emptyBoxInEc, 0, SlotActionType.QUICK_MOVE, mc.player);
-            debug("已从末影箱取出空潜影盒，继续放置");
-            // V4.40：取盒完成 → 关界面 → 挖掉末影箱回收（对齐 misaka 顺序：取空盒后接 MINING_ENDER_CHEST）。
-            // 修复原逻辑取到空盒后仍在 STORING_IN_ENDER_CHEST 循环取盒、把空盒取光才断开的死循环。
-            // 下一轮 PLACING_SHULKER 放盒时用刚取到的空盒（中间隔了挖/拾取末影箱，服务端回包已同步）。
+        // B. 取出末影箱中"可继续使用"的潜影盒（空盒 / 含目标物的未满盒）
+        //    V4.53 对齐 misaka x0230：背包有空槽 → QUICK_MOVE；背包满 → 用背包目标物交换（x0005 语义）
+        int boxSlot = findTakableShulkerInContainer(h, target);
+        if (boxSlot != -1) {
+            if (hasEmptyInventorySlot()) {
+                mc.interactionManager.clickSlot(h.syncId, boxSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
+                debug("已从末影箱取出潜影盒，继续放置");
+            } else if (!takeShulkerWithTrade(h, boxSlot, target)) {
+                disconnectFlag = true;
+                disconnectMsg = "§c背包已满且没有可交换的" + target.getName().getString() + "，自动断开连接";
+                toggle();
+                return;
+            }
+            // V4.40：取盒完成 → 关界面 → 挖掉末影箱回收（对齐 misaka 顺序：取盒后接 MINING_ENDER_CHEST）。
+            // 下一轮 PLACING_SHULKER 放盒时用刚取到的盒（中间隔了挖/拾取末影箱，服务端回包已同步）。
             mc.player.closeHandledScreen();
             storingToEnder = false;
             state = MiningState.MINING_ENDER_CHEST;
             return;
         }
 
-        // C. 末影箱里也没有空盒 → 断开
+        // C. 末影箱里也没有可用的潜影盒 → 断开
         disconnectFlag = true;
-        disconnectMsg = "§c末影箱中没有可用的空潜影盒，自动断开连接";
+        disconnectMsg = "§c末影箱中没有可用的潜影盒，自动断开连接";
         toggle();
     }
 
@@ -1139,6 +1157,12 @@ public class AutoMining extends Module {
                     mc.interactionManager.clickSlot(h.syncId, dropDiamondSlot, 0, SlotActionType.PICKUP, mc.player);
                     mc.interactionManager.clickSlot(h.syncId, -999, 0, SlotActionType.PICKUP, mc.player);
                     info("背包已满，丢弃一组钻石以腾出空间");
+                } else {
+                    // V4.53 对齐 misaka x0035：背包满且背包里没有钻石可丢 → "先存储物品"，
+                    // 返回 true 由 crafting() 关界面回存储链（放弃输出槽产物防卡合成台，与 misaka 一致）
+                    info("背包已满且没有可丢弃的钻石，先存储现有物品");
+                    tookOutBlock = false;
+                    return true;
                 }
             }
             mc.interactionManager.clickSlot(h.syncId, 0, 0, SlotActionType.QUICK_MOVE, mc.player);
@@ -1513,10 +1537,24 @@ public class AutoMining extends Module {
         return false;
     }
 
-    /** 潜影盒界面是否已满（27 格全非空） */
+    /** 潜影盒界面是否已满（V4.53 对齐 misaka x0034：27 格全非空 **且** 每格满堆叠才算满） */
     private boolean isShulkerFull(ShulkerBoxScreenHandler h) {
+        int[] counts = new int[27];
+        int[] maxCounts = new int[27];
         for (int i = 0; i < 27; i++) {
-            if (h.getSlot(i).getStack().isEmpty()) return false;
+            ItemStack s = h.getSlot(i).getStack();
+            counts[i] = s.getCount();
+            maxCounts[i] = s.getMaxCount();
+        }
+        return isShulkerFull(counts, maxCounts);
+    }
+
+    /** 潜影盒界面满盒判定（纯逻辑，可单测；V4.53 对齐 misaka x0034）：
+     *  27 格全非空且每格都满堆叠才算满；存在空格或未满堆叠格 → 未满（继续填充最后一格）。 */
+    public static boolean isShulkerFull(int[] stackCounts, int[] maxCounts) {
+        for (int i = 0; i < 27; i++) {
+            if (stackCounts[i] <= 0) return false;
+            if (stackCounts[i] < maxCounts[i]) return false;
         }
         return true;
     }
@@ -1573,6 +1611,69 @@ public class AutoMining extends Module {
         for (int i = 0; i < 27; i++) {
             ItemStack s = h.getSlot(i).getStack();
             if (isShulkerBoxItem(s.getItem()) && isShulkerEmpty(s)) return i;
+        }
+        return -1;
+    }
+
+    /** 找末影箱中"可继续使用"的潜影盒槽（V4.53 对齐 misaka x0230）：
+     *  空盒 或 盒内全为目标物且未满 27 格 都可取；含杂物盒跳过。 */
+    private int findTakableShulkerInContainer(GenericContainerScreenHandler h, Item target) {
+        boolean[] isEmpty = new boolean[27];
+        boolean[] isAllTarget = new boolean[27];
+        int[] filledCounts = new int[27];
+        for (int i = 0; i < 27; i++) {
+            ItemStack s = h.getSlot(i).getStack();
+            if (!isShulkerBoxItem(s.getItem())) continue;
+            ContainerComponent c = s.get(DataComponentTypes.CONTAINER);
+            if (c == null) {
+                isEmpty[i] = true;
+                continue;
+            }
+            boolean allTarget = true;
+            int filled = 0;
+            for (ItemStack inner : c.iterateNonEmpty()) {
+                filled++;
+                if (inner.getItem() != target) {
+                    allTarget = false;
+                    break;
+                }
+            }
+            isAllTarget[i] = allTarget;
+            filledCounts[i] = filled;
+        }
+        return pickTakableShulker(isEmpty, isAllTarget, filledCounts);
+    }
+
+    /** 可取盒判定（纯逻辑，可单测；V4.53 对齐 misaka x0230）：
+     *  按遍历顺序取第一个"空盒"或"全目标物且未满 27 格"的盒子；都没有 → -1。 */
+    public static int pickTakableShulker(boolean[] isEmpty, boolean[] isAllTarget, int[] filledCounts) {
+        for (int i = 0; i < isEmpty.length; i++) {
+            if (isEmpty[i]) return i;
+            if (isAllTarget[i] && filledCounts[i] < 27) return i;
+        }
+        return -1;
+    }
+
+    /** 背包满时用目标物交换潜影盒（V4.53 对齐 misaka x0005(684)）：
+     *  拿起背包目标物 → 点末影箱盒槽（目标物进盒、盒进光标，关界面后盒回背包）；无目标物可换 → false。 */
+    private boolean takeShulkerWithTrade(GenericContainerScreenHandler h, int ecSlot, Item target) {
+        boolean[] matches = new boolean[36];
+        for (int i = 0; i < 36; i++) {
+            matches[i] = mc.player.getInventory().getStack(i).getItem() == target;
+        }
+        int tradeSlot = findTradeSlot(matches);
+        if (tradeSlot == -1) return false;
+        int screenSlot = tradeSlot < 9 ? tradeSlot + 54 : tradeSlot + 18;
+        mc.interactionManager.clickSlot(h.syncId, screenSlot, 0, SlotActionType.PICKUP, mc.player);
+        mc.interactionManager.clickSlot(h.syncId, ecSlot, 0, SlotActionType.PICKUP, mc.player);
+        debug("背包已满，用" + target.getName().getString() + "交换潜影盒");
+        return true;
+    }
+
+    /** 找背包目标物槽（纯逻辑，可单测；V4.53 对齐 misaka x0005(684) 主背包+热键遍历） */
+    public static int findTradeSlot(boolean[] invItemMatches) {
+        for (int i = 0; i < invItemMatches.length; i++) {
+            if (invItemMatches[i]) return i;
         }
         return -1;
     }
