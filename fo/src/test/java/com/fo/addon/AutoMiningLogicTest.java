@@ -228,4 +228,20 @@ public class AutoMiningLogicTest {
         // 多缺时只报第一个（顺序：时运 → 末影箱 → 工作台 → 精准）
         assertEquals("时运镐", AutoMining.firstMissingStartupItem(false, false, false, false));
     }
+
+    // ---- V4.60：残骸模式挖掘 Y 范围（限制开 8~22 / 关 6~256）----
+
+    @Test
+    void debrisYRangeLimited() {
+        int[] r = AutoMining.debrisYRange(true);
+        assertEquals(8, r[0]);   // 残骸生成下限
+        assertEquals(22, r[1]);  // 残骸生成上限
+    }
+
+    @Test
+    void debrisYRangeUnlimited() {
+        int[] r = AutoMining.debrisYRange(false);
+        assertEquals(6, r[0]);   // 仅防挖穿下界基岩
+        assertEquals(256, r[1]); // 无上限
+    }
 }

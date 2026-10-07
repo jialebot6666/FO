@@ -55,4 +55,11 @@ public interface IPathManager {
      * 把地面掉落物也当目标走过去捡起（兜住"挖了没捡到钻石"）。关闭模块时随 resetMiningAvoidance 恢复。
      */
     void setMineScanDroppedItems(boolean enabled);
+
+    /**
+     * 设置 Baritone mine 挖掘 Y 范围（V4.60）：minYLevelWhileMining / maxYLevelWhileMining。
+     * 残骸模式限制 8~22（残骸生成区间）；不限制时 minY=6（防挖穿基岩）、maxY=256。
+     * 恢复随 resetMiningAvoidance 一起处理。
+     */
+    void setMiningYRange(int minY, int maxY);
 }

@@ -320,4 +320,32 @@ public class BaritonePathManager implements IPathManager {
             e.printStackTrace();
         }
     }
+
+    /** V4.60：残骸模式限制挖掘 Y 范围（8~22）；不限制时 6~256（minY 防挖穿基岩）。maxY 只在首次备份，防重复开关叠加 */
+    @Override
+    public void setMiningYRange(int minY, int maxY) {
+        try {
+            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
+            Object settings = api.getMethod("getSettings").invoke(null);
+            backupSettingIfAbsent(settings, "maxYLevelWhileMining");
+            setSettingValue(settings, "minYLevelWhileMining", minY);
+            setSettingValue(settings, "maxYLevelWhileMining", maxY);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /** 备份设置，若 avoidanceBackup 已有同名条目则跳过（防重复备份叠加） */
+    private void backupSettingIfAbsent(Object settings, String fieldName) {
+        Object settingObj = getSettingObject(settings, fieldName);
+        if (settingObj == null) return;
+        for (Object[] entry : avoidanceBackup) {
+            if (entry[1].equals(fieldName)) return;
+        }
+        try {
+            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
+            avoidanceBackup.add(new Object[]{settingObj, fieldName, vf.get(settingObj)});
+        } catch (Exception ignored) {
+        }
+    }
 }

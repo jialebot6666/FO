@@ -52,4 +52,8 @@ public class NopPathManager implements IPathManager {
     @Override
     public void setMineScanDroppedItems(boolean enabled) {
     }
+
+    @Override
+    public void setMiningYRange(int minY, int maxY) {
+    }
 }

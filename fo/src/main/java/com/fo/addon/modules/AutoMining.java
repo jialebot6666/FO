@@ -131,6 +131,13 @@ public class AutoMining extends Module {
         .defaultValue(MiningMode.DIAMOND)
         .build());
 
+    // V4.60：残骸模式挖掘 Y 范围限制（默认开 8~22，可关回不限制对比效率）
+    private final Setting<Boolean> debrisYRange = sgGeneral.add(new BoolSetting.Builder()
+        .name("残骸Y范围限制")
+        .description("远古残骸模式限制挖掘 Y 8~22（残骸生成区间）；关闭则仅限制最低 Y=6 防挖穿基岩")
+        .defaultValue(true)
+        .build());
+
     private final Setting<Boolean> autoTrash = sgGeneral.add(new BoolSetting.Builder()
         .name("自动扔垃圾")
         .description("联动开启自动扔垃圾（白名单模式，确保石英在保留列表；石英块会主动丢弃）.")
@@ -1109,12 +1116,21 @@ public class AutoMining extends Module {
 
     // ================= 挖掘 / 放置 / 打开 =================
 
-    /** 启动 Baritone 挖掘（按模式） */
+    /** 启动 Baritone 挖掘（按模式；V4.60 残骸模式接入 Y 范围限制） */
     private void startMining() {
         switch (miningMode.get()) {
             case DIAMOND -> PathManagers.get().mine(Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE);
-            case ANCIENT_DEBRIS -> PathManagers.get().mine(Blocks.ANCIENT_DEBRIS);
+            case ANCIENT_DEBRIS -> {
+                int[] range = debrisYRange(debrisYRange.get());
+                PathManagers.get().setMiningYRange(range[0], range[1]);
+                PathManagers.get().mine(Blocks.ANCIENT_DEBRIS);
+            }
         }
+    }
+
+    /** V4.60 残骸 Y 范围（纯逻辑可测）：限制开 → [8,22]（残骸生成区间）；关 → [6,256]（仅防挖穿基岩） */
+    public static int[] debrisYRange(boolean limited) {
+        return limited ? new int[]{8, 22} : new int[]{6, 256};
     }
 
     /**
