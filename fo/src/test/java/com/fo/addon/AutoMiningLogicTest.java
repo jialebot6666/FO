@@ -267,4 +267,25 @@ public class AutoMiningLogicTest {
         assertFalse(AutoMining.isYRangeChanged("8~22", 8, 22));
         assertFalse(AutoMining.isYRangeChanged("6~256", 6, 256));
     }
+
+    // ---- V4.62：对齐 misaka 有条件重启（mine idle 才重启）----
+
+    @Test
+    void restartWhileMiningActive() {
+        // 挖掘进行中 → 不重启（无条件重启会打断正常挖掘，misaka 不会）
+        assertFalse(AutoMining.shouldRestartMining(true, 500));
+    }
+
+    @Test
+    void restartIdleTooEarly() {
+        // mine idle 但距上次重启 <100 tick → 等下一次
+        assertFalse(AutoMining.shouldRestartMining(false, 99));
+    }
+
+    @Test
+    void restartIdleReady() {
+        // mine idle 且距上次重启 ≥100 tick → 重启全图扫描（去新区块）
+        assertTrue(AutoMining.shouldRestartMining(false, 100));
+        assertTrue(AutoMining.shouldRestartMining(false, 200));
+    }
 }

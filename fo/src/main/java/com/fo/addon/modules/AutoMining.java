@@ -440,11 +440,17 @@ public class AutoMining extends Module {
             }
         }
 
-        // 每 100 tick 重启挖掘（misaka 行为：周期性刷新挖掘目标，防 Baritone 发呆）
-        if (tickCount - miningStartedTick >= 100) {
+        // V4.62 对齐 misaka x0230：mine 进程 idle（周围找不到矿、进程结束）才重启全图扫描，
+        // 且距上次重启 ≥100 tick——防止无条件每 5 秒重发 mine 打断正在进行的挖掘
+        if (shouldRestartMining(PathManagers.get().isMining(), tickCount - miningStartedTick)) {
             miningStartedTick = tickCount;
             startMining();
         }
+    }
+
+    /** V4.62 对齐 misaka：mine 进程不激活（idle）且距上次重启 ≥100 tick 才重启挖掘（纯逻辑可测） */
+    public static boolean shouldRestartMining(boolean miningActive, int elapsedTicks) {
+        return !miningActive && elapsedTicks >= 100;
     }
 
     /** REPAIRING_PICKAXE：挖石英 + 随身 2x2 合成石英块丢弃 + 修复判定 */
