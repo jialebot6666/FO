@@ -25,7 +25,12 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.EnderChestBlock;
+import net.minecraft.block.FluidBlock;
+import net.minecraft.block.FlowerBlock;
+import net.minecraft.block.GrassBlock;
+import net.minecraft.block.ShortPlantBlock;
 import net.minecraft.block.ShulkerBoxBlock;
+import net.minecraft.block.TallPlantBlock;
 import net.minecraft.client.gui.screen.ingame.CraftingScreen;
 import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
 import net.minecraft.component.DataComponentTypes;
@@ -1529,27 +1534,61 @@ public class AutoMining extends Module {
 
     // ================= 位置搜索 =================
 
-    /** misaka x0015：从玩家位置半径 3→128 方形递增扫描（Y ±3），第一个非液体实心方块即返回 */
+    /** 安全位置搜索（V4.51 全面对齐 misaka x0005）：
+     *  半径 1→32 球壳由近到远；Y 下限（主世界 -58 / 地狱 6，留 2 格余量）；
+     *  候选必须处在 5x5x5 全安全实体区域（x0015 语义），保证 3x3x3 挖得开、有支撑。
+     *  同层内取距离最近者。 */
     private BlockPos findSafeSpot() {
         BlockPos playerPos = mc.player.getBlockPos();
-        for (int r = 3; r <= 128; r++) {
+        int minY = mc.world.getRegistryKey() == net.minecraft.world.World.NETHER ? 6 : -58;
+        for (int r = 1; r <= 32; r++) {
+            BlockPos best = null;
+            double bestDist = Double.MAX_VALUE;
             for (int dx = -r; dx <= r; dx++) {
-                for (int dy = -3; dy <= 3; dy++) {
+                for (int dy = -r; dy <= r; dy++) {
                     for (int dz = -r; dz <= r; dz++) {
+                        // 球壳：至少一个坐标轴落在半径边界（misaka x0005 同款）
+                        if (Math.abs(dx) < r && Math.abs(dy) < r && Math.abs(dz) < r) continue;
                         BlockPos p = playerPos.add(dx, dy, dz);
-                        if (isSafeSpotBlock(p)) return p;
+                        if (!isSafeSpotCandidate(p.getY() - 2, minY, isSolid5x5x5(p))) continue;
+                        double dist = playerPos.getSquaredDistance(p);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            best = p;
+                        }
                     }
                 }
             }
+            if (best != null) return best;
         }
         return null;
     }
 
-    /** 安全位置判定（misaka 语义）：实心方块（可站立/可挖）且非液体 */
-    private boolean isSafeSpotBlock(BlockPos p) {
-        BlockState state = mc.world.getBlockState(p);
-        if (state.isAir() || !state.isSolid()) return false;
-        return state.getFluidState().isEmpty();
+    /** 安全位置候选判定（纯布尔，可单测）：
+     *  Y 下限（候选 y-2 需 ≥ minY，misaka x0005 留 2 格洞内余量）+ 5x5x5 全安全实体 */
+    public static boolean isSafeSpotCandidate(int yMinusTwo, int minY, boolean solid5x5x5) {
+        return yMinusTwo >= minY && solid5x5x5;
+    }
+
+    /** 5x5x5 全安全实体检查（misaka x0015 语义）：
+     *  范围内任一方块为 空气/流体/岩浆/水/岩浆块/草/花/高草/短草/火把/雪/沙砾/可替换 → 不合格 */
+    private boolean isSolid5x5x5(BlockPos center) {
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockState s = mc.world.getBlockState(center.add(dx, dy, dz));
+                    Block b = s.getBlock();
+                    if (s.isAir()
+                        || b instanceof FluidBlock
+                        || b == Blocks.LAVA || b == Blocks.WATER || b == Blocks.MAGMA_BLOCK
+                        || b instanceof TallPlantBlock || b instanceof ShortPlantBlock
+                        || b instanceof FlowerBlock || b instanceof GrassBlock
+                        || b == Blocks.TORCH || b == Blocks.WALL_TORCH || b == Blocks.SNOW
+                        || b == Blocks.GRAVEL || s.isReplaceable()) return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** 放置位置搜索（V4.50 对齐 misaka x0016：以 safeSpot 为中心 3x3x3 优先，不依赖玩家位置；
