@@ -624,13 +624,14 @@ public class AutoMining extends Module {
         }
     }
 
-    /** PLACING_SHULKER：找空潜影盒放盒 → STORING_ITEMS；无空盒 → 末影箱流程 */
+    /** PLACING_SHULKER：找存储目标盒放盒 → STORING_ITEMS；无盒 → 末影箱流程 */
     private void placingShulker() {
         if (safeSpot == null) {
             state = MiningState.FINDING_SAFE_SPOT;
             return;
         }
-        int slot = findEmptyShulkerSlot();
+        Item targetItem = miningMode.get() == MiningMode.DIAMOND ? Items.DIAMOND_BLOCK : Items.ANCIENT_DEBRIS;
+        int slot = findStorageBoxSlot(targetItem);
         if (slot == -1) {
             // 背包无空潜影盒 → 末影箱取盒流程
             if (!storingToEnder) {
@@ -1431,6 +1432,55 @@ public class AutoMining extends Module {
         for (int i = 0; i < 36; i++) {
             ItemStack s = mc.player.getInventory().getStack(i);
             if (isShulkerBoxItem(s.getItem()) && isShulkerEmpty(s)) return i;
+        }
+        return -1;
+    }
+
+    /** 选存储目标盒（V4.52 对齐 misaka x0014）：优先"盒内全为目标物 + 目标物最多"的盒子，
+     *  其次第一个全空盒；都没有 → -1（调用方走末影箱流程）。
+     *  修复：背包里含目标物的未满盒被无视（FO 旧逻辑只认空盒），导致不存盒/误走末影箱取盒失败。 */
+    private int findStorageBoxSlot(Item target) {
+        int size = mc.player.getInventory().size();
+        int[] targetCounts = new int[size];
+        boolean[] isEmpty = new boolean[size];
+        boolean[] isAllTarget = new boolean[size];
+        for (int i = 0; i < size; i++) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (!isShulkerBoxItem(s.getItem())) continue;   // 非潜影盒槽不参与
+            ContainerComponent c = s.get(DataComponentTypes.CONTAINER);
+            if (c == null) {
+                isEmpty[i] = true;
+                continue;
+            }
+            boolean allTarget = true;
+            int count = 0;
+            for (ItemStack inner : c.iterateNonEmpty()) {
+                if (inner.getItem() == target) {
+                    count += inner.getCount();
+                } else {
+                    allTarget = false;
+                }
+            }
+            isAllTarget[i] = allTarget;
+            targetCounts[i] = count;
+        }
+        return pickStorageBox(targetCounts, isEmpty, isAllTarget);
+    }
+
+    /** 选盒纯逻辑（可单测，对齐 misaka x0014）：
+     *  优先全目标盒中目标物最多者；其次第一个空盒；都没有 → -1 */
+    public static int pickStorageBox(int[] targetCounts, boolean[] isEmpty, boolean[] isAllTarget) {
+        int bestSlot = -1;
+        int bestCount = -1;
+        for (int i = 0; i < targetCounts.length; i++) {
+            if (isAllTarget[i] && targetCounts[i] > bestCount) {
+                bestCount = targetCounts[i];
+                bestSlot = i;
+            }
+        }
+        if (bestSlot != -1) return bestSlot;
+        for (int i = 0; i < targetCounts.length; i++) {
+            if (isEmpty[i]) return i;
         }
         return -1;
     }
