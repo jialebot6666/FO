@@ -1,4 +1,4 @@
-<#
+﻿<#
   在 Windows 上构建 FO（不需要装 Java / Gradle / git）。
 
   用法：

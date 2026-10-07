@@ -1,4 +1,4 @@
-<#
+﻿<#
   不用 git，直接走 GitHub REST API 交付一个新版本 FO。
 
   做三件事（对应 AGENTS.md 铁律 6）：
