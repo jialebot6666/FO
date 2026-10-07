@@ -4,13 +4,12 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.InteractionUtils;
-import com.fo.addon.utils.MiningGuard;
 import com.fo.addon.utils.CraftingSlotMath;
 import com.fo.addon.utils.PickupNextLogic;
 import com.fo.addon.utils.PickupTimeoutLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
+import meteordevelopment.meteorclient.systems.modules.player.AutoTool;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -204,13 +203,13 @@ public class AutoMining extends Module {
     private int stateWaitTicks = 0;
     private int tickCount = 0;
     private int lastPickaxeCheck = 0;
-    private int lastToolCheck = 0;             // V4.31：锁时运镐节流计数
     private int miningStartedTick = 0;
     private int pathTimeoutTicks = 0;
     private int pickupTimeoutTicks = 0;
     private int craftActionTicks = 0;
     private int placeActionTicks = 0;
     private int lastTrashTick = -100;
+    private int placeRetryTicks = 0;             // V4.56：放置格被占用时"挪开一格重试"窗口
 
     // ===== 目标位置 =====
     private BlockPos safeSpot = null;          // 安全放置位置（3x3x3 清理中心）
@@ -268,11 +267,16 @@ public class AutoMining extends Module {
             return;
         }
 
-        // Baritone 避让设置 + 关闭自动换工具（V4.31 方案B：FO 自己锁时运镐，防 Baritone 选精准采集镐挖钻石掉原矿）
+        // Baritone 避让设置 + 关闭自动换工具（V4.31 起：关 Baritone autoTool，防其选"速度最优但不保时运"的工具挖钻石掉原矿）
         PathManagers.get().applyMiningAvoidance(avoidMobs.get(), avoidBlocks.get());
         PathManagers.get().setAutoTool(false);
         // V4.42：挖矿找不到新矿时把掉落物当目标捡起（兜住挖了没捡到钻石）
         PathManagers.get().setMineScanDroppedItems(pickDroppedItems.get());
+
+        // V4.55 方案C：单向联动确保 Meteor 原版 AutoTool 激活（时运优先挖矿 / 精准采集末影箱 / 铲斧自动切换），
+        // 替代 FO 自锁时运镐；关 FO 时不动 AutoTool（系统级常驻模块，挖沙/种树同样受益）
+        AutoTool autoTool = Modules.get().get(AutoTool.class);
+        if (autoTool != null && !autoTool.isActive()) autoTool.toggle();
 
         // 自动扔垃圾联动
         if (autoTrash.get()) {
@@ -291,7 +295,6 @@ public class AutoMining extends Module {
         tickCount = 0;
         miningStartedTick = 0;
         lastPickaxeCheck = 0;
-        lastToolCheck = 0;
         escapeTarget = null;
         disconnectFlag = false;
         startMining();
@@ -396,12 +399,6 @@ public class AutoMining extends Module {
             return;
         }
 
-        // V4.31 方案B：每 20 tick 确认手持时运镐（防精准采集镐被选中挖钻石 → 掉原矿）
-        if (tickCount - lastToolCheck >= 20) {
-            lastToolCheck = tickCount;
-            ensureFortunePickaxeHeld();
-        }
-
         // V4.54 对齐 misaka x0230：残骸模式每 tick 静默合成石英块并丢弃（防石英占满背包）
         if (miningMode.get() == MiningMode.ANCIENT_DEBRIS) {
             craftQuartzBlock();
@@ -435,12 +432,7 @@ public class AutoMining extends Module {
             return;
         }
 
-        // V4.31 方案B：挖石英也锁时运镐（石英吃时运，掉更多石英）
-        if (tickCount - lastToolCheck >= 20) {
-            lastToolCheck = tickCount;
-            ensureFortunePickaxeHeld();
-        }
-
+        // V4.55 方案C：不再 FO 自锁时运镐（AutoTool 时运优先挖矿/精准采集末影箱/铲斧自动切换）
         // 没在挖石英 → 启动挖掘
         if (!PathManagers.get().isMining()) {
             PathManagers.get().mine(Blocks.NETHER_QUARTZ_ORE);
@@ -590,10 +582,13 @@ public class AutoMining extends Module {
         }
         BlockPos target = findPlacePosition(safeSpot);
         if (target == null) {
+            // V4.56：放置格被占用 → 挪开一格重试；窗口耗尽才报错关闭
+            if (!retryPlaceMove()) return;
             error("找不到合适的放置位置！");
             toggle();
             return;
         }
+        placeRetryTicks = 0;
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
@@ -652,10 +647,13 @@ public class AutoMining extends Module {
         }
         BlockPos target = findPlacePosition(safeSpot);
         if (target == null) {
+            // V4.56：放置格被占用 → 挪开一格重试；窗口耗尽才报错关闭
+            if (!retryPlaceMove()) return;
             error("找不到合适的放置位置！");
             toggle();
             return;
         }
+        placeRetryTicks = 0;
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
@@ -822,8 +820,6 @@ public class AutoMining extends Module {
         }
         if (mineBlockWithSilkTouch(placedPos)) {
             info("末影箱已挖掉，准备拾取");
-            // 挖完立刻换回时运镐（V4.31 方案B：防下一轮挖矿用错工具）
-            ensureFortunePickaxeHeld();
             placedPos = null;
             // V4.47 bug1：对齐 misaka x0180 语义——末影箱链挖完同样挂"待挖工作台"标志，
             // 拾取完成/超时后都先挖工作台，不再遗忘（原逻辑只有挖潜影盒时挂标志）
@@ -850,10 +846,13 @@ public class AutoMining extends Module {
         }
         BlockPos target = findPlacePosition(safeSpot);
         if (target == null) {
+            // V4.56：放置格被占用 → 挪开一格重试；窗口耗尽才报错关闭
+            if (!retryPlaceMove()) return;
             error("找不到合适的放置位置！");
             toggle();
             return;
         }
+        placeRetryTicks = 0;
         placeTarget = target;
         placeBlockAt(target, slot);
         placedPos = target;
@@ -1788,29 +1787,49 @@ public class AutoMining extends Module {
         return true;
     }
 
-    /** 放置位置搜索（V4.50 对齐 misaka x0016：以 safeSpot 为中心 3x3x3 优先，不依赖玩家位置；
-     *  玩家在洞里/附近时再兜底玩家周围 3x3x3）——修复"拾取后玩家不在洞里导致放末影箱/放盒放不下" */
+    /** 放置位置搜索（V4.56 修复：跳过玩家脚底格——玩家挖完洞站在洞里时，洞底格（下方有支撑）
+     *  恰好就是脚底所在的空气格，放盒/放末影箱会被自身碰撞箱顶住放不出来；
+     *  排除脚底后洞底 3x3 还剩 8 个可用格，必然有解） */
     private BlockPos findPlacePosition(BlockPos center) {
-        // 第一轮（misaka x0016 语义）：safeSpot 周围 3x3x3，洞内总有可放格（工作台占位除外）
+        BlockPos playerFeet = mc.player.getBlockPos();
+        // 第一轮（misaka 语义）：safeSpot 周围 3x3x3，跳过玩家脚底格
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     BlockPos p = center.add(dx, dy, dz);
-                    if (canPlaceAt(p)) return p;
+                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet))) return p;
                 }
             }
         }
-        // 第二轮兜底：玩家周围 3x3x3（玩家在洞里/附近时优先踩到的位置）
-        BlockPos playerPos = mc.player.getBlockPos();
+        // 第二轮兜底：玩家周围 3x3x3，同样跳过脚底格
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
-                    BlockPos p = playerPos.add(dx, dy, dz);
-                    if (canPlaceAt(p)) return p;
+                    BlockPos p = playerFeet.add(dx, dy, dz);
+                    if (isPlaceableSlot(canPlaceAt(p), p.equals(playerFeet))) return p;
                 }
             }
         }
         return null;
+    }
+
+    /** 放置候选格判定（V4.56，纯逻辑可单测）：目标格可放置 且 不是玩家脚底格 */
+    public static boolean isPlaceableSlot(boolean placeable, boolean isPlayerFeet) {
+        return placeable && !isPlayerFeet;
+    }
+
+    /** 放置格找不到时的兜底：先挪开一格（玩家可能占满可放格），40 tick 重试窗口；
+     *  返回 true 表示重试窗口已耗尽（调用方应报错关闭），false 表示等待重试中 */
+    private boolean retryPlaceMove() {
+        if (placeRetryTicks <= 0) {
+            placeRetryTicks = 40;
+            BlockPos p = mc.player.getBlockPos().add(1, 0, 0);
+            PathManagers.get().moveTo(p, false);
+            info("放置位置被占用，挪开一格后重试");
+            return false;
+        }
+        placeRetryTicks--;
+        return placeRetryTicks <= 0;
     }
 
     /** 放置判定纯逻辑（对齐 misaka x0023：目标格空气 + 下方非空气/非液体）——纯布尔可单测 */
@@ -1885,30 +1904,6 @@ public class AutoMining extends Module {
         if (enderChest) return hasSilkPickaxe ? ToolStrategy.SILK_TOUCH : ToolStrategy.FORTUNE;
         if (miningOre) return ToolStrategy.FORTUNE;
         return ToolStrategy.ANY;
-    }
-
-    /** 确保手持时运镐（挖矿状态每 20 tick 调用；防 Baritone/手动挖选中精准采集镐挖钻石 → 掉原矿） */
-    private void ensureFortunePickaxeHeld() {
-        // 自动吃/杀戮光环保护：AutoEat 在吃、玩家正在使用物品、FO杀戮光环正在攻击时
-        // 不抢槽位，等结束下一 tick 再锁回时运镐（修复与 AutoEat/杀戮光环抢槽死循环）
-        AutoEat autoEat = Modules.get().get(AutoEat.class);
-        FOKillAura ka = Modules.get().get(FOKillAura.class);
-        if (MiningGuard.shouldSkipFortuneLock(
-            mc.player.isUsingItem(),
-            autoEat != null && autoEat.eating,
-            ka != null && ka.attacking)) return;
-
-        ItemStack held = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
-        if (isPickaxe(held.getItem()) && getFortuneLevel(held) > 0) return;
-        int slot = findFortunePickaxeSlot();
-        if (slot >= 0) {
-            if (slot > 8) {
-                InvUtils.move().from(slot).toHotbar(mc.player.getInventory().getSelectedSlot());
-            } else {
-                InvUtils.swap(slot, false);
-                mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket(slot));
-            }
-        }
     }
 
     /** 找"镐子 + 精准采集"背包槽（挖末影箱回收本体用），找不到返回 -1 */

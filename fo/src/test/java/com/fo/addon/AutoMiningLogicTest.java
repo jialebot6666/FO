@@ -173,4 +173,28 @@ public class AutoMiningLogicTest {
         boolean[] hasTarget = {true};
         assertEquals(-1, AutoMining.findFullTargetBoxSlotPure(full, hasTarget));
     }
+
+    // ---- V4.56：放置格跳过玩家脚底（防放盒/放末影箱放到脚底放不出来）----
+
+    @Test
+    void placeableSlotExcludesPlayerFeet() {
+        assertTrue(AutoMining.isPlaceableSlot(true, false));   // 可放且非脚底 → 选中
+        assertFalse(AutoMining.isPlaceableSlot(true, true));   // 可放但是脚底 → 排除
+        assertFalse(AutoMining.isPlaceableSlot(false, false)); // 不可放 → 排除
+        assertFalse(AutoMining.isPlaceableSlot(false, true));  // 不可放且脚底 → 排除
+    }
+
+    @Test
+    void holeFloorStillHasSolutionAfterExcludingFeet() {
+        // bug 场景：玩家挖完洞站在洞中心（safeSpot 正上方），洞底 9 格全部可放（下方支撑实体）。
+        // 洞底中心格 = 玩家脚底 → 排除后还剩 8 个可用格 → 第一轮必然有解（不会放脚底、不会报错关闭）
+        int usable = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                boolean isFeet = dx == 0 && dz == 0;
+                if (AutoMining.isPlaceableSlot(true, isFeet)) usable++;
+            }
+        }
+        assertEquals(8, usable);
+    }
 }
