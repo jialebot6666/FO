@@ -20,7 +20,7 @@ license: CC0-1.0
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律中文；不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。新增/修改 UI 文本时必须自查是否中文。
 4. **命名规范（FO 大写 + 版本体系统一）**：插件名称统一大写 **FO**——构建产物文件名（`FO-V<版本>.jar`）、mod 显示名一律大写 FO；**构建产物名与 mod 版本号必须统一到版本体系**：产物 = `FO-<mod版本>.jar`，升版时同步修改 `fo/gradle/libs.versions.toml` 的 `mod-version`，不得脱节；mod id 按 Fabric 规范保持小写 `fo`，Java 包名 `com.fo.addon` 保持小写。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策时，必须先给出方案供用户讨论，由用户确定后再更改代码；未经用户拍板，不得直接动手实现。
-6. **交付**：把 `fo/build/libs/FO-V6.0.jar`（文件名 = `FO-<mod版本>.jar`）通过 `present_files` 交给用户。
+6. **交付**：把 `fo/build/libs/FO-<mod版本>.jar`（文件名 = `FO-<mod版本>.jar`，版本号随 `fo/gradle/libs.versions.toml` 的 `mod-version` 走，当前 V6.1）通过 `present_files` 交给用户。
 
 ## 工作流
 
