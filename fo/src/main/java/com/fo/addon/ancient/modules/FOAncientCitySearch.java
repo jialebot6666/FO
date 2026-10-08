@@ -194,8 +194,8 @@ public class FOAncientCitySearch extends Module {
     private void scanForCities(long seed, BlockPos playerPos) {
         List<FoundChest> results = new ArrayList<>();
         int radius = searchRadiusSetting.get();
-        int playerChunkX = playerPos.getX() >> 4;
-        int playerChunkZ = playerPos.getZ() >> 4;
+        int playerChunkX = AncientSearchLogic.blockToChunk(playerPos.getX());
+        int playerChunkZ = AncientSearchLogic.blockToChunk(playerPos.getZ());
 
         CubiomesJNI jni = null;
         long generator = 0L;
@@ -248,22 +248,26 @@ public class FOAncientCitySearch extends Module {
                     if (jniReady && jni != null) {
                         int[] city = jni.findCityChunks(generator, rx, rz);
                         if (city != null) {
-                            int blockX = (city[0] << 4) + 8;
-                            int blockZ = (city[1] << 4) + 8;
+                            // city[0]/city[1] 是【区块】坐标；<<4+8 得到的方块坐标只服务于 isViableAncientCity
+                            int cityChunkX = city[0];
+                            int cityChunkZ = city[1];
+                            int blockX = (cityChunkX << 4) + 8;
+                            int blockZ = (cityChunkZ << 4) + 8;
                             boolean viable = jni.isViableAncientCity(generator, blockX, blockZ);
-                            debug("区域 " + rx + "," + rz + " 找到城市 -> 区块 " + city[0] + "," + city[1]
+                            debug("区域 " + rx + "," + rz + " 找到城市 -> 区块 " + cityChunkX + "," + cityChunkZ
                                 + " 方块 " + blockX + "," + blockZ + " viable=" + viable);
                             if (!viable) {
                                 continue;
                             }
-                            // 距离判定对齐 misaka 原版：方块坐标差
-                            double dist = Math.sqrt(Math.pow(blockX - playerPos.getX(), 2) + Math.pow(blockZ - playerPos.getZ(), 2));
+                            // 距离判定：单位必须统一为区块（搜索半径的单位就是区块）
+                            double dist = AncientSearchLogic.chunkDistance(cityChunkX, cityChunkZ, playerChunkX, playerChunkZ);
                             if (dist > radius) {
-                                debug("城市超出搜索半径: 距离 " + dist + " > " + radius);
+                                debug("城市超出搜索半径: 距离 " + dist + " 区块 > " + radius + " 区块");
                                 continue;
                             }
                             found++;
-                            List<FoundChest> chests = chestsOfOneCity(seed, blockX, blockZ, playerPos, McVersion.V1_19);
+                            // 结构重放同样吃【区块】坐标——黑盒内部 AncientCityLootScanner 会自己 <<4
+                            List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, McVersion.V1_19);
                             debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
                             results.addAll(chests);
                         }
@@ -288,12 +292,18 @@ public class FOAncientCitySearch extends Module {
         setSearching(false);
     }
 
-    private List<FoundChest> chestsOfOneCity(long seed, int cityX, int cityZ, BlockPos playerPos, McVersion mcVersion) {
+    /**
+     * 重放一座古城的结构并收集箱子。
+     *
+     * @param cityChunkX 古城所在【区块】X（黑盒内部会自己 <<4 换成方块坐标，这里不能再提前换算）
+     * @param cityChunkZ 古城所在【区块】Z
+     */
+    private List<FoundChest> chestsOfOneCity(long seed, int cityChunkX, int cityChunkZ, BlockPos playerPos, McVersion mcVersion) {
         List<FoundChest> results = new ArrayList<>();
         AncientCityLootScanner scanner = new AncientCityLootScanner();
         WorldSeedFunctions wsf = new WorldSeedFunctions();
-        scanner.generateAt(seed, cityX, cityZ, wsf);
-        debug("古城结构生成完成: " + cityX + "," + cityZ);
+        scanner.generateAt(seed, cityChunkX, cityChunkZ, wsf);
+        debug("古城结构生成完成: 区块 " + cityChunkX + "," + cityChunkZ);
 
         if (gameVersionSetting.get() == GameVersionOption.FROM_26_1) {
             List<?> randomSeq = scanner.collectChestsRandomSequence();
