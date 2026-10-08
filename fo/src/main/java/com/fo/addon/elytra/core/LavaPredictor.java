@@ -1,59 +1,22 @@
 package com.fo.addon.elytra.core;
+
+import com.fo.addon.elytra.core.BaritoneHook;
+import com.fo.addon.elytra.core.FlightPredictor;
+import com.fo.addon.elytra.core.FOElytraLog;
+import com.fo.addon.elytra.core.InvHelper;
+import com.fo.addon.elytra.core.PlayerAction;
 import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.fluid.Fluids;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.World;
+
 public final class LavaPredictor {
-    public enum Result {
-        IDLE("空闲"),
-        WATCHING("监视中"),
-        WARN_ONLY("仅预警"),
-        DETOUR("绕行"),
-        EMERGENCY("紧急规避");
-
-        public final String label;
-
-        Result(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString，必须覆写否则显示英文枚举名） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-    public record Threat(
-        double horizontalDistance,
-        double distance,
-        int etaTicks,
-        float bearingYaw,
-        float escapeYaw,
-        int x,
-        int y,
-        int z,
-        boolean blockedAbove,
-        int lavaSamples
-    ) {}
-    public record Options(
-        boolean enabled,
-        double horizonSeconds,
-        double urgentSeconds,
-        int lateralDistance,
-        int returnDistance,
-        int cooldownTicks,
-        boolean warnOnly,
-        boolean pauseBaritone,
-        double deflectAngle
-    ) {}
     private static final int SCAN_STRIDE = 2;
     private static final int LAVA_SCAN_RADIUS = 2;
     private static final int CEILING_CHECK_BLOCKS = 4;
@@ -62,8 +25,6 @@ public final class LavaPredictor {
     private static final float EMERGENCY_PITCH_BLOCKED = -5.0f;
     private static final int EMERGENCY_MAX_TICKS = 80;
     private static final int DETOUR_MAX_TICKS = 400;
-    private static final int REFIRE_TICKS = 20;
-    private static final int REFIRE_MAX = 2;
     private static final int WARN_COOLDOWN = 40;
     private final boolean enabled;
     private final int horizonTicks;
@@ -80,8 +41,6 @@ public final class LavaPredictor {
     private boolean avoiding;
     private boolean pausedBaritone;
     private int emergencyTicks;
-    private int refires;
-    private int refireCooldown;
     private int detourTicks;
     private int detourX;
     private int detourZ;
@@ -93,423 +52,453 @@ public final class LavaPredictor {
     private int emergencyCount;
     private int warnCount;
     private int warnCooldown;
-   public LavaPredictor(Options opts) {
+
+    public LavaPredictor(Options opts) {
         this.enabled = opts.enabled();
-        this.horizonTicks = (int) Math.round(Math.max(1.5, Math.min(4.0, opts.horizonSeconds())) * 20.0);
-        this.urgentTicks = (int) Math.round(Math.max(0.4, Math.min(2.0, opts.urgentSeconds())) * 20.0);
+        this.horizonTicks = (int)Math.round(Math.max(1.5, Math.min(4.0, opts.horizonSeconds())) * 20.0);
+        this.urgentTicks = (int)Math.round(Math.max(0.4, Math.min(2.0, opts.urgentSeconds())) * 20.0);
         this.lateralDistance = Math.max(16, Math.min(96, opts.lateralDistance()));
         this.returnDistance = Math.max(8, Math.min(64, opts.returnDistance()));
         this.cooldownTicks = Math.max(10, Math.min(200, opts.cooldownTicks()));
         this.warnOnly = opts.warnOnly();
         this.pauseBaritone = opts.pauseBaritone();
-        this.deflectAngle = (float) Math.max(30.0, Math.min(90.0, opts.deflectAngle()));
+        this.deflectAngle = (float)Math.max(30.0, Math.min(90.0, opts.deflectAngle()));
     }
+
     public Threat threat() {
-        return threat;
+        return this.threat;
     }
+
     public boolean isAvoiding() {
-        return avoiding;
+        return this.avoiding;
     }
+
     public boolean pausedBaritone() {
-        return pausedBaritone;
+        return this.pausedBaritone;
     }
+
     public Result lastResult() {
-        return lastResult;
+        return this.lastResult;
     }
+
     public int detourCount() {
-        return detourCount;
+        return this.detourCount;
     }
+
     public int emergencyCount() {
-        return emergencyCount;
+        return this.emergencyCount;
     }
+
     public String statusText() {
-        Threat t = threat;
+        Threat t = this.threat;
         if (t == null) {
-            return avoiding ? "岩浆预测：规避中（视野内已无威胁）" : "岩浆预测：前方干净";
+            return this.avoiding ? "\u5ca9\u6d46\u9884\u6d4b\uff1a\u89c4\u907f\u4e2d\uff08\u89c6\u91ce\u5185\u5df2\u65e0\u5a01\u80c1\uff09" : "\u5ca9\u6d46\u9884\u6d4b\uff1a\u524d\u65b9\u5e72\u51c0";
         }
-        String phase = switch (lastResult) {
-            case EMERGENCY -> "紧急规避";
-            case DETOUR -> "侧向绕行";
-            case WARN_ONLY -> "只预警";
-            case WATCHING -> "跟踪";
-            default -> "待命";
+        String phase = switch (this.lastResult.ordinal()) {
+            case 4 -> "\u7d27\u6025\u89c4\u907f";
+            case 3 -> "\u4fa7\u5411\u7ed5\u884c";
+            case 2 -> "\u53ea\u9884\u8b66";
+            case 1 -> "\u8ddf\u8e2a";
+            default -> "\u5f85\u547d";
         };
-        return String.format("岩浆预测：%.1fs 后 %d %d %d 有岩浆（地平距 %.0f 格 / 方位 %.0f°）→ %s",
-            t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(), t.bearingYaw(), phase);
+        return String.format("\u5ca9\u6d46\u9884\u6d4b\uff1a%.1fs \u540e %d %d %d \u6709\u5ca9\u6d46\uff08\u5730\u5e73\u8ddd %.0f \u683c / \u65b9\u4f4d %.0f\u00b0\uff09\u2192 %s", (double)t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(), Float.valueOf(t.bearingYaw()), phase);
     }
+
     public Result tick(MinecraftClient mc, BlockPos target) {
-        if (!enabled) {
-            reset();
+        boolean urgent;
+        Threat found;
+        if (!this.enabled) {
+            this.reset();
             return Result.IDLE;
         }
         if (mc == null || mc.player == null || mc.world == null) {
-            reset();
+            this.reset();
             return Result.IDLE;
         }
-        if (cooldown > 0) cooldown--;
-        if (warnCooldown > 0) warnCooldown--;
-       if (mc.player.isInLava() && !avoiding) {
-            releaseAvoidKeys();
-            threat = null;
-            lastResult = Result.IDLE;
+        if (this.cooldown > 0) {
+            --this.cooldown;
+        }
+        if (this.warnCooldown > 0) {
+            --this.warnCooldown;
+        }
+        if (mc.player.isInLava() && !this.avoiding) {
+            this.releaseAvoidKeys();
+            this.threat = null;
+            this.lastResult = Result.IDLE;
             return Result.IDLE;
         }
         if (InvHelper.screenOpen()) {
-            threat = null;
-            lastResult = Result.IDLE;
+            this.threat = null;
+            this.lastResult = Result.IDLE;
             return Result.IDLE;
         }
-        Threat found = mc.player.isGliding() ? predict(mc, target) : null;
-        threat = found;
-        if (avoiding) {
-            if (lastResult == Result.EMERGENCY) return tickEmergency(mc, found, target);
-            return tickDetour(mc, found, target);
+        this.threat = found = mc.player.isGliding() ? this.predict(mc, target) : null;
+        if (this.avoiding) {
+            if (this.lastResult == Result.EMERGENCY) {
+                return this.tickEmergency(mc, found, target);
+            }
+            return this.tickDetour(mc, found, target);
         }
         if (found == null) {
-            lastResult = Result.IDLE;
+            this.lastResult = Result.IDLE;
             return Result.IDLE;
         }
-        boolean urgent = found.etaTicks() <= urgentTicks;
-        if (warnOnly) {
-            lastResult = Result.WARN_ONLY;
-            if (warnCooldown <= 0) {
-                warnCooldown = WARN_COOLDOWN;
-                FOElytraLog.warn("【实验性·只预警】预测 %.1f 秒后会碰到岩浆（%s｜地平距 %.0f 格 / 方位 %.0f°）"
-                        + "→ 按设置不接管（打开「只预警不接管」的开关才能让我绕开）",
-                    found.etaTicks() / 20.0, found.x() + " " + found.y() + " " + found.z(),
-                    found.horizontalDistance(), found.bearingYaw());
-                FOElytraLog.detail("岩浆预测明细：ETA %d tick｜采样 %d 格岩浆｜上方通不过 %s｜"
-                        + "紧急阈值 %d tick｜预测时长 %d tick",
-                    found.etaTicks(), found.lavaSamples(), found.blockedAbove() ? "是" : "否",
-                    urgentTicks, horizonTicks);
+        boolean bl = urgent = found.etaTicks() <= this.urgentTicks;
+        if (this.warnOnly) {
+            this.lastResult = Result.WARN_ONLY;
+            if (this.warnCooldown <= 0) {
+                this.warnCooldown = 40;
+                FOElytraLog.warn("\u3010\u5b9e\u9a8c\u6027\u00b7\u53ea\u9884\u8b66\u3011\u9884\u6d4b %.1f \u79d2\u540e\u4f1a\u78b0\u5230\u5ca9\u6d46\uff08%s\uff5c\u5730\u5e73\u8ddd %.0f \u683c / \u65b9\u4f4d %.0f\u00b0\uff09\u2192 \u6309\u8bbe\u7f6e\u4e0d\u63a5\u7ba1\uff08\u6253\u5f00\u300c\u53ea\u9884\u8b66\u4e0d\u63a5\u7ba1\u300d\u7684\u5f00\u5173\u624d\u80fd\u8ba9\u6211\u7ed5\u5f00\uff09", (double)found.etaTicks() / 20.0, found.x() + " " + found.y() + " " + found.z(), found.horizontalDistance(), Float.valueOf(found.bearingYaw()));
+                FOElytraLog.detail("\u5ca9\u6d46\u9884\u6d4b\u660e\u7ec6\uff1aETA %d tick\uff5c\u91c7\u6837 %d \u683c\u5ca9\u6d46\uff5c\u4e0a\u65b9\u901a\u4e0d\u8fc7 %s\uff5c\u7d27\u6025\u9608\u503c %d tick\uff5c\u9884\u6d4b\u65f6\u957f %d tick", found.etaTicks(), found.lavaSamples(), found.blockedAbove() ? "\u662f" : "\u5426", this.urgentTicks, this.horizonTicks);
             }
-            return lastResult;
+            return this.lastResult;
         }
-        if (cooldown > 0) {
-            lastResult = Result.WATCHING;
-            return lastResult;
+        if (this.cooldown > 0) {
+            this.lastResult = Result.WATCHING;
+            return this.lastResult;
         }
-        if (urgent) return beginEmergency(mc, found, target);
-        return beginDetour(mc, found, target);
+        if (urgent) {
+            return this.beginEmergency(mc, found, target);
+        }
+        return this.beginDetour(mc, found, target);
     }
+
     private Threat predict(MinecraftClient mc, BlockPos target) {
-        World world = mc.world;
+        Vec3d targetDir;
+        Vec3d look;
+        ClientWorld world = mc.world;
         double px = mc.player.getX();
         double py = mc.player.getY();
         double pz = mc.player.getZ();
         Vec3d vel = mc.player.getVelocity();
-        Vec3d look = mc.player.getRotationVec(1.0F);
-        Vec3d blended = look;
+        Vec3d blended = look = mc.player.getRotationVec(1.0f);
         double velH = vel.horizontalLength();
         if (velH > 0.05) {
             blended = blended.add(new Vec3d(vel.x / velH * 0.5, 0.0, vel.z / velH * 0.5));
         }
-        Vec3d targetDir = horizontalDir(px, pz, target);
-        if (targetDir != null) {
+        if ((targetDir = LavaPredictor.horizontalDir(px, pz, target)) != null) {
             blended = blended.add(targetDir.multiply(0.5));
         }
-        if (blended.lengthSquared() < 1.0E-6) return null;
+        if (blended.lengthSquared() < 1.0E-6) {
+            return null;
+        }
         look = blended.normalize();
-        List<Vec3d> path = FlightPredictor.predictPath(horizonTicks, new Vec3d(px, py, pz), vel, look);
-        for (int i = 1; i < path.size(); i += SCAN_STRIDE) {
+        List<Vec3d> path = FlightPredictor.predictPath(this.horizonTicks, new Vec3d(px, py, pz), vel, look);
+        for (int i = 1; i < path.size(); i += 2) {
+            int lava;
             Vec3d p = path.get(i);
-            int bx = (int) Math.floor(p.x);
-            int by = (int) Math.floor(p.y);
-            int bz = (int) Math.floor(p.z);
-            if (!world.isChunkLoaded(bx >> 4, bz >> 4)) continue;
-            int lava = lavaNear(world, bx, by, bz);
-            if (lava <= 0) continue;
+            int bx = (int)Math.floor(p.x);
+            int by = (int)Math.floor(p.y);
+            int bz = (int)Math.floor(p.z);
+            if (!world.isChunkLoaded(bx >> 4, bz >> 4) || (lava = LavaPredictor.lavaNear((World)world, bx, by, bz)) <= 0) continue;
             double dx = p.x - px;
             double dz = p.z - pz;
             double dh = Math.hypot(dx, dz);
-            float bearing = (float) ((Math.toDegrees(Math.atan2(-dx, dz)) + 360.0) % 360.0);
-            float escape = (float) ((bearing + 180.0) % 360.0);
-            boolean blocked = !passable(world, bx, by + 1, bz) || ceilingBlocked(world, bx, by, bz);
-            return new Threat(dh, Math.sqrt(dh * dh + (p.y - py) * (p.y - py)), i, bearing, escape,
-                bx, by, bz, blocked, lava);
+            float bearing = (float)((Math.toDegrees(Math.atan2(-dx, dz)) + 360.0) % 360.0);
+            float escape = (float)(((double)bearing + 180.0) % 360.0);
+            boolean blocked = !LavaPredictor.passable((World)world, bx, by + 1, bz) || LavaPredictor.ceilingBlocked((World)world, bx, by, bz);
+            return new Threat(dh, Math.sqrt(dh * dh + (p.y - py) * (p.y - py)), i, bearing, escape, bx, by, bz, blocked, lava);
         }
         return null;
     }
+
     private static Vec3d horizontalDir(double px, double pz, BlockPos target) {
-        if (target == null) return null;
-        double dx = target.getX() - px;
-        double dz = target.getZ() - pz;
-        double len = Math.hypot(dx, dz);
-        if (len < 1.0) return null;
+        double dz;
+        if (target == null) {
+            return null;
+        }
+        double dx = (double)target.getX() - px;
+        double len = Math.hypot(dx, dz = (double)target.getZ() - pz);
+        if (len < 1.0) {
+            return null;
+        }
         return new Vec3d(dx / len, 0.0, dz / len);
     }
+
     private static int lavaNear(World world, int bx, int by, int bz) {
         int count = 0;
-        int r = LAVA_SCAN_RADIUS;
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dz = -r; dz <= r; dz++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    if (isLava(world, new BlockPos(bx + dx, by + dy, bz + dz))) count++;
+        int r = 2;
+        for (int dx = -r; dx <= r; ++dx) {
+            for (int dz = -r; dz <= r; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    if (!LavaPredictor.isLava(world, new BlockPos(bx + dx, by + dy, bz + dz))) continue;
+                    ++count;
                 }
             }
         }
         return count;
     }
+
     private static boolean passable(World world, int x, int y, int z) {
         BlockPos pos = new BlockPos(x, y, z);
-        if (!world.isChunkLoaded(x >> 4, z >> 4)) return true;
-        return world.getBlockState(pos).getCollisionShape(world, pos).isEmpty();
+        if (!world.isChunkLoaded(x >> 4, z >> 4)) {
+            return true;
+        }
+        return world.getBlockState(pos).getCollisionShape((BlockView)world, pos).isEmpty();
     }
+
     private static boolean ceilingBlocked(World world, double x, double y, double z) {
-        int aboveY = (int) Math.floor(y + 1.8) + 1;
-        int baseX = (int) Math.floor(x);
-        int baseZ = (int) Math.floor(z);
-        double offX = x - baseX;
-        double offZ = z - baseZ;
-        List<BlockPos> columns = new ArrayList<>(4);
+        int aboveY = (int)Math.floor(y + 1.8) + 1;
+        int baseX = (int)Math.floor(x);
+        int baseZ = (int)Math.floor(z);
+        double offX = x - (double)baseX;
+        double offZ = z - (double)baseZ;
+        ArrayList<BlockPos> columns = new ArrayList<BlockPos>(4);
         columns.add(new BlockPos(baseX, aboveY, baseZ));
-        if (offX > 0.7) columns.add(new BlockPos(baseX + 1, aboveY, baseZ));
-        else if (offX < 0.3) columns.add(new BlockPos(baseX - 1, aboveY, baseZ));
-        if (offZ > 0.7) columns.add(new BlockPos(baseX, aboveY, baseZ + 1));
-        else if (offZ < 0.3) columns.add(new BlockPos(baseX, aboveY, baseZ - 1));
+        if (offX > 0.7) {
+            columns.add(new BlockPos(baseX + 1, aboveY, baseZ));
+        } else if (offX < 0.3) {
+            columns.add(new BlockPos(baseX - 1, aboveY, baseZ));
+        }
+        if (offZ > 0.7) {
+            columns.add(new BlockPos(baseX, aboveY, baseZ + 1));
+        } else if (offZ < 0.3) {
+            columns.add(new BlockPos(baseX, aboveY, baseZ - 1));
+        }
         for (BlockPos c : columns) {
-            for (int i = 0; i < CEILING_CHECK_BLOCKS; i++) {
+            for (int i = 0; i < 4; ++i) {
                 BlockPos q = c.up(i);
-                if (!world.isChunkLoaded(q.getX() >> 4, q.getZ() >> 4)) continue;
-                if (!world.getBlockState(q).getCollisionShape(world, q).isEmpty()) return true;
+                if (!world.isChunkLoaded(q.getX() >> 4, q.getZ() >> 4) || world.getBlockState(q).getCollisionShape((BlockView)world, q).isEmpty()) continue;
+                return true;
             }
         }
         return false;
     }
+
     private static boolean isLava(World world, BlockPos pos) {
-        if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) return false;
+        if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
+            return false;
+        }
         FluidState fluid = world.getFluidState(pos);
         return fluid.getFluid() == Fluids.LAVA || fluid.getFluid() == Fluids.FLOWING_LAVA;
     }
+
     private Result beginDetour(MinecraftClient mc, Threat t, BlockPos target) {
-        double tox = t.x() + 0.5 - mc.player.getX();
-        double toz = t.z() + 0.5 - mc.player.getZ();
-        double len = Math.max(0.001, Math.hypot(tox, toz));
-        double fx = tox / len;
-        double fz = toz / len;
+        double sideB;
+        double fx;
+        double perpZ;
+        double len;
+        double tox = (double)t.x() + 0.5 - mc.player.getX();
+        double toz = (double)t.z() + 0.5 - mc.player.getZ();
+        double fz = toz / (len = Math.max(0.001, Math.hypot(tox, toz)));
         double perpX = -fz;
-        double perpZ = fx;
-        double sideA = sideScore(mc, perpX, perpZ);
-        double sideB = sideScore(mc, -perpX, -perpZ);
-        double sign = sideA >= sideB ? 1.0 : -1.0;
-        detourX = (int) Math.floor(t.x() + perpX * sign * lateralDistance);
-        detourZ = (int) Math.floor(t.z() + perpZ * sign * lateralDistance);
-        originalTargetX = target != null ? target.getX() : t.x();
-        originalTargetZ = target != null ? target.getZ() : t.z();
-        originalTargetValid = true;
-        detourTicks = 0;
-        detourIssued = BaritoneHook.pathTo(detourX, detourZ);
-        if (!detourIssued) {
-            cooldown = cooldownTicks;
-            lastResult = Result.WATCHING;
-            FOElytraLog.warn("岩浆预测：%.1f 秒后要撞上岩浆（%d %d %d），但没有可用的 Baritone 可插绕行航点"
-                    + "→ 本 tick 只预警（等它更近时会改走紧急规避）",
-                t.etaTicks() / 20.0, t.x(), t.y(), t.z());
-            return lastResult;
+        double sideA = this.sideScore(mc, perpX, perpZ = (fx = tox / len));
+        double sign = sideA >= (sideB = this.sideScore(mc, -perpX, -perpZ)) ? 1.0 : -1.0;
+        this.detourX = (int)Math.floor((double)t.x() + perpX * sign * (double)this.lateralDistance);
+        this.detourZ = (int)Math.floor((double)t.z() + perpZ * sign * (double)this.lateralDistance);
+        this.originalTargetX = target != null ? target.getX() : t.x();
+        this.originalTargetZ = target != null ? target.getZ() : t.z();
+        this.originalTargetValid = true;
+        this.detourTicks = 0;
+        this.detourIssued = BaritoneHook.pathTo(this.detourX, this.detourZ);
+        if (!this.detourIssued) {
+            this.cooldown = this.cooldownTicks;
+            this.lastResult = Result.WATCHING;
+            FOElytraLog.warn("\u5ca9\u6d46\u9884\u6d4b\uff1a%.1f \u79d2\u540e\u8981\u649e\u4e0a\u5ca9\u6d46\uff08%d %d %d\uff09\uff0c\u4f46\u6ca1\u6709\u53ef\u7528\u7684 Baritone \u53ef\u63d2\u7ed5\u884c\u822a\u70b9\u2192 \u672c tick \u53ea\u9884\u8b66\uff08\u7b49\u5b83\u66f4\u8fd1\u65f6\u4f1a\u6539\u8d70\u7d27\u6025\u89c4\u907f\uff09", (double)t.etaTicks() / 20.0, t.x(), t.y(), t.z());
+            return this.lastResult;
         }
-        avoiding = true;
-        detourCount++;
-        lastResult = Result.DETOUR;
-        FOElytraLog.warn("【实验性】岩浆预测：%.1f 秒后要撞上岩浆（%d %d %d，地平距 %.0f 格）"
-                + "→ 侧向绕行到 %d %d（侧偏 %d 格，已交给 Baritone 自己规划）",
-            t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(),
-            detourX, detourZ, lateralDistance);
-        FOElytraLog.detail("岩浆绕行明细：方位 %.0f°｜采样 %d 格岩浆｜绕行侧评分 %.1f vs %.1f｜"
-                + "上方通不过 %s｜预测时长 %d tick",
-            t.bearingYaw(), t.lavaSamples(), sideA, sideB, t.blockedAbove() ? "是" : "否", horizonTicks);
-        return lastResult;
+        this.avoiding = true;
+        ++this.detourCount;
+        this.lastResult = Result.DETOUR;
+        FOElytraLog.warn("\u3010\u5b9e\u9a8c\u6027\u3011\u5ca9\u6d46\u9884\u6d4b\uff1a%.1f \u79d2\u540e\u8981\u649e\u4e0a\u5ca9\u6d46\uff08%d %d %d\uff0c\u5730\u5e73\u8ddd %.0f \u683c\uff09\u2192 \u4fa7\u5411\u7ed5\u884c\u5230 %d %d\uff08\u4fa7\u504f %d \u683c\uff0c\u5df2\u4ea4\u7ed9 Baritone \u81ea\u5df1\u89c4\u5212\uff09", (double)t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(), this.detourX, this.detourZ, this.lateralDistance);
+        FOElytraLog.detail("\u5ca9\u6d46\u7ed5\u884c\u660e\u7ec6\uff1a\u65b9\u4f4d %.0f\u00b0\uff5c\u91c7\u6837 %d \u683c\u5ca9\u6d46\uff5c\u7ed5\u884c\u4fa7\u8bc4\u5206 %.1f vs %.1f\uff5c\u4e0a\u65b9\u901a\u4e0d\u8fc7 %s\uff5c\u9884\u6d4b\u65f6\u957f %d tick", Float.valueOf(t.bearingYaw()), t.lavaSamples(), sideA, sideB, t.blockedAbove() ? "\u662f" : "\u5426", this.horizonTicks);
+        return this.lastResult;
     }
+
     private double sideScore(MinecraftClient mc, double ux, double uz) {
-        World world = mc.world;
-        double score = 0;
-        for (int s = 4; s <= lateralDistance; s += Math.max(4, lateralDistance / 6)) {
-            int bx = (int) Math.floor(mc.player.getX() + ux * s);
-            int by = (int) Math.floor(mc.player.getY());
-            int bz = (int) Math.floor(mc.player.getZ() + uz * s);
+        ClientWorld world = mc.world;
+        double score = 0.0;
+        for (int s = 4; s <= this.lateralDistance; s += Math.max(4, this.lateralDistance / 6)) {
+            int bx = (int)Math.floor(mc.player.getX() + ux * (double)s);
+            int by = (int)Math.floor(mc.player.getY());
+            int bz = (int)Math.floor(mc.player.getZ() + uz * (double)s);
             if (!world.isChunkLoaded(bx >> 4, bz >> 4)) continue;
-            int lava = lavaNear(world, bx, by, bz);
-            score += 1.0 - Math.min(3, lava);
-            if (!passable(world, bx, by, bz)) score -= 1.5;
-            if (ceilingBlocked(world, bx, by, bz)) score -= 0.5;
+            int lava = LavaPredictor.lavaNear((World)world, bx, by, bz);
+            score += 1.0 - (double)Math.min(3, lava);
+            if (!LavaPredictor.passable((World)world, bx, by, bz)) {
+                score -= 1.5;
+            }
+            if (!LavaPredictor.ceilingBlocked((World)world, bx, by, bz)) continue;
+            score -= 0.5;
         }
         return score;
     }
+
     private Result tickDetour(MinecraftClient mc, Threat t, BlockPos target) {
-        detourTicks++;
-        if (handOffIfInLava(mc)) return Result.IDLE;
+        boolean nearWaypoint;
+        ++this.detourTicks;
+        if (this.handOffIfInLava(mc)) {
+            return Result.IDLE;
+        }
         boolean passed = t == null;
-        boolean nearWaypoint = Math.abs(mc.player.getX() - (detourX + 0.5)) <= returnDistance
-            && Math.abs(mc.player.getZ() - (detourZ + 0.5)) <= returnDistance;
-        if (passed || nearWaypoint || detourTicks > DETOUR_MAX_TICKS) {
-            String why = passed ? "视野内已无岩浆" : (nearWaypoint ? "已到绕行航点附近" : "绕行超时（" + DETOUR_MAX_TICKS + " tick）");
-            int backX = target != null ? target.getX() : (originalTargetValid ? originalTargetX : detourX);
-            int backZ = target != null ? target.getZ() : (originalTargetValid ? originalTargetZ : detourZ);
-            again(backX, backZ, "岩浆绕行结束（" + why + "）→ 回到原目标 " + backX + " " + backZ);
-            return lastResult;
+        boolean bl = nearWaypoint = Math.abs(mc.player.getX() - ((double)this.detourX + 0.5)) <= (double)this.returnDistance && Math.abs(mc.player.getZ() - ((double)this.detourZ + 0.5)) <= (double)this.returnDistance;
+        if (passed || nearWaypoint || this.detourTicks > 400) {
+            String why = passed ? "\u89c6\u91ce\u5185\u5df2\u65e0\u5ca9\u6d46" : (nearWaypoint ? "\u5df2\u5230\u7ed5\u884c\u822a\u70b9\u9644\u8fd1" : "\u7ed5\u884c\u8d85\u65f6\uff08400 tick\uff09");
+            int backX = target != null ? target.getX() : (this.originalTargetValid ? this.originalTargetX : this.detourX);
+            int backZ = target != null ? target.getZ() : (this.originalTargetValid ? this.originalTargetZ : this.detourZ);
+            this.again(backX, backZ, "\u5ca9\u6d46\u7ed5\u884c\u7ed3\u675f\uff08" + why + "\uff09\u2192 \u56de\u5230\u539f\u76ee\u6807 " + backX + " " + backZ);
+            return this.lastResult;
         }
-        lastResult = Result.DETOUR;
-        return lastResult;
+        this.lastResult = Result.DETOUR;
+        return this.lastResult;
     }
+
     private Result beginEmergency(MinecraftClient mc, Threat t, BlockPos target) {
-        originalTargetX = target != null ? target.getX() : t.x();
-        originalTargetZ = target != null ? target.getZ() : t.z();
-        originalTargetValid = true;
-        emergencyTicks = 0;
-        refires = 0;
-        refireCooldown = REFIRE_TICKS;
-        avoiding = true;
-        emergencyCount++;
-        lastResult = Result.EMERGENCY;
-        if (pauseBaritone && !pausedBaritone) {
+        this.originalTargetX = target != null ? target.getX() : t.x();
+        this.originalTargetZ = target != null ? target.getZ() : t.z();
+        this.originalTargetValid = true;
+        this.emergencyTicks = 0;
+        this.avoiding = true;
+        ++this.emergencyCount;
+        this.lastResult = Result.EMERGENCY;
+        if (this.pauseBaritone && !this.pausedBaritone) {
             BaritoneHook.pause();
-            pausedBaritone = true;
+            this.pausedBaritone = true;
         }
-        FOElytraLog.warn("【实验性】岩浆预测：只剩 %.1f 秒就要撞上岩浆（%d %d %d，地平距 %.0f 格）"
-                + "→ 紧急规避（偏转 %.0f°，%s）",
-            t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(), deflectAngle,
-            pausedBaritone ? "已暂停 Baritone" : "没暂停 Baritone（按设置）");
-        applyEmergencyYaw(mc, t.escapeYaw());
-        steerEmergency(mc, t);
-        return lastResult;
+        FOElytraLog.warn("\u3010\u5b9e\u9a8c\u6027\u3011\u5ca9\u6d46\u9884\u6d4b\uff1a\u53ea\u5269 %.1f \u79d2\u5c31\u8981\u649e\u4e0a\u5ca9\u6d46\uff08%d %d %d\uff0c\u5730\u5e73\u8ddd %.0f \u683c\uff09\u2192 \u7d27\u6025\u89c4\u907f\uff08\u504f\u8f6c %.0f\u00b0\uff0c%s\uff09", (double)t.etaTicks() / 20.0, t.x(), t.y(), t.z(), t.horizontalDistance(), Float.valueOf(this.deflectAngle), this.pausedBaritone ? "\u5df2\u6682\u505c Baritone" : "\u6ca1\u6682\u505c Baritone\uff08\u6309\u8bbe\u7f6e\uff09");
+        this.applyEmergencyYaw(mc, t.escapeYaw());
+        this.steerEmergency(mc, t);
+        return this.lastResult;
     }
+
     private Result tickEmergency(MinecraftClient mc, Threat t, BlockPos target) {
-        emergencyTicks++;
-        if (handOffIfInLava(mc)) return Result.IDLE;
+        boolean timeout;
+        ++this.emergencyTicks;
+        if (this.handOffIfInLava(mc)) {
+            return Result.IDLE;
+        }
         boolean safe = t == null;
-        boolean timeout = emergencyTicks > EMERGENCY_MAX_TICKS;
+        boolean bl = timeout = this.emergencyTicks > 80;
         if (safe || timeout) {
-            String why = safe ? "视野内已无岩浆" : "紧急规避超时（" + EMERGENCY_MAX_TICKS + " tick）";
-            int backX = target != null ? target.getX() : (originalTargetValid ? originalTargetX : mc.player.getBlockX());
-            int backZ = target != null ? target.getZ() : (originalTargetValid ? originalTargetZ : mc.player.getBlockZ());
-            again(backX, backZ, "岩浆紧急规避结束（" + why + "）→ 回到原目标 " + backX + " " + backZ);
-            return lastResult;
+            String why = safe ? "\u89c6\u91ce\u5185\u5df2\u65e0\u5ca9\u6d46" : "\u7d27\u6025\u89c4\u907f\u8d85\u65f6\uff0880 tick\uff09";
+            int backX = target != null ? target.getX() : (this.originalTargetValid ? this.originalTargetX : mc.player.getBlockX());
+            int backZ = target != null ? target.getZ() : (this.originalTargetValid ? this.originalTargetZ : mc.player.getBlockZ());
+            this.again(backX, backZ, "\u5ca9\u6d46\u7d27\u6025\u89c4\u907f\u7ed3\u675f\uff08" + why + "\uff09\u2192 \u56de\u5230\u539f\u76ee\u6807 " + backX + " " + backZ);
+            return this.lastResult;
         }
-        applyEmergencyYaw(mc, t.escapeYaw());
-        steerEmergency(mc, t);
-        return lastResult;
+        this.applyEmergencyYaw(mc, t.escapeYaw());
+        this.steerEmergency(mc, t);
+        return this.lastResult;
     }
+
     private boolean handOffIfInLava(MinecraftClient mc) {
-        if (!mc.player.isInLava()) return false;
-        releaseAvoidKeys();
-        if (pausedBaritone) {
-            BaritoneHook.resume();
-            pausedBaritone = false;
+        if (!mc.player.isInLava()) {
+            return false;
         }
-        avoiding = false;
-        cooldown = 0;
-        lastResult = Result.IDLE;
-        FOElytraLog.warn("岩浆预测：已进入岩浆 → 规避交给「逃离岩浆」（事后自救），本类不再接管");
+        this.releaseAvoidKeys();
+        if (this.pausedBaritone) {
+            BaritoneHook.resume();
+            this.pausedBaritone = false;
+        }
+        this.avoiding = false;
+        this.cooldown = 0;
+        this.lastResult = Result.IDLE;
+        FOElytraLog.warn("\u5ca9\u6d46\u9884\u6d4b\uff1a\u5df2\u8fdb\u5165\u5ca9\u6d46 \u2192 \u89c4\u907f\u4ea4\u7ed9\u300c\u9003\u79bb\u5ca9\u6d46\u300d\uff08\u4e8b\u540e\u81ea\u6551\uff09\uff0c\u672c\u7c7b\u4e0d\u518d\u63a5\u7ba1", new Object[0]);
         return true;
     }
+
     private void applyEmergencyYaw(MinecraftClient mc, float escapeYaw) {
-        float left = wrap(escapeYaw + deflectAngle * 0.5f);
-        float right = wrap(escapeYaw - deflectAngle * 0.5f);
-        float chosen = sideScore(mc, yawDirX(left), yawDirZ(left)) >= sideScore(mc, yawDirX(right), yawDirZ(right))
-            ? left : right;
+        float left = LavaPredictor.wrap(escapeYaw + this.deflectAngle * 0.5f);
+        float right = LavaPredictor.wrap(escapeYaw - this.deflectAngle * 0.5f);
+        float chosen = this.sideScore(mc, LavaPredictor.yawDirX(left), LavaPredictor.yawDirZ(left)) >= this.sideScore(mc, LavaPredictor.yawDirX(right), LavaPredictor.yawDirZ(right)) ? left : right;
         mc.player.setYaw(chosen);
-        boolean blockedAbove = ceilingBlocked(mc.world, mc.player.getX(), mc.player.getY(), mc.player.getZ());
-        float pitch = blockedAbove ? EMERGENCY_PITCH_BLOCKED : EMERGENCY_PITCH_MAX;
-        mc.player.setPitch(Math.max(EMERGENCY_PITCH_MIN, Math.min(EMERGENCY_PITCH_MAX, pitch)));
+        boolean blockedAbove = LavaPredictor.ceilingBlocked((World)mc.world, mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        float pitch = blockedAbove ? -5.0f : 10.0f;
+        mc.player.setPitch(Math.max(-35.0f, Math.min(10.0f, pitch)));
     }
+
     private void steerEmergency(MinecraftClient mc, Threat t) {
         PlayerAction.pressForward(true);
-        if (mc.player.isInLava() || mc.player.isTouchingWater()) PlayerAction.pressJump(true);
-        if (--refireCooldown <= 0) {
-            refireCooldown = REFIRE_TICKS;
-            if (mc.player.isGliding() && refires < REFIRE_MAX) {
-                refires++;
-                int slot = fireworkSlot(mc);
-                if (slot >= 0) {
-                    mc.player.getInventory().setSelectedSlot(slot);
-                    if (mc.getNetworkHandler() != null) {
-                        try {
-                            mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(slot));
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                    InvHelper.useItem(Hand.MAIN_HAND);
-                    FOElytraLog.detail("岩浆紧急规避：补射一发烟花（快捷栏第 %d 格，第 %d/%d 发）",
-                        slot + 1, refires, REFIRE_MAX);
-                }
-            }
+        if (mc.player.isInLava() || mc.player.isTouchingWater()) {
+            PlayerAction.pressJump(true);
         }
     }
+
     private void again(int targetX, int targetZ, String message) {
-        releaseAvoidKeys();
-        if (pausedBaritone) {
+        this.releaseAvoidKeys();
+        if (this.pausedBaritone) {
             BaritoneHook.resume();
-            pausedBaritone = false;
+            this.pausedBaritone = false;
         }
-        avoiding = false;
-        cooldown = cooldownTicks;
-        lastResult = Result.IDLE;
+        this.avoiding = false;
+        this.cooldown = this.cooldownTicks;
+        this.lastResult = Result.IDLE;
         FOElytraLog.info("%s", message);
         BaritoneHook.pathTo(targetX, targetZ);
     }
+
     public void reset() {
-        releaseAvoidKeys();
-        if (pausedBaritone) {
+        this.releaseAvoidKeys();
+        if (this.pausedBaritone) {
             BaritoneHook.resume();
-            pausedBaritone = false;
+            this.pausedBaritone = false;
         }
-        avoiding = false;
-        threat = null;
-        lastResult = Result.IDLE;
-        cooldown = 0;
-        warnCooldown = 0;
-       emergencyTicks = 0;
-        detourTicks = 0;
-        detourIssued = false;
-        refires = 0;
-        refireCooldown = 0;
-        originalTargetValid = false;
+        this.avoiding = false;
+        this.threat = null;
+        this.lastResult = Result.IDLE;
+        this.cooldown = 0;
+        this.warnCooldown = 0;
+        this.emergencyTicks = 0;
+        this.detourTicks = 0;
+        this.detourIssued = false;
+        this.originalTargetValid = false;
     }
+
     public void release(MinecraftClient mc) {
-        reset();
+        this.reset();
     }
+
     private void releaseAvoidKeys() {
         PlayerAction.pressForward(false);
         PlayerAction.pressJump(false);
     }
-    private static int fireworkSlot(MinecraftClient mc) {
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isOf(Items.FIREWORK_ROCKET)) return i;
-        }
-        return -1;
-    }
+
     private static float wrap(float yaw) {
         return (yaw % 360.0f + 360.0f) % 360.0f;
     }
+
     private static double yawDirX(float yaw) {
         return -Math.sin(Math.toRadians(yaw));
     }
+
     private static double yawDirZ(float yaw) {
         return Math.cos(Math.toRadians(yaw));
     }
+
     public static List<String[]> recommendedSettings() {
-        List<String[]> out = new ArrayList<>();
-        out.add(new String[]{"启用岩浆预测规避",
-            "实验性：沿当前飞行方向预测 1.5~4 秒，提前绕开岩浆柱/岩浆湖。"
-                + "预测可能误判（改成爬升、绕山、临时改航点都会让它算错），误判的表现是「多绕一点路」，"
-                + "不会掉血、不会登出；想先观察就先只用「只预警不接管」。", "关", "开/关"});
-        out.add(new String[]{"预测时长（秒）",
-            "往前预测多少秒的飞行轨迹。太短来不及绕，太长容易把远处的岩浆湖也当成威胁。", "3.0", "1.5 ~ 4.0"});
-        out.add(new String[]{"紧急阈值（秒）",
-            "预计在这个时间内撞上岩浆就改用「紧急规避」（暂停 Baritone + 偏转视角 + 放烟花）；"
-                + "更早发现的威胁走「侧向绕行」（插一个航点交给 Baritone 自己规划）。", "1.2", "0.4 ~ 2.0"});
-        out.add(new String[]{"侧向绕行距离",
-            "绕行航点离危险点往侧面偏多少格。越大越安全、也越绕路。", "45", "16 ~ 96"});
-        out.add(new String[]{"绕行结束距离",
-            "离绕行航点多近就算绕过这一段（也可以靠「前方预测变干净」提前结束）。", "25", "8 ~ 64"});
-        out.add(new String[]{"规避防抖 tick",
-            "两次规避动作之间至少间隔多少 tick，防止在岩浆边缘反复触发。", "40", "10 ~ 200"});
-        out.add(new String[]{"只预警不接管",
-            "只把预测结果写进日志/聊天栏，不改 Baritone 航点、不碰按键（用来先验证预测准不准）。", "关", "开/关"});
-        out.add(new String[]{"紧急时暂停 Baritone",
-            "紧急规避期间暂停 Baritone（p），脱离后恢复（r）——不暂停的话它会和我们抢视角。", "开", "开/关"});
-        out.add(new String[]{"紧急偏转角（度）",
-            "紧急规避时相对「岩浆反方向」再左右偏多少度，用来在两侧里挑一条更干净的出路。", "75", "30 ~ 90"});
+        ArrayList<String[]> out = new ArrayList<String[]>();
+        out.add(new String[]{"\u542f\u7528\u5ca9\u6d46\u9884\u6d4b\u89c4\u907f", "\u5b9e\u9a8c\u6027\uff1a\u6cbf\u5f53\u524d\u98de\u884c\u65b9\u5411\u9884\u6d4b 1.5~4 \u79d2\uff0c\u63d0\u524d\u7ed5\u5f00\u5ca9\u6d46\u67f1/\u5ca9\u6d46\u6e56\u3002\u9884\u6d4b\u53ef\u80fd\u8bef\u5224\uff08\u6539\u6210\u722c\u5347\u3001\u7ed5\u5c71\u3001\u4e34\u65f6\u6539\u822a\u70b9\u90fd\u4f1a\u8ba9\u5b83\u7b97\u9519\uff09\uff0c\u8bef\u5224\u7684\u8868\u73b0\u662f\u300c\u591a\u7ed5\u4e00\u70b9\u8def\u300d\uff0c\u4e0d\u4f1a\u6389\u8840\u3001\u4e0d\u4f1a\u767b\u51fa\uff1b\u60f3\u5148\u89c2\u5bdf\u5c31\u5148\u53ea\u7528\u300c\u53ea\u9884\u8b66\u4e0d\u63a5\u7ba1\u300d\u3002", "\u5173", "\u5f00/\u5173"});
+        out.add(new String[]{"\u9884\u6d4b\u65f6\u957f\uff08\u79d2\uff09", "\u5f80\u524d\u9884\u6d4b\u591a\u5c11\u79d2\u7684\u98de\u884c\u8f68\u8ff9\u3002\u592a\u77ed\u6765\u4e0d\u53ca\u7ed5\uff0c\u592a\u957f\u5bb9\u6613\u628a\u8fdc\u5904\u7684\u5ca9\u6d46\u6e56\u4e5f\u5f53\u6210\u5a01\u80c1\u3002", "3.0", "1.5 ~ 4.0"});
+        out.add(new String[]{"\u7d27\u6025\u9608\u503c\uff08\u79d2\uff09", "\u9884\u8ba1\u5728\u8fd9\u4e2a\u65f6\u95f4\u5185\u649e\u4e0a\u5ca9\u6d46\u5c31\u6539\u7528\u300c\u7d27\u6025\u89c4\u907f\u300d\uff08\u6682\u505c Baritone + \u504f\u8f6c\u89c6\u89d2 + \u653e\u70df\u82b1\uff09\uff1b\u66f4\u65e9\u53d1\u73b0\u7684\u5a01\u80c1\u8d70\u300c\u4fa7\u5411\u7ed5\u884c\u300d\uff08\u63d2\u4e00\u4e2a\u822a\u70b9\u4ea4\u7ed9 Baritone \u81ea\u5df1\u89c4\u5212\uff09\u3002", "1.2", "0.4 ~ 2.0"});
+        out.add(new String[]{"\u4fa7\u5411\u7ed5\u884c\u8ddd\u79bb", "\u7ed5\u884c\u822a\u70b9\u79bb\u5371\u9669\u70b9\u5f80\u4fa7\u9762\u504f\u591a\u5c11\u683c\u3002\u8d8a\u5927\u8d8a\u5b89\u5168\u3001\u4e5f\u8d8a\u7ed5\u8def\u3002", "45", "16 ~ 96"});
+        out.add(new String[]{"\u7ed5\u884c\u7ed3\u675f\u8ddd\u79bb", "\u79bb\u7ed5\u884c\u822a\u70b9\u591a\u8fd1\u5c31\u7b97\u7ed5\u8fc7\u8fd9\u4e00\u6bb5\uff08\u4e5f\u53ef\u4ee5\u9760\u300c\u524d\u65b9\u9884\u6d4b\u53d8\u5e72\u51c0\u300d\u63d0\u524d\u7ed3\u675f\uff09\u3002", "25", "8 ~ 64"});
+        out.add(new String[]{"\u89c4\u907f\u9632\u6296 tick", "\u4e24\u6b21\u89c4\u907f\u52a8\u4f5c\u4e4b\u95f4\u81f3\u5c11\u95f4\u9694\u591a\u5c11 tick\uff0c\u9632\u6b62\u5728\u5ca9\u6d46\u8fb9\u7f18\u53cd\u590d\u89e6\u53d1\u3002", "40", "10 ~ 200"});
+        out.add(new String[]{"\u53ea\u9884\u8b66\u4e0d\u63a5\u7ba1", "\u53ea\u628a\u9884\u6d4b\u7ed3\u679c\u5199\u8fdb\u65e5\u5fd7/\u804a\u5929\u680f\uff0c\u4e0d\u6539 Baritone \u822a\u70b9\u3001\u4e0d\u78b0\u6309\u952e\uff08\u7528\u6765\u5148\u9a8c\u8bc1\u9884\u6d4b\u51c6\u4e0d\u51c6\uff09\u3002", "\u5173", "\u5f00/\u5173"});
+        out.add(new String[]{"\u7d27\u6025\u65f6\u6682\u505c Baritone", "\u7d27\u6025\u89c4\u907f\u671f\u95f4\u6682\u505c Baritone\uff08p\uff09\uff0c\u8131\u79bb\u540e\u6062\u590d\uff08r\uff09\u2014\u2014\u4e0d\u6682\u505c\u7684\u8bdd\u5b83\u4f1a\u548c\u6211\u4eec\u62a2\u89c6\u89d2\u3002", "\u5f00", "\u5f00/\u5173"});
+        out.add(new String[]{"\u7d27\u6025\u504f\u8f6c\u89d2\uff08\u5ea6\uff09", "\u7d27\u6025\u89c4\u907f\u65f6\u76f8\u5bf9\u300c\u5ca9\u6d46\u53cd\u65b9\u5411\u300d\u518d\u5de6\u53f3\u504f\u591a\u5c11\u5ea6\uff0c\u7528\u6765\u5728\u4e24\u4fa7\u91cc\u6311\u4e00\u6761\u66f4\u5e72\u51c0\u7684\u51fa\u8def\u3002", "75", "30 ~ 90"});
         return out;
     }
+
+    public static enum Result {
+        IDLE("\u7a7a\u95f2"),
+        WATCHING("\u89c2\u5bdf\u4e2d"),
+        WARN_ONLY("\u4ec5\u8b66\u544a"),
+        DETOUR("\u7ed5\u884c"),
+        EMERGENCY("\u7d27\u6025");
+
+
+        private final String label;
+
+        Result(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    public record Options(boolean enabled, double horizonSeconds, double urgentSeconds, int lateralDistance, int returnDistance, int cooldownTicks, boolean warnOnly, boolean pauseBaritone, double deflectAngle) {
+    }
+
+    public record Threat(double horizontalDistance, double distance, int etaTicks, float bearingYaw, float escapeYaw, int x, int y, int z, boolean blockedAbove, int lavaSamples) {
+    }
 }
+

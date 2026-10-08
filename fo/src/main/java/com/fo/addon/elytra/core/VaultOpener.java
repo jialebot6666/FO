@@ -1,26 +1,14 @@
 package com.fo.addon.elytra.core;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.VaultBlock;
-import net.minecraft.block.entity.VaultBlockEntity;
-import net.minecraft.block.enums.VaultState;
-import net.minecraft.block.vault.VaultConfig;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.component.DataComponentTypes;
-import net.minecraft.component.type.ItemEnchantmentsComponent;
-import net.minecraft.enchantment.Enchantment;
-import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.effect.StatusEffect;
-import net.minecraft.entity.effect.StatusEffects;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.registry.entry.RegistryEntry;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+
+import com.fo.addon.elytra.core.BaritoneHook;
+import com.fo.addon.elytra.core.FOElytraLog;
+import com.fo.addon.elytra.core.InvHelper;
+import com.fo.addon.elytra.core.ItemHelper;
+import com.fo.addon.elytra.core.PlayerAction;
+import com.fo.addon.elytra.core.TaskStatus;
+import java.lang.invoke.CallSite;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -31,40 +19,33 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.VaultBlock;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.VaultBlockEntity;
+import net.minecraft.block.enums.VaultState;
+import net.minecraft.block.vault.VaultConfig;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.state.property.Property;
+import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3i;
+
 public final class VaultOpener {
-    public record Options(
-        int searchRadius, double openDistance, int openWaitTicks, int maxVaultsPerRun,
-        boolean needOminous,
-        List<Item> targetItems,
-        List<Identifier> targetEnchantments,
-        boolean stopOnTarget, boolean drinkOminousBottle, boolean useBaritoneWalk, int actionDelay,
-        Predicate<BlockPos> candidateFilter,
-        Consumer<BlockPos> onOpened) {}
-    public enum State {
-        IDLE("空闲"),
-        SCAN("扫描宝库"),
-        EQUIP("换钥匙"),
-        WALK("走近"),
-        OPEN("开库"),
-        COLLECT("收取战利品"),
-        NEXT("下一个"),
-        DRINK("喝药水"),
-        FINISH("收尾"),
-        DONE("完成"),
-        FAILED("失败");
-
-        public final String label;
-
-        State(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString，必须覆写否则显示英文枚举名） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
     private static final int WALK_TIMEOUT_TICKS = 600;
     private static final int WALK_REPATH_TICKS = 100;
     private static final int COLLECT_MIN_TICKS = 90;
@@ -98,10 +79,10 @@ public final class VaultOpener {
     private TaskStatus status = TaskStatus.IDLE;
     private String failReason = "";
     private String lastMessage = "";
-    private final List<String> lootLog = new ArrayList<>();
+    private final List<String> lootLog = new ArrayList<String>();
     private boolean foundTarget;
     private int openedCount;
-    private final Set<BlockPos> openedPositions = new LinkedHashSet<>();
+    private final Set<BlockPos> openedPositions = new LinkedHashSet<BlockPos>();
     private int delay;
     private BlockPos targetVault;
     private boolean targetOminous;
@@ -111,19 +92,19 @@ public final class VaultOpener {
     private int spawnedCount;
     private int collectTicks;
     private int screenWaitTicks;
-    private final Set<ItemEntity> seenItems = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-    private final Set<String> seenKeys = new HashSet<>();
+    private final Set<ItemEntity> seenItems = Collections.newSetFromMap(new IdentityHashMap());
+    private final Set<String> seenKeys = new HashSet<String>();
     private int sinceLastSpawn;
-    private final Map<Item, Integer> itemCountBaseline = new LinkedHashMap<>();
+    private final Map<Item, Integer> itemCountBaseline = new LinkedHashMap<Item, Integer>();
     private int targetBookBaseline;
     private boolean targetBookPickup;
-    private final Set<String> targetEvidence = new LinkedHashSet<>();
+    private final Set<String> targetEvidence = new LinkedHashSet<String>();
     private int walkTicks;
     private int repathTicks;
     private int keyCheckFails;
     private double requiredOpenDistance;
     private int closeInAttempts;
-    private final Map<BlockPos, Integer> unreachableFailures = new LinkedHashMap<>();
+    private final Map<BlockPos, Integer> unreachableFailures = new LinkedHashMap<BlockPos, Integer>();
     private int softSkipCount;
     private boolean retryingSoftSkipped;
     private int drinkAttempts;
@@ -151,1211 +132,1344 @@ public final class VaultOpener {
     private int scanChecked;
     private int scanSkippedUnloaded;
     private int scanTicks;
-    private final List<BlockPos> scanCandidates = new ArrayList<>();
-    private final Set<Long> scanCandidateKeys = new HashSet<>();
-    private final Set<Long> filteredCandidateKeys = new LinkedHashSet<>();
-    private final Set<Long> roundFilteredCandidateKeys = new LinkedHashSet<>();
+    private final List<BlockPos> scanCandidates = new ArrayList<BlockPos>();
+    private final Set<Long> scanCandidateKeys = new HashSet<Long>();
+    private final Set<Long> filteredCandidateKeys = new LinkedHashSet<Long>();
+    private final Set<Long> roundFilteredCandidateKeys = new LinkedHashSet<Long>();
     private int scanChunkX = Integer.MIN_VALUE;
     private int scanChunkZ = Integer.MIN_VALUE;
     private boolean scanChunkLoadedFlag;
+
     public VaultOpener(Options opts) {
         this.opts = opts;
-        this.targetItems = copyItems(opts.targetItems());
-        this.targetEnchantments = copyIds(opts.targetEnchantments());
+        this.targetItems = VaultOpener.copyItems(opts.targetItems());
+        this.targetEnchantments = VaultOpener.copyIds(opts.targetEnchantments());
         this.candidateFilter = opts.candidateFilter();
         this.onOpened = opts.onOpened();
     }
+
     private static List<Item> copyItems(List<Item> in) {
-        if (in == null || in.isEmpty()) return List.of();
-        List<Item> out = new ArrayList<>(in.size());
+        if (in == null || in.isEmpty()) {
+            return List.of();
+        }
+        ArrayList<Item> out = new ArrayList<Item>(in.size());
         for (Item it : in) {
-            if (it != null && !out.contains(it)) out.add(it);
+            if (it == null || out.contains(it)) continue;
+            out.add(it);
         }
         return List.copyOf(out);
     }
+
     private static List<Identifier> copyIds(List<Identifier> in) {
-        if (in == null || in.isEmpty()) return List.of();
-        List<Identifier> out = new ArrayList<>(in.size());
+        if (in == null || in.isEmpty()) {
+            return List.of();
+        }
+        ArrayList<Identifier> out = new ArrayList<Identifier>(in.size());
         for (Identifier id : in) {
-            if (id != null && !out.contains(id)) out.add(id);
+            if (id == null || out.contains(id)) continue;
+            out.add(id);
         }
         return List.copyOf(out);
     }
+
     public void start() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.world == null) {
-            fail("玩家/世界为空，无法寻找宝库");
+            this.fail("\u73a9\u5bb6/\u4e16\u754c\u4e3a\u7a7a\uff0c\u65e0\u6cd5\u5bfb\u627e\u5b9d\u5e93");
             return;
         }
-        lootLog.clear();
-        openedPositions.clear();
-        foundTarget = false;
-        openedCount = 0;
-        failReason = "";
-        lastMessage = "";
-        delay = 0;
-        targetVault = null;
-        targetOminous = false;
-        openAttempts = 0;
-        clickedThisVault = false;
-        inactiveRecheckTicks = 0;
-        spawnedCount = 0;
-        collectTicks = 0;
-        sinceLastSpawn = 0;
-        screenWaitTicks = 0;
-        seenItems.clear();
-        seenKeys.clear();
-        targetEvidence.clear();
-        itemCountBaseline.clear();
-        targetBookBaseline = 0;
-        targetBookPickup = false;
-        filteredCandidateKeys.clear();
-        resetScanState();
-        walkTicks = 0;
-        repathTicks = 0;
-        keyCheckFails = 0;
-        closeInAttempts = 0;
-        requiredOpenDistance = opts.openDistance();
-        unreachableFailures.clear();
-        softSkipCount = 0;
-        retryingSoftSkipped = false;
-        drinkAttempts = 0;
-        drinkWaitTicks = 0;
-        holdingUse = false;
-        holdUseTicks = 0;
-        pendingFail = false;
-        keyConfigWarned = false;
-        chunkLoadWarned = false;
-        lootBox = null;
-        lootBoxVault = null;
-        status = TaskStatus.RUNNING;
-        logConfiguredTargets();
-        if (opts.needOminous() && opts.drinkOminousBottle()) {
-            next(State.DRINK, 0);
+        this.lootLog.clear();
+        this.openedPositions.clear();
+        this.foundTarget = false;
+        this.openedCount = 0;
+        this.failReason = "";
+        this.lastMessage = "";
+        this.delay = 0;
+        this.targetVault = null;
+        this.targetOminous = false;
+        this.openAttempts = 0;
+        this.clickedThisVault = false;
+        this.inactiveRecheckTicks = 0;
+        this.spawnedCount = 0;
+        this.collectTicks = 0;
+        this.sinceLastSpawn = 0;
+        this.screenWaitTicks = 0;
+        this.seenItems.clear();
+        this.seenKeys.clear();
+        this.targetEvidence.clear();
+        this.itemCountBaseline.clear();
+        this.targetBookBaseline = 0;
+        this.targetBookPickup = false;
+        this.filteredCandidateKeys.clear();
+        this.resetScanState();
+        this.walkTicks = 0;
+        this.repathTicks = 0;
+        this.keyCheckFails = 0;
+        this.closeInAttempts = 0;
+        this.requiredOpenDistance = this.opts.openDistance();
+        this.unreachableFailures.clear();
+        this.softSkipCount = 0;
+        this.retryingSoftSkipped = false;
+        this.drinkAttempts = 0;
+        this.drinkWaitTicks = 0;
+        this.holdingUse = false;
+        this.holdUseTicks = 0;
+        this.pendingFail = false;
+        this.keyConfigWarned = false;
+        this.chunkLoadWarned = false;
+        this.lootBox = null;
+        this.lootBoxVault = null;
+        this.status = TaskStatus.RUNNING;
+        this.logConfiguredTargets();
+        if (this.opts.needOminous() && this.opts.drinkOminousBottle()) {
+            this.next(State.DRINK, 0);
         } else {
-            next(State.SCAN, 0);
+            this.next(State.SCAN, 0);
         }
-        FOElytraLog.info("开始找宝库：半径 %d，%s，最多开 %d 个，收集时长 %d tick（设置原文 %d）",
-            opts.searchRadius(), opts.needOminous() ? "只找不祥宝库" : "普通/不祥都行",
-            opts.maxVaultsPerRun(), effectiveCollectTicks(), opts.openWaitTicks());
+        FOElytraLog.info("\u5f00\u59cb\u627e\u5b9d\u5e93\uff1a\u534a\u5f84 %d\uff0c%s\uff0c\u6700\u591a\u5f00 %d \u4e2a\uff0c\u6536\u96c6\u65f6\u957f %d tick\uff08\u8bbe\u7f6e\u539f\u6587 %d\uff09", this.opts.searchRadius(), this.opts.needOminous() ? "\u53ea\u627e\u4e0d\u7965\u5b9d\u5e93" : "\u666e\u901a/\u4e0d\u7965\u90fd\u884c", this.opts.maxVaultsPerRun(), this.effectiveCollectTicks(), this.opts.openWaitTicks());
     }
+
     private void logConfiguredTargets() {
-        if (targetItems.isEmpty() && targetEnchantments.isEmpty()) {
-            FOElytraLog.warn("没有配置任何目标战利品（目标物品与目标魔咒都是空的）："
-                + "本次只会记录每个宝库喷了什么，不会判定「命中」");
+        if (this.targetItems.isEmpty() && this.targetEnchantments.isEmpty()) {
+            FOElytraLog.warn("\u6ca1\u6709\u914d\u7f6e\u4efb\u4f55\u76ee\u6807\u6218\u5229\u54c1\uff08\u76ee\u6807\u7269\u54c1\u4e0e\u76ee\u6807\u9b54\u5492\u90fd\u662f\u7a7a\u7684\uff09\uff1a\u672c\u6b21\u53ea\u4f1a\u8bb0\u5f55\u6bcf\u4e2a\u5b9d\u5e93\u55b7\u4e86\u4ec0\u4e48\uff0c\u4e0d\u4f1a\u5224\u5b9a\u300c\u547d\u4e2d\u300d", new Object[0]);
             return;
         }
-        List<String> names = new ArrayList<>();
-        for (Item it : targetItems) names.add(it.getName().getString());
-        for (Identifier id : targetEnchantments) names.add("附魔书[" + id.getPath() + "]");
-        FOElytraLog.detail("目标战利品：%s（物品 %d 种 / 魔咒 %d 个）",
-            String.join("、", names), targetItems.size(), targetEnchantments.size());
+        ArrayList<String> names = new ArrayList<String>();
+        for (Item it : this.targetItems) {
+            names.add(it.getName().getString());
+        }
+        for (Identifier id : this.targetEnchantments) {
+            names.add("\u9644\u9b54\u4e66[" + id.getPath() + "]");
+        }
+        FOElytraLog.detail("\u76ee\u6807\u6218\u5229\u54c1\uff1a%s\uff08\u7269\u54c1 %d \u79cd / \u9b54\u5492 %d \u4e2a\uff09", String.join((CharSequence)"\u3001", names), this.targetItems.size(), this.targetEnchantments.size());
     }
+
     public void abort(String reason) {
-        if (BaritoneHook.ready()) BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
+        if (BaritoneHook.ready()) {
+            BaritoneHook.stop();
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
-        holdingUse = false;
-        holdUseTicks = 0;
-        if (state != State.IDLE) FOElytraLog.warn("宝库流程中止：%s", reason);
-        state = State.IDLE;
-        status = TaskStatus.IDLE;
-        delay = 0;
-        targetVault = null;
-        lootBox = null;
-        lootBoxVault = null;
-        resetScanState();
+        this.holdingUse = false;
+        this.holdUseTicks = 0;
+        if (this.state != State.IDLE) {
+            FOElytraLog.warn("\u5b9d\u5e93\u6d41\u7a0b\u4e2d\u6b62\uff1a%s", reason);
+        }
+        this.state = State.IDLE;
+        this.status = TaskStatus.IDLE;
+        this.delay = 0;
+        this.targetVault = null;
+        this.lootBox = null;
+        this.lootBoxVault = null;
+        this.resetScanState();
     }
+
     public TaskStatus status() {
-        return status;
+        return this.status;
     }
+
     public State state() {
-        return state;
+        return this.state;
     }
+
     public String progress() {
-        StringBuilder sb = new StringBuilder(state.toString());
-        if (targetVault != null) {
-            sb.append(' ').append(targetVault.toShortString()).append(targetOminous ? "(不祥)" : "(普通)");
+        StringBuilder sb = new StringBuilder(this.state.name());
+        if (this.targetVault != null) {
+            sb.append(' ').append(this.targetVault.toShortString()).append(this.targetOminous ? "(\u4e0d\u7965)" : "(\u666e\u901a)");
         }
-        if (state == State.SCAN && scanActive) {
-            sb.append(" 扫描 ").append(scanDone).append('/').append(scanTotal)
-                .append("（候选 ").append(scanCandidates.size()).append(" 个）");
+        if (this.state == State.SCAN && this.scanActive) {
+            sb.append(" \u626b\u63cf ").append(this.scanDone).append('/').append(this.scanTotal).append("\uff08\u5019\u9009 ").append(this.scanCandidates.size()).append(" \u4e2a\uff09");
         }
-        if (status == TaskStatus.RUNNING) {
-            sb.append(" 已开 ").append(openedCount).append('/').append(opts.maxVaultsPerRun());
-            if (state == State.COLLECT) sb.append(" 已见 ").append(spawnedCount).append(" 件");
-            if (state == State.OPEN) {
-                sb.append(" 右键 ").append(openAttempts).append('/').append(OPEN_MAX_RETRIES);
-                if (inactiveRecheckTicks > 0) {
-                    sb.append(" 等状态刷新 ").append(inactiveRecheckTicks).append('/').append(INACTIVE_RECHECK_TICKS)
-                        .append("（INACTIVE，先不点击）");
+        if (this.status == TaskStatus.RUNNING) {
+            sb.append(" \u5df2\u5f00 ").append(this.openedCount).append('/').append(this.opts.maxVaultsPerRun());
+            if (this.state == State.COLLECT) {
+                sb.append(" \u5df2\u89c1 ").append(this.spawnedCount).append(" \u4ef6");
+            }
+            if (this.state == State.OPEN) {
+                sb.append(" \u53f3\u952e ").append(this.openAttempts).append('/').append(3);
+                if (this.inactiveRecheckTicks > 0) {
+                    sb.append(" \u7b49\u72b6\u6001\u5237\u65b0 ").append(this.inactiveRecheckTicks).append('/').append(30).append("\uff08INACTIVE\uff0c\u5148\u4e0d\u70b9\u51fb\uff09");
                 }
             }
-            if (state == State.WALK && requiredOpenDistance > 0 && requiredOpenDistance < opts.openDistance()) {
-                sb.append(" 走近激活半径 ").append(closeInAttempts).append('/').append(MAX_CLOSE_IN_ATTEMPTS);
+            if (this.state == State.WALK && this.requiredOpenDistance > 0.0 && this.requiredOpenDistance < this.opts.openDistance()) {
+                sb.append(" \u8d70\u8fd1\u6fc0\u6d3b\u534a\u5f84 ").append(this.closeInAttempts).append('/').append(2);
             }
-            if (softSkipCount > 0) {
-                sb.append(" 已软跳过 ").append(unreachableFailures.size()).append(" 个走不到的库");
-                if (retryingSoftSkipped) sb.append("（正在再试一次）");
+            if (this.softSkipCount > 0) {
+                sb.append(" \u5df2\u8f6f\u8df3\u8fc7 ").append(this.unreachableFailures.size()).append(" \u4e2a\u8d70\u4e0d\u5230\u7684\u5e93");
+                if (this.retryingSoftSkipped) {
+                    sb.append("\uff08\u6b63\u5728\u518d\u8bd5\u4e00\u6b21\uff09");
+                }
             }
-            if (!filteredCandidateKeys.isEmpty()) {
-                sb.append(" 已过滤 ").append(filteredCandidateKeys.size()).append(" 个（标记/展示物/刷怪笼）");
+            if (!this.filteredCandidateKeys.isEmpty()) {
+                sb.append(" \u5df2\u8fc7\u6ee4 ").append(this.filteredCandidateKeys.size()).append(" \u4e2a\uff08\u6807\u8bb0/\u5c55\u793a\u7269/\u5237\u602a\u7b3c\uff09");
             }
         }
-        if (!lastMessage.isEmpty()) sb.append(" — ").append(lastMessage);
-        if (status == TaskStatus.FAILED && !failReason.isEmpty()) sb.append("(").append(failReason).append(')');
+        if (!this.lastMessage.isEmpty()) {
+            sb.append(" \u2014 ").append(this.lastMessage);
+        }
+        if (this.status == TaskStatus.FAILED && !this.failReason.isEmpty()) {
+            sb.append("(").append(this.failReason).append(')');
+        }
         return sb.toString();
     }
+
     public String failReason() {
-        return failReason;
+        return this.failReason;
     }
+
     public String lastMessage() {
-        return lastMessage;
+        return this.lastMessage;
     }
+
     public List<String> lootLog() {
-        return java.util.Collections.unmodifiableList(lootLog);
+        return Collections.unmodifiableList(this.lootLog);
     }
+
     public boolean foundTarget() {
-        return foundTarget;
+        return this.foundTarget;
     }
+
     public int openedCount() {
-        return openedCount;
+        return this.openedCount;
     }
+
     public Set<BlockPos> openedPositions() {
-        return openedPositions;
+        return this.openedPositions;
     }
+
     public void tick() {
-        if (status != TaskStatus.RUNNING) return;
-        MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player == null || mc.world == null) {
-            fail("玩家/世界为空");
+        if (this.status != TaskStatus.RUNNING) {
             return;
         }
-        if (delay > 0) {
-            delay--;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || mc.world == null) {
+            this.fail("\u73a9\u5bb6/\u4e16\u754c\u4e3a\u7a7a");
+            return;
+        }
+        if (this.delay > 0) {
+            --this.delay;
             return;
         }
         try {
-            step(mc);
-        } catch (Throwable t) {
-            FOElytraLog.err("宝库流程内部异常: %s", String.valueOf(t));
+            this.step(mc);
+        }
+        catch (Throwable t) {
+            FOElytraLog.err("\u5b9d\u5e93\u6d41\u7a0b\u5185\u90e8\u5f02\u5e38: %s", String.valueOf(t));
             FOElytraLog.detailError("VaultOpener.step", t);
-            fail("内部异常 " + t.getClass().getSimpleName());
+            this.fail("\u5185\u90e8\u5f02\u5e38 " + t.getClass().getSimpleName());
         }
     }
+
     private void step(MinecraftClient mc) {
-        switch (state) {
-            case SCAN -> scan(mc);
-            case EQUIP -> equip(mc);
-            case WALK -> walk(mc);
-            case OPEN -> open(mc);
-            case COLLECT -> collect(mc);
-            case NEXT -> next(mc);
-            case DRINK -> drink(mc);
-            case FINISH -> finish(mc);
-            case DONE -> status = TaskStatus.DONE;
-            case FAILED -> status = TaskStatus.FAILED;
-            default -> status = TaskStatus.DONE;
+        switch (this.state.ordinal()) {
+            case 1: {
+                this.scan(mc);
+                break;
+            }
+            case 2: {
+                this.equip(mc);
+                break;
+            }
+            case 3: {
+                this.walk(mc);
+                break;
+            }
+            case 4: {
+                this.open(mc);
+                break;
+            }
+            case 5: {
+                this.collect(mc);
+                break;
+            }
+            case 6: {
+                this.next(mc);
+                break;
+            }
+            case 7: {
+                this.drink(mc);
+                break;
+            }
+            case 8: {
+                this.finish(mc);
+                break;
+            }
+            case 9: {
+                this.status = TaskStatus.DONE;
+                break;
+            }
+            case 10: {
+                this.status = TaskStatus.FAILED;
+                break;
+            }
+            default: {
+                this.status = TaskStatus.DONE;
+            }
         }
     }
+
     private void scan(MinecraftClient mc) {
-        drinkWaitTicks = 0;
-        drinkAttempts = 0;
-        endUseHold("进入扫描阶段");
-        if (!scanActive) beginScan(mc);
-        scanTicks++;
-        int budget = SCAN_BUDGET_PER_TICK;
+        this.drinkWaitTicks = 0;
+        this.drinkAttempts = 0;
+        this.endUseHold("\u8fdb\u5165\u626b\u63cf\u9636\u6bb5");
+        if (!this.scanActive) {
+            this.beginScan(mc);
+        }
+        ++this.scanTicks;
+        int budget = 6000;
         while (budget > 0) {
-            int x = scanOriginX + scanDx;
-            int y = scanOriginY + scanDyRel;
-            int z = scanOriginZ + scanDz;
-            scanCursor.set(x, y, z);
-            scanDone++;
-            budget--;
-            if (!chunkLoaded(mc, x >> 4, z >> 4)) {
-                scanSkippedUnloaded++;
+            int x = this.scanOriginX + this.scanDx;
+            int y = this.scanOriginY + this.scanDyRel;
+            int z = this.scanOriginZ + this.scanDz;
+            this.scanCursor.set(x, y, z);
+            ++this.scanDone;
+            --budget;
+            if (!this.chunkLoaded(mc, x >> 4, z >> 4)) {
+                ++this.scanSkippedUnloaded;
             } else {
-                scanChecked++;
-                BlockState st = mc.world.getBlockState(scanCursor);
-                if (st.isOf(Blocks.VAULT) && !openedPositions.contains(scanCursor)) {
-                    boolean ominous = Boolean.TRUE.equals(st.get(VaultBlock.OMINOUS));
-                    if (!opts.needOminous() || ominous) {
-                        BlockPos fixed = scanCursor.toImmutable();
-                        if (!rejectedByFilter(fixed) && scanCandidateKeys.add(fixed.asLong())) {
-                            scanCandidates.add(fixed);
-                        }
+                ++this.scanChecked;
+                BlockState st = mc.world.getBlockState((BlockPos)this.scanCursor);
+                if (st.isOf(Blocks.VAULT) && !this.openedPositions.contains(this.scanCursor)) {
+                    BlockPos fixed;
+                    boolean ominous = Boolean.TRUE.equals(st.get((Property)VaultBlock.OMINOUS));
+                    if ((!this.opts.needOminous() || ominous) && !this.rejectedByFilter(fixed = this.scanCursor.toImmutable()) && this.scanCandidateKeys.add(fixed.asLong())) {
+                        this.scanCandidates.add(fixed);
                     }
                 }
             }
-            if (!scanAdvance()) {
-                finishScan(mc);
-                return;
-            }
+            if (this.scanAdvance()) continue;
+            this.finishScan(mc);
+            return;
         }
-        if (scanTicks % SCAN_PROGRESS_LOG_TICKS == 0) {
-            FOElytraLog.detail("SCAN 进度 %d/%d（%.0f%%）第 %d tick：已扫已加载 %d 格、跳过未加载 %d 格，候选宝库 %d 个",
-                scanDone, scanTotal, 100.0 * scanDone / Math.max(1L, scanTotal), scanTicks,
-                scanChecked, scanSkippedUnloaded, scanCandidates.size());
+        if (this.scanTicks % 20 == 0) {
+            FOElytraLog.detail("SCAN \u8fdb\u5ea6 %d/%d\uff08%.0f%%\uff09\u7b2c %d tick\uff1a\u5df2\u626b\u5df2\u52a0\u8f7d %d \u683c\u3001\u8df3\u8fc7\u672a\u52a0\u8f7d %d \u683c\uff0c\u5019\u9009\u5b9d\u5e93 %d \u4e2a", this.scanDone, this.scanTotal, 100.0 * (double)this.scanDone / (double)Math.max(1L, this.scanTotal), this.scanTicks, this.scanChecked, this.scanSkippedUnloaded, this.scanCandidates.size());
         }
-        delay = 0;
+        this.delay = 0;
     }
+
     private void beginScan(MinecraftClient mc) {
+        int yMax;
         BlockPos origin = mc.player.getBlockPos().toImmutable();
-        scanOriginX = origin.getX();
-        scanOriginY = origin.getY();
-        scanOriginZ = origin.getZ();
-        scanRadius = Math.max(1, opts.searchRadius());
-        int yMin = Math.max(SCAN_Y_MIN, scanOriginY - scanRadius);
-        int yMax = Math.min(SCAN_Y_MAX, scanOriginY + scanRadius);
-        if (yMin > yMax) {
-            yMin = Math.max(-64, scanOriginY - SCAN_FALLBACK_HALF);
-            yMax = Math.min(319, scanOriginY + SCAN_FALLBACK_HALF);
-            FOElytraLog.warn("你现在在 Y=%d，不在试炼密室的高度带（%d~%d）里：本次只在 Y=%d~%d 范围内找宝库",
-                scanOriginY, SCAN_Y_MIN, SCAN_Y_MAX, yMin, yMax);
+        this.scanOriginX = origin.getX();
+        this.scanOriginY = origin.getY();
+        this.scanOriginZ = origin.getZ();
+        this.scanRadius = Math.max(1, this.opts.searchRadius());
+        int yMin = Math.max(-40, this.scanOriginY - this.scanRadius);
+        if (yMin > (yMax = Math.min(16, this.scanOriginY + this.scanRadius))) {
+            yMin = Math.max(-64, this.scanOriginY - 8);
+            yMax = Math.min(319, this.scanOriginY + 8);
+            FOElytraLog.warn("\u4f60\u73b0\u5728\u5728 Y=%d\uff0c\u4e0d\u5728\u8bd5\u70bc\u5bc6\u5ba4\u7684\u9ad8\u5ea6\u5e26\uff08%d~%d\uff09\u91cc\uff1a\u672c\u6b21\u53ea\u5728 Y=%d~%d \u8303\u56f4\u5185\u627e\u5b9d\u5e93", this.scanOriginY, -40, 16, yMin, yMax);
         }
-        scanDyMin = yMin - scanOriginY;
-        scanDyMax = yMax - scanOriginY;
-        scanDyRel = scanDyMin;
-        scanDz = -scanRadius;
-        scanDx = -scanRadius;
-        long width = 2L * scanRadius + 1;
-        scanTotal = width * width * (scanDyMax - scanDyMin + 1);
-        scanDone = 0;
-        scanChecked = 0;
-        scanSkippedUnloaded = 0;
-        scanTicks = 0;
-        scanCandidates.clear();
-        scanCandidateKeys.clear();
-        roundFilteredCandidateKeys.clear();
-        scanChunkX = Integer.MIN_VALUE;
-        scanChunkZ = Integer.MIN_VALUE;
-        scanChunkLoadedFlag = false;
-        scanActive = true;
-        FOElytraLog.detail("SCAN 开始：中心 %s，水平半径 %d 格，Y=%d~%d，共 %d 个坐标"
-            + "（每 tick 最多 %d 个，跨 tick 续扫；Y 带与区块加载状态都先过滤）",
-            origin.toShortString(), scanRadius, yMin, yMax, scanTotal, SCAN_BUDGET_PER_TICK);
+        this.scanDyMin = yMin - this.scanOriginY;
+        this.scanDyMax = yMax - this.scanOriginY;
+        this.scanDyRel = this.scanDyMin;
+        this.scanDz = -this.scanRadius;
+        this.scanDx = -this.scanRadius;
+        long width = 2L * (long)this.scanRadius + 1L;
+        this.scanTotal = width * width * (long)(this.scanDyMax - this.scanDyMin + 1);
+        this.scanDone = 0L;
+        this.scanChecked = 0;
+        this.scanSkippedUnloaded = 0;
+        this.scanTicks = 0;
+        this.scanCandidates.clear();
+        this.scanCandidateKeys.clear();
+        this.roundFilteredCandidateKeys.clear();
+        this.scanChunkX = Integer.MIN_VALUE;
+        this.scanChunkZ = Integer.MIN_VALUE;
+        this.scanChunkLoadedFlag = false;
+        this.scanActive = true;
+        FOElytraLog.detail("SCAN \u5f00\u59cb\uff1a\u4e2d\u5fc3 %s\uff0c\u6c34\u5e73\u534a\u5f84 %d \u683c\uff0cY=%d~%d\uff0c\u5171 %d \u4e2a\u5750\u6807\uff08\u6bcf tick \u6700\u591a %d \u4e2a\uff0c\u8de8 tick \u7eed\u626b\uff1bY \u5e26\u4e0e\u533a\u5757\u52a0\u8f7d\u72b6\u6001\u90fd\u5148\u8fc7\u6ee4\uff09", origin.toShortString(), this.scanRadius, yMin, yMax, this.scanTotal, 6000);
     }
+
     private boolean scanAdvance() {
-        scanDx++;
-        if (scanDx <= scanRadius) return true;
-        scanDx = -scanRadius;
-        scanDz++;
-        if (scanDz <= scanRadius) return true;
-        scanDz = -scanRadius;
-        scanDyRel++;
-        return scanDyRel <= scanDyMax;
+        ++this.scanDx;
+        if (this.scanDx <= this.scanRadius) {
+            return true;
+        }
+        this.scanDx = -this.scanRadius;
+        ++this.scanDz;
+        if (this.scanDz <= this.scanRadius) {
+            return true;
+        }
+        this.scanDz = -this.scanRadius;
+        ++this.scanDyRel;
+        return this.scanDyRel <= this.scanDyMax;
     }
+
     private boolean chunkLoaded(MinecraftClient mc, int cx, int cz) {
-        if (cx == scanChunkX && cz == scanChunkZ) return scanChunkLoadedFlag;
         boolean loaded;
-        try {
-            loaded = mc.world.isChunkLoaded(cx, cz);
-        } catch (Throwable t) {
-            loaded = false;
-            if (!chunkLoadWarned) {
-                chunkLoadWarned = true;
+        block3: {
+            if (cx == this.scanChunkX && cz == this.scanChunkZ) {
+                return this.scanChunkLoadedFlag;
+            }
+            try {
+                loaded = mc.world.isChunkLoaded(cx, cz);
+            }
+            catch (Throwable t) {
+                loaded = false;
+                if (this.chunkLoadWarned) break block3;
+                this.chunkLoadWarned = true;
                 FOElytraLog.detailError("VaultOpener.chunkLoaded(" + cx + "," + cz + ")", t);
             }
         }
-        scanChunkX = cx;
-        scanChunkZ = cz;
-        scanChunkLoadedFlag = loaded;
+        this.scanChunkX = cx;
+        this.scanChunkZ = cz;
+        this.scanChunkLoadedFlag = loaded;
         return loaded;
     }
+
     private boolean rejectedByFilter(BlockPos pos) {
-        if (candidateFilter == null) return false;
+        if (this.candidateFilter == null) {
+            return false;
+        }
         boolean allowed = false;
         try {
-            allowed = candidateFilter.test(pos);
-        } catch (Throwable t) {
-            FOElytraLog.detailError("VaultOpener.candidateFilter(" + shortPos(pos) + ")", t);
+            allowed = this.candidateFilter.test(pos);
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("VaultOpener.candidateFilter(" + this.shortPos(pos) + ")", t);
             allowed = false;
         }
-        if (allowed) return false;
-        long key = pos.toImmutable().asLong();
-        if (filteredCandidateKeys.add(key)) {
-            FOElytraLog.detail("候选过滤：跳过 %s（上层 candidateFilter 拒绝 —— 已标记 / 展示物不是目标 / 离刷怪笼太近）",
-                shortPos(pos));
+        if (allowed) {
+            return false;
         }
-        roundFilteredCandidateKeys.add(key);
+        long key = pos.toImmutable().asLong();
+        if (this.filteredCandidateKeys.add(key)) {
+            FOElytraLog.detail("\u5019\u9009\u8fc7\u6ee4\uff1a\u8df3\u8fc7 %s\uff08\u4e0a\u5c42 candidateFilter \u62d2\u7edd \u2014\u2014 \u5df2\u6807\u8bb0 / \u5c55\u793a\u7269\u4e0d\u662f\u76ee\u6807 / \u79bb\u5237\u602a\u7b3c\u592a\u8fd1\uff09", this.shortPos(pos));
+        }
+        this.roundFilteredCandidateKeys.add(key);
         return true;
     }
+
     private void finishScan(MinecraftClient mc) {
-        scanActive = false;
+        this.scanActive = false;
         BlockPos origin = mc.player.getBlockPos();
-        FOElytraLog.detail("SCAN 完成：处理 %d 个坐标（已加载 %d、跳过未加载 %d），候选宝库 %d 个，耗时约 %d tick",
-            scanDone, scanChecked, scanSkippedUnloaded, scanCandidates.size(), scanTicks);
-        if (candidateFilter != null) {
-            FOElytraLog.detail("候选过滤：跳过 %d 个（本轮；累计 %d 个不同坐标）——被过滤 ≠ 找不到宝库："
-                + "它们不进 openedPositions、也不占软跳过额度",
-                roundFilteredCandidateKeys.size(), filteredCandidateKeys.size());
+        FOElytraLog.detail("SCAN \u5b8c\u6210\uff1a\u5904\u7406 %d \u4e2a\u5750\u6807\uff08\u5df2\u52a0\u8f7d %d\u3001\u8df3\u8fc7\u672a\u52a0\u8f7d %d\uff09\uff0c\u5019\u9009\u5b9d\u5e93 %d \u4e2a\uff0c\u8017\u65f6\u7ea6 %d tick", this.scanDone, this.scanChecked, this.scanSkippedUnloaded, this.scanCandidates.size(), this.scanTicks);
+        if (this.candidateFilter != null) {
+            FOElytraLog.detail("\u5019\u9009\u8fc7\u6ee4\uff1a\u8df3\u8fc7 %d \u4e2a\uff08\u672c\u8f6e\uff1b\u7d2f\u8ba1 %d \u4e2a\u4e0d\u540c\u5750\u6807\uff09\u2014\u2014\u88ab\u8fc7\u6ee4 \u2260 \u627e\u4e0d\u5230\u5b9d\u5e93\uff1a\u5b83\u4eec\u4e0d\u8fdb openedPositions\u3001\u4e5f\u4e0d\u5360\u8f6f\u8df3\u8fc7\u989d\u5ea6", this.roundFilteredCandidateKeys.size(), this.filteredCandidateKeys.size());
         }
-        if (scanCandidates.isEmpty()) {
-            lastMessage = "半径内没有可开的宝库";
-            if (openedCount > 0) {
-                FOElytraLog.warn("半径 %d 内已经没有没开过的%s宝库了（本次已开 %d 个）",
-                    scanRadius, opts.needOminous() ? "不祥" : "", openedCount);
+        if (this.scanCandidates.isEmpty()) {
+            this.lastMessage = "\u534a\u5f84\u5185\u6ca1\u6709\u53ef\u5f00\u7684\u5b9d\u5e93";
+            if (this.openedCount > 0) {
+                FOElytraLog.warn("\u534a\u5f84 %d \u5185\u5df2\u7ecf\u6ca1\u6709\u6ca1\u5f00\u8fc7\u7684%s\u5b9d\u5e93\u4e86\uff08\u672c\u6b21\u5df2\u5f00 %d \u4e2a\uff09", this.scanRadius, this.opts.needOminous() ? "\u4e0d\u7965" : "", this.openedCount);
             } else {
-                FOElytraLog.warn("%s（半径 %d，位置 %s）——可能不在试炼密室里，或此处宝库已经全被开过",
-                    lastMessage, scanRadius, origin.toShortString());
+                FOElytraLog.warn("%s\uff08\u534a\u5f84 %d\uff0c\u4f4d\u7f6e %s\uff09\u2014\u2014\u53ef\u80fd\u4e0d\u5728\u8bd5\u70bc\u5bc6\u5ba4\u91cc\uff0c\u6216\u6b64\u5904\u5b9d\u5e93\u5df2\u7ecf\u5168\u88ab\u5f00\u8fc7", this.lastMessage, this.scanRadius, origin.toShortString());
             }
-            next(State.FINISH, 0);
+            this.next(State.FINISH, 0);
             return;
         }
-        scanCandidates.sort(Comparator.comparingDouble(p -> p.getSquaredDistance(origin)));
+        this.scanCandidates.sort(Comparator.comparingDouble(p -> p.getSquaredDistance((Vec3i)origin)));
         BlockPos best = null;
         boolean bestOminous = false;
         int stale = 0;
         int softExcluded = 0;
-        retryingSoftSkipped = false;
-        for (BlockPos p : scanCandidates) {
-            BlockState st = mc.world.getBlockState(p);
+        this.retryingSoftSkipped = false;
+        for (BlockPos p2 : this.scanCandidates) {
+            Integer fails;
+            BlockState st = mc.world.getBlockState(p2);
             if (!st.isOf(Blocks.VAULT)) {
-                stale++;
+                ++stale;
                 continue;
             }
-            if (openedPositions.contains(p)) continue;
-            if (rejectedByFilter(p)) continue;
-            Integer fails = unreachableFailures.get(p);
-            if (fails != null) continue;
-            boolean ominous = Boolean.TRUE.equals(st.get(VaultBlock.OMINOUS));
-            if (opts.needOminous() && !ominous) continue;
-            best = p;
+            if (this.openedPositions.contains(p2) || this.rejectedByFilter(p2) || (fails = this.unreachableFailures.get(p2)) != null) continue;
+            boolean ominous = Boolean.TRUE.equals(st.get((Property)VaultBlock.OMINOUS));
+            if (this.opts.needOminous() && !ominous) continue;
+            best = p2;
             bestOminous = ominous;
             break;
         }
         if (best == null) {
             int fewest = Integer.MAX_VALUE;
-            for (BlockPos p : scanCandidates) {
-                BlockState st = mc.world.getBlockState(p);
-                if (!st.isOf(Blocks.VAULT)) continue;
-                if (openedPositions.contains(p)) continue;
-                if (rejectedByFilter(p)) continue;
-                Integer fails = unreachableFailures.get(p);
-                if (fails == null) continue;
-                if (fails >= SOFT_SKIP_MAX_FAILURES) {
-                    softExcluded++;
+            for (BlockPos p3 : this.scanCandidates) {
+                Integer fails;
+                BlockState st = mc.world.getBlockState(p3);
+                if (!st.isOf(Blocks.VAULT) || this.openedPositions.contains(p3) || this.rejectedByFilter(p3) || (fails = this.unreachableFailures.get(p3)) == null) continue;
+                if (fails >= 2) {
+                    ++softExcluded;
                     continue;
                 }
-                boolean ominous = Boolean.TRUE.equals(st.get(VaultBlock.OMINOUS));
-                if (opts.needOminous() && !ominous) continue;
-                if (fails < fewest) {
-                    fewest = fails;
-                    best = p;
-                    bestOminous = ominous;
-                }
+                boolean ominous = Boolean.TRUE.equals(st.get((Property)VaultBlock.OMINOUS));
+                if (this.opts.needOminous() && !ominous || fails >= fewest) continue;
+                fewest = fails;
+                best = p3;
+                bestOminous = ominous;
             }
             if (best != null) {
-                retryingSoftSkipped = true;
-                FOElytraLog.warn("半径 %d 内没有「没试过」的宝库了，回去再试一次 %s（它之前已经软跳过 %d 次）",
-                    scanRadius, best.toShortString(), fewest);
+                this.retryingSoftSkipped = true;
+                FOElytraLog.warn("\u534a\u5f84 %d \u5185\u6ca1\u6709\u300c\u6ca1\u8bd5\u8fc7\u300d\u7684\u5b9d\u5e93\u4e86\uff0c\u56de\u53bb\u518d\u8bd5\u4e00\u6b21 %s\uff08\u5b83\u4e4b\u524d\u5df2\u7ecf\u8f6f\u8df3\u8fc7 %d \u6b21\uff09", this.scanRadius, best.toShortString(), fewest);
             } else if (softExcluded > 0) {
-                FOElytraLog.warn("半径 %d 内的宝库都不适用：%d 个走不进去的已用完再试额度（每个最多 %d 次）",
-                    scanRadius, softExcluded, SOFT_SKIP_MAX_FAILURES);
+                FOElytraLog.warn("\u534a\u5f84 %d \u5185\u7684\u5b9d\u5e93\u90fd\u4e0d\u9002\u7528\uff1a%d \u4e2a\u8d70\u4e0d\u8fdb\u53bb\u7684\u5df2\u7528\u5b8c\u518d\u8bd5\u989d\u5ea6\uff08\u6bcf\u4e2a\u6700\u591a %d \u6b21\uff09", this.scanRadius, softExcluded, 2);
             }
         }
         if (best == null) {
-            lastMessage = stale > 0 && softExcluded == 0
-                ? "候选宝库都在扫描期间消失了" : "半径内没有可开的宝库";
-            FOElytraLog.warn("%s（候选 %d 个，其中 %d 个已经不是宝库方块、%d 个走不进去且已用完再试额度）",
-                lastMessage, scanCandidates.size(), stale, softExcluded);
-            next(State.FINISH, 0);
+            this.lastMessage = stale > 0 && softExcluded == 0 ? "\u5019\u9009\u5b9d\u5e93\u90fd\u5728\u626b\u63cf\u671f\u95f4\u6d88\u5931\u4e86" : "\u534a\u5f84\u5185\u6ca1\u6709\u53ef\u5f00\u7684\u5b9d\u5e93";
+            FOElytraLog.warn("%s\uff08\u5019\u9009 %d \u4e2a\uff0c\u5176\u4e2d %d \u4e2a\u5df2\u7ecf\u4e0d\u662f\u5b9d\u5e93\u65b9\u5757\u3001%d \u4e2a\u8d70\u4e0d\u8fdb\u53bb\u4e14\u5df2\u7528\u5b8c\u518d\u8bd5\u989d\u5ea6\uff09", this.lastMessage, this.scanCandidates.size(), stale, softExcluded);
+            this.next(State.FINISH, 0);
             return;
         }
-        targetVault = best;
-        targetOminous = bestOminous;
-        openAttempts = 0;
-        clickedThisVault = false;
-        inactiveRecheckTicks = 0;
-        spawnedCount = 0;
-        collectTicks = 0;
-        sinceLastSpawn = 0;
-        targetEvidence.clear();
-        walkTicks = 0;
-        repathTicks = 0;
-        keyCheckFails = 0;
-        closeInAttempts = 0;
-        requiredOpenDistance = opts.openDistance();
-        lastMessage = "";
-        FOElytraLog.detail("SCAN 选中宝库 %s（%s，距离 %.1f 格，候选 %d 个里最近%s）",
-            best.toShortString(), bestOminous ? "不祥" : "普通",
-            Math.sqrt(best.getSquaredDistance(origin)), scanCandidates.size(),
-            retryingSoftSkipped ? "，且这是「软跳过再试一次」的候选" : "");
-        next(State.EQUIP, 0);
+        this.targetVault = best;
+        this.targetOminous = bestOminous;
+        this.openAttempts = 0;
+        this.clickedThisVault = false;
+        this.inactiveRecheckTicks = 0;
+        this.spawnedCount = 0;
+        this.collectTicks = 0;
+        this.sinceLastSpawn = 0;
+        this.targetEvidence.clear();
+        this.walkTicks = 0;
+        this.repathTicks = 0;
+        this.keyCheckFails = 0;
+        this.closeInAttempts = 0;
+        this.requiredOpenDistance = this.opts.openDistance();
+        this.lastMessage = "";
+        FOElytraLog.detail("SCAN \u9009\u4e2d\u5b9d\u5e93 %s\uff08%s\uff0c\u8ddd\u79bb %.1f \u683c\uff0c\u5019\u9009 %d \u4e2a\u91cc\u6700\u8fd1%s\uff09", best.toShortString(), bestOminous ? "\u4e0d\u7965" : "\u666e\u901a", Math.sqrt(best.getSquaredDistance((Vec3i)origin)), this.scanCandidates.size(), this.retryingSoftSkipped ? "\uff0c\u4e14\u8fd9\u662f\u300c\u8f6f\u8df3\u8fc7\u518d\u8bd5\u4e00\u6b21\u300d\u7684\u5019\u9009" : "");
+        this.next(State.EQUIP, 0);
     }
+
     private void resetScanState() {
-        scanActive = false;
-        scanRadius = 0;
-        scanOriginX = 0;
-        scanOriginY = 0;
-        scanOriginZ = 0;
-        scanDyMin = 0;
-        scanDyMax = -1;
-        scanDyRel = 0;
-        scanDz = 0;
-        scanDx = 0;
-        scanTotal = 0;
-        scanDone = 0;
-        scanChecked = 0;
-        scanSkippedUnloaded = 0;
-        scanTicks = 0;
-        scanCandidates.clear();
-        scanCandidateKeys.clear();
-        roundFilteredCandidateKeys.clear();
-        scanChunkX = Integer.MIN_VALUE;
-        scanChunkZ = Integer.MIN_VALUE;
-        scanChunkLoadedFlag = false;
-        scanCursor.set(0, 0, 0);
+        this.scanActive = false;
+        this.scanRadius = 0;
+        this.scanOriginX = 0;
+        this.scanOriginY = 0;
+        this.scanOriginZ = 0;
+        this.scanDyMin = 0;
+        this.scanDyMax = -1;
+        this.scanDyRel = 0;
+        this.scanDz = 0;
+        this.scanDx = 0;
+        this.scanTotal = 0L;
+        this.scanDone = 0L;
+        this.scanChecked = 0;
+        this.scanSkippedUnloaded = 0;
+        this.scanTicks = 0;
+        this.scanCandidates.clear();
+        this.scanCandidateKeys.clear();
+        this.roundFilteredCandidateKeys.clear();
+        this.scanChunkX = Integer.MIN_VALUE;
+        this.scanChunkZ = Integer.MIN_VALUE;
+        this.scanChunkLoadedFlag = false;
+        this.scanCursor.set(0, 0, 0);
     }
+
     private void equip(MinecraftClient mc) {
-        if (targetVault == null) {
-            FOElytraLog.warn("EQUIP 时宝库坐标丢失，回到 SCAN 重找");
-            next(State.SCAN, 0);
+        if (this.targetVault == null) {
+            FOElytraLog.warn("EQUIP \u65f6\u5b9d\u5e93\u5750\u6807\u4e22\u5931\uff0c\u56de\u5230 SCAN \u91cd\u627e", new Object[0]);
+            this.next(State.SCAN, 0);
             return;
         }
-        BlockState st = mc.world.getBlockState(targetVault);
+        BlockState st = mc.world.getBlockState(this.targetVault);
         if (!st.isOf(Blocks.VAULT)) {
-            FOElytraLog.warn("宝库 %s 已经不是宝库方块了（被挖掉/被别人开掉），换下一个", targetVault.toShortString());
-            next(State.NEXT, opts.actionDelay());
+            FOElytraLog.warn("\u5b9d\u5e93 %s \u5df2\u7ecf\u4e0d\u662f\u5b9d\u5e93\u65b9\u5757\u4e86\uff08\u88ab\u6316\u6389/\u88ab\u522b\u4eba\u5f00\u6389\uff09\uff0c\u6362\u4e0b\u4e00\u4e2a", this.targetVault.toShortString());
+            this.next(State.NEXT, this.opts.actionDelay());
             return;
         }
-        boolean ominous = Boolean.TRUE.equals(st.get(VaultBlock.OMINOUS));
-        if (ominous != targetOminous) {
-            FOElytraLog.detail("宝库 %s 的不祥状态在流程中发生了变化（%s → %s），按当前状态重新选钥匙",
-                targetVault.toShortString(), targetOminous, ominous);
-            targetOminous = ominous;
+        boolean ominous = Boolean.TRUE.equals(st.get((Property)VaultBlock.OMINOUS));
+        if (ominous != this.targetOminous) {
+            FOElytraLog.detail("\u5b9d\u5e93 %s \u7684\u4e0d\u7965\u72b6\u6001\u5728\u6d41\u7a0b\u4e2d\u53d1\u751f\u4e86\u53d8\u5316\uff08%s \u2192 %s\uff09\uff0c\u6309\u5f53\u524d\u72b6\u6001\u91cd\u65b0\u9009\u94a5\u5319", this.targetVault.toShortString(), this.targetOminous, ominous);
+            this.targetOminous = ominous;
         }
         if (InvHelper.screenOpen()) {
-            delay = waitForPlayerScreen();
+            this.delay = this.waitForPlayerScreen();
             return;
         }
-        Item key = requiredKey(mc);
-        int hotbar = findKeyHotbar(key);
+        Item key = this.requiredKey(mc);
+        int hotbar = this.findKeyHotbar(key);
         if (hotbar >= 0) {
-            mc.player.getInventory().setSelectedSlot(hotbar);
-            FOElytraLog.detail("EQUIP 快捷栏第 %d 格已经是%s，直接选中（手持：%s）",
-                hotbar, key.getName().getString(), mc.player.getInventory().getSelectedStack().getName().getString());
+            InvHelper.selectSlot(hotbar);
+            FOElytraLog.detail("EQUIP \u5feb\u6377\u680f\u7b2c %d \u683c\u5df2\u7ecf\u662f%s\uff0c\u76f4\u63a5\u9009\u4e2d\uff08\u624b\u6301\uff1a%s\uff09", hotbar, key.getName().getString(), mc.player.getInventory().getSelectedStack().getName().getString());
         } else {
             int slot = InvHelper.findSlot(s -> s.isOf(key));
             if (slot < 0) {
-                FOElytraLog.detail("EQUIP 背包 0-35 里没有任何 %s", key.getName().getString());
-                if (targetOminous) {
-                    fail("背包里没有不祥试炼钥匙（不祥钥匙来自不祥试炼刷怪笼）");
+                FOElytraLog.detail("EQUIP \u80cc\u5305 0-35 \u91cc\u6ca1\u6709\u4efb\u4f55 %s", key.getName().getString());
+                if (this.targetOminous) {
+                    this.fail("\u80cc\u5305\u91cc\u6ca1\u6709\u4e0d\u7965\u8bd5\u70bc\u94a5\u5319\uff08\u4e0d\u7965\u94a5\u5319\u6765\u81ea\u4e0d\u7965\u8bd5\u70bc\u5237\u602a\u7b3c\uff09");
                 } else {
-                    fail("背包里没有试炼钥匙（普通钥匙来自试炼刷怪笼）");
+                    this.fail("\u80cc\u5305\u91cc\u6ca1\u6709\u8bd5\u70bc\u94a5\u5319\uff08\u666e\u901a\u94a5\u5319\u6765\u81ea\u8bd5\u70bc\u5237\u602a\u7b3c\uff09");
                 }
                 return;
             }
             int empty = InvHelper.findEmptyHotbarSlot();
             if (empty < 0) {
-                empty = findSacrificialHotbarSlot(mc);
+                empty = this.findSacrificialHotbarSlot(mc);
                 if (empty < 0) {
-                    FOElytraLog.detail("EQUIP 快捷栏 0-8 全是 %s，没有可换的格子", key.getName().getString());
-                    fail("快捷栏没有空位可以放 " + key.getName().getString());
+                    FOElytraLog.detail("EQUIP \u5feb\u6377\u680f 0-8 \u5168\u662f %s\uff0c\u6ca1\u6709\u53ef\u6362\u7684\u683c\u5b50", key.getName().getString());
+                    this.fail("\u5feb\u6377\u680f\u6ca1\u6709\u7a7a\u4f4d\u53ef\u4ee5\u653e " + key.getName().getString());
                     return;
                 }
-                FOElytraLog.detail("EQUIP 快捷栏已满，占用第 %d 格（原物品：%s）",
-                    empty, mc.player.getInventory().getStack(empty).getName().getString());
+                FOElytraLog.detail("EQUIP \u5feb\u6377\u680f\u5df2\u6ee1\uff0c\u5360\u7528\u7b2c %d \u683c\uff08\u539f\u7269\u54c1\uff1a%s\uff09", empty, mc.player.getInventory().getStack(empty).getName().getString());
             }
             InvHelper.moveInvToHotbar(slot, empty);
-            mc.player.getInventory().setSelectedSlot(empty);
-            FOElytraLog.detail("EQUIP 背包第 %d 格 → 快捷栏第 %d 格，已选中手持 %s",
-                slot, empty, mc.player.getInventory().getSelectedStack().getName().getString());
+            InvHelper.selectSlot(empty);
+            FOElytraLog.detail("EQUIP \u80cc\u5305\u7b2c %d \u683c \u2192 \u5feb\u6377\u680f\u7b2c %d \u683c\uff0c\u5df2\u9009\u4e2d\u624b\u6301 %s", slot, empty, mc.player.getInventory().getSelectedStack().getName().getString());
         }
         ItemStack held = mc.player.getInventory().getSelectedStack();
-        if (!keyMatches(held, key, mc)) {
-            keyCheckFails++;
-            String heldName = held.isEmpty() ? "空" : held.getName().getString();
-            FOElytraLog.detail("EQUIP 校验失败（第 %d 次，上限 %d 次）：手持是 %s，期望 %s（可能因为界面打开/同步延迟）",
-                keyCheckFails, EQUIP_MAX_KEY_CHECK_FAILS, heldName, key.getName().getString());
-            if (keyCheckFails > EQUIP_MAX_KEY_CHECK_FAILS) {
-                fail("钥匙换到手上失败超过 " + EQUIP_MAX_KEY_CHECK_FAILS + " 次（第 " + keyCheckFails
-                    + " 次仍不对，手持是 " + heldName + "，期望 " + key.getName().getString()
-                    + "）——请确认背包里有这把钥匙，并且没有别的模块一直在抢手持格");
+        if (!this.keyMatches(held, key, mc)) {
+            ++this.keyCheckFails;
+            String heldName = held.isEmpty() ? "\u7a7a" : held.getName().getString();
+            FOElytraLog.detail("EQUIP \u6821\u9a8c\u5931\u8d25\uff08\u7b2c %d \u6b21\uff0c\u4e0a\u9650 %d \u6b21\uff09\uff1a\u624b\u6301\u662f %s\uff0c\u671f\u671b %s\uff08\u53ef\u80fd\u56e0\u4e3a\u754c\u9762\u6253\u5f00/\u540c\u6b65\u5ef6\u8fdf\uff09", this.keyCheckFails, 3, heldName, key.getName().getString());
+            if (this.keyCheckFails > 3) {
+                this.fail("\u94a5\u5319\u6362\u5230\u624b\u4e0a\u5931\u8d25\u8d85\u8fc7 3 \u6b21\uff08\u7b2c " + this.keyCheckFails + " \u6b21\u4ecd\u4e0d\u5bf9\uff0c\u624b\u6301\u662f " + heldName + "\uff0c\u671f\u671b " + key.getName().getString() + "\uff09\u2014\u2014\u8bf7\u786e\u8ba4\u80cc\u5305\u91cc\u6709\u8fd9\u628a\u94a5\u5319\uff0c\u5e76\u4e14\u6ca1\u6709\u522b\u7684\u6a21\u5757\u4e00\u76f4\u5728\u62a2\u624b\u6301\u683c");
                 return;
             }
-            next(State.EQUIP, Math.max(1, opts.actionDelay()));
+            this.next(State.EQUIP, this.opts.actionDelay());
             return;
         }
-        next(State.WALK, opts.actionDelay());
+        this.next(State.WALK, this.opts.actionDelay());
     }
+
     private Item requiredKey(MinecraftClient mc) {
-        if (targetVault != null) {
-            try {
-                if (mc.world.getBlockEntity(targetVault) instanceof VaultBlockEntity vault) {
-                    VaultConfig cfg = vault.getConfig();
-                    if (cfg != null && cfg.keyItem() != null && !cfg.keyItem().isEmpty()) return cfg.keyItem().getItem();
+        block4: {
+            if (this.targetVault != null) {
+                try {
+                    VaultBlockEntity vault;
+                    VaultConfig cfg;
+                    BlockEntity blockEntity2 = mc.world.getBlockEntity(this.targetVault);
+                    if (blockEntity2 instanceof VaultBlockEntity && (cfg = (vault = (VaultBlockEntity)blockEntity2).getConfig()) != null && cfg.keyItem() != null && !cfg.keyItem().isEmpty()) {
+                        return cfg.keyItem().getItem();
+                    }
                 }
-            } catch (Throwable t) {
-                if (!keyConfigWarned) {
-                    keyConfigWarned = true;
-                    FOElytraLog.detail("读不到宝库方块实体的 config.key_item，退回按 OMINOUS 状态判断：%s", String.valueOf(t));
+                catch (Throwable t) {
+                    if (this.keyConfigWarned) break block4;
+                    this.keyConfigWarned = true;
+                    FOElytraLog.detail("\u8bfb\u4e0d\u5230\u5b9d\u5e93\u65b9\u5757\u5b9e\u4f53\u7684 config.key_item\uff0c\u9000\u56de\u6309 OMINOUS \u72b6\u6001\u5224\u65ad\uff1a%s", String.valueOf(t));
                 }
             }
         }
-        return targetOminous ? Items.OMINOUS_TRIAL_KEY : Items.TRIAL_KEY;
+        return this.targetOminous ? Items.OMINOUS_TRIAL_KEY : Items.TRIAL_KEY;
     }
+
     private boolean keyMatches(ItemStack held, Item required, MinecraftClient mc) {
-        if (held == null || held.isEmpty() || required == null) return false;
-        if (!held.isOf(required)) return false;
-        ItemStack need = configuredKeyStack(required, mc);
-        if (need == null) return true;
-        return ItemStack.areItemsAndComponentsEqual(held, need) && held.getCount() >= Math.max(1, need.getCount());
+        if (held == null || held.isEmpty() || required == null) {
+            return false;
+        }
+        if (!held.isOf(required)) {
+            return false;
+        }
+        ItemStack need = this.configuredKeyStack(required, mc);
+        if (need == null) {
+            return true;
+        }
+        return ItemStack.areItemsAndComponentsEqual((ItemStack)held, (ItemStack)need) && held.getCount() >= Math.max(1, need.getCount());
     }
+
     private ItemStack configuredKeyStack(Item required, MinecraftClient mc) {
-        if (targetVault == null) return null;
+        if (this.targetVault == null) {
+            return null;
+        }
         try {
-            if (mc.world.getBlockEntity(targetVault) instanceof VaultBlockEntity vault) {
-                VaultConfig cfg = vault.getConfig();
-                if (cfg != null && cfg.keyItem() != null && cfg.keyItem().isOf(required)) return cfg.keyItem();
+            VaultBlockEntity vault;
+            VaultConfig cfg;
+            BlockEntity blockEntity2 = mc.world.getBlockEntity(this.targetVault);
+            if (blockEntity2 instanceof VaultBlockEntity && (cfg = (vault = (VaultBlockEntity)blockEntity2).getConfig()) != null && cfg.keyItem() != null && cfg.keyItem().isOf(required)) {
+                return cfg.keyItem();
             }
-        } catch (Throwable ignored) {
+        }
+        catch (Throwable throwable) {
+            // empty catch block
         }
         return null;
     }
+
     private int findKeyHotbar(Item key) {
         return InvHelper.findSlot(s -> s.isOf(key), 0, 9);
     }
+
     private int findSacrificialHotbarSlot(MinecraftClient mc) {
-        var inv = mc.player.getInventory();
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = inv.getStack(i);
-            if (s.isEmpty()) return i;
+        ItemStack s;
+        int i;
+        PlayerInventory inv = mc.player.getInventory();
+        for (i = 0; i < 9; ++i) {
+            s = inv.getStack(i);
+            if (!s.isEmpty()) continue;
+            return i;
         }
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = inv.getStack(i);
-            if (s.isOf(Items.TRIAL_KEY) || s.isOf(Items.OMINOUS_TRIAL_KEY)) continue;
-            if (s.isOf(Items.TOTEM_OF_UNDYING)) continue;
-            if (ItemHelper.isFood(s)) continue;
+        for (i = 0; i < 9; ++i) {
+            s = inv.getStack(i);
+            if (s.isOf(Items.TRIAL_KEY) || s.isOf(Items.OMINOUS_TRIAL_KEY) || s.isOf(Items.TOTEM_OF_UNDYING) || ItemHelper.isFood(s)) continue;
             return i;
         }
         return -1;
     }
+
     private void walk(MinecraftClient mc) {
-        if (targetVault == null) {
-            next(State.SCAN, 0);
+        if (this.targetVault == null) {
+            this.next(State.SCAN, 0);
             return;
         }
         if (InvHelper.screenOpen()) {
-            delay = waitForPlayerScreen();
+            this.delay = this.waitForPlayerScreen();
             return;
         }
-        double d = horizontalDistance(mc, targetVault);
-        if (walkTicks++ >= WALK_TIMEOUT_TICKS) {
-            FOElytraLog.warn("走到宝库 %s 超时（%d 秒，水平距离还有 %.1f 格）",
-                targetVault.toShortString(), WALK_TIMEOUT_TICKS / 20, d);
-            if (BaritoneHook.ready()) BaritoneHook.stop();
-            softSkipCurrentVault("走到它超时（" + (WALK_TIMEOUT_TICKS / 20) + " 秒还没进到位）");
+        double d = this.horizontalDistance(mc, this.targetVault);
+        if (this.walkTicks++ >= 600) {
+            FOElytraLog.warn("\u8d70\u5230\u5b9d\u5e93 %s \u8d85\u65f6\uff08%d \u79d2\uff0c\u6c34\u5e73\u8ddd\u79bb\u8fd8\u6709 %.1f \u683c\uff09", this.targetVault.toShortString(), 30, d);
+            if (BaritoneHook.ready()) {
+                BaritoneHook.stop();
+            }
+            this.softSkipCurrentVault("\u8d70\u5230\u5b83\u8d85\u65f6\uff0830 \u79d2\u8fd8\u6ca1\u8fdb\u5230\u4f4d\uff09");
             return;
         }
-        if (d <= effectiveOpenDistance()) {
-            FOElytraLog.detail("WALK 到位：水平距离 %.2f ≤ %.2f（用了 %d tick），准备开 %s",
-                d, effectiveOpenDistance(), walkTicks, targetVault.toShortString());
-            if (BaritoneHook.ready()) BaritoneHook.stop();
-            walkTicks = 0;
-            next(State.OPEN, 0);
+        if (d <= this.effectiveOpenDistance()) {
+            FOElytraLog.detail("WALK \u5230\u4f4d\uff1a\u6c34\u5e73\u8ddd\u79bb %.2f \u2264 %.2f\uff08\u7528\u4e86 %d tick\uff09\uff0c\u51c6\u5907\u5f00 %s", d, this.effectiveOpenDistance(), this.walkTicks, this.targetVault.toShortString());
+            if (BaritoneHook.ready()) {
+                BaritoneHook.stop();
+            }
+            this.walkTicks = 0;
+            this.next(State.OPEN, 0);
             return;
         }
-        if (!opts.useBaritoneWalk()) {
-            delay = 0;
+        if (!this.opts.useBaritoneWalk()) {
+            this.delay = 0;
             return;
         }
         if (!BaritoneHook.ready()) {
-            fail("Baritone 不可用，无法走到宝库（请安装 Baritone，或把手动走过去后会自动开）");
+            this.fail("Baritone \u4e0d\u53ef\u7528\uff0c\u65e0\u6cd5\u8d70\u5230\u5b9d\u5e93\uff08\u8bf7\u5b89\u88c5 Baritone\uff0c\u6216\u628a\u624b\u52a8\u8d70\u8fc7\u53bb\u540e\u4f1a\u81ea\u52a8\u5f00\uff09");
             return;
         }
-        if (repathTicks <= 0) {
-            BaritoneHook.command("goto " + targetVault.getX() + " " + targetVault.getY() + " " + targetVault.getZ());
-            repathTicks = WALK_REPATH_TICKS;
-            FOElytraLog.detail("WALK 下发 goto %d %d %d（水平距离 %.1f，已走 %d tick）",
-                targetVault.getX(), targetVault.getY(), targetVault.getZ(), d, walkTicks);
-            next(State.WALK, 5);
+        if (this.repathTicks <= 0) {
+            BaritoneHook.command("goto " + this.targetVault.getX() + " " + this.targetVault.getY() + " " + this.targetVault.getZ());
+            this.repathTicks = 100;
+            FOElytraLog.detail("WALK \u4e0b\u53d1 goto %d %d %d\uff08\u6c34\u5e73\u8ddd\u79bb %.1f\uff0c\u5df2\u8d70 %d tick\uff09", this.targetVault.getX(), this.targetVault.getY(), this.targetVault.getZ(), d, this.walkTicks);
+            this.next(State.WALK, 5);
             return;
         }
-        repathTicks--;
-        delay = 0;
+        --this.repathTicks;
+        this.delay = 0;
     }
+
     private double horizontalDistance(MinecraftClient mc, BlockPos pos) {
-        double dx = mc.player.getX() - (pos.getX() + 0.5);
-        double dz = mc.player.getZ() - (pos.getZ() + 0.5);
+        double dx = mc.player.getX() - ((double)pos.getX() + 0.5);
+        double dz = mc.player.getZ() - ((double)pos.getZ() + 0.5);
         return Math.sqrt(dx * dx + dz * dz);
     }
+
     private double effectiveOpenDistance() {
-        return requiredOpenDistance > 0 ? requiredOpenDistance : opts.openDistance();
+        return this.requiredOpenDistance > 0.0 ? this.requiredOpenDistance : this.opts.openDistance();
     }
+
     private double distanceToVaultCenter(MinecraftClient mc, BlockPos pos) {
-        double dx = mc.player.getX() - (pos.getX() + 0.5);
-        double dy = mc.player.getY() - (pos.getY() + 0.5);
-        double dz = mc.player.getZ() - (pos.getZ() + 0.5);
+        double dx = mc.player.getX() - ((double)pos.getX() + 0.5);
+        double dy = mc.player.getY() - ((double)pos.getY() + 0.5);
+        double dz = mc.player.getZ() - ((double)pos.getZ() + 0.5);
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
+
     private void open(MinecraftClient mc) {
-        if (targetVault == null) {
-            next(State.SCAN, 0);
+        if (this.targetVault == null) {
+            this.next(State.SCAN, 0);
             return;
         }
         if (InvHelper.screenOpen()) {
-            delay = waitForPlayerScreen();
+            this.delay = this.waitForPlayerScreen();
             return;
         }
-        BlockState st = mc.world.getBlockState(targetVault);
+        BlockState st = mc.world.getBlockState(this.targetVault);
         if (!st.isOf(Blocks.VAULT)) {
-            FOElytraLog.warn("OPEN 时宝库 %s 已经不是宝库方块了，换下一个", targetVault.toShortString());
-            next(State.NEXT, opts.actionDelay());
+            FOElytraLog.warn("OPEN \u65f6\u5b9d\u5e93 %s \u5df2\u7ecf\u4e0d\u662f\u5b9d\u5e93\u65b9\u5757\u4e86\uff0c\u6362\u4e0b\u4e00\u4e2a", this.targetVault.toShortString());
+            this.next(State.NEXT, this.opts.actionDelay());
             return;
         }
-        VaultState vaultState = st.get(VaultBlock.VAULT_STATE);
+        VaultState vaultState = (VaultState)st.get(VaultBlock.VAULT_STATE);
         if (vaultState == VaultState.INACTIVE) {
-            double dist = distanceToVaultCenter(mc, targetVault);
-            if (dist > VAULT_ACTIVATION_RANGE) {
-                if (closeInAttempts >= MAX_CLOSE_IN_ATTEMPTS) {
-                    FOElytraLog.warn("宝库 %s 进不去它的激活半径（3D 距离 %.2f > %.1f，已尝试走近 %d 次）",
-                        targetVault.toShortString(), dist, VAULT_ACTIVATION_RANGE, closeInAttempts);
-                    softSkipCurrentVault("走到位了但 3D 距离 " + String.format("%.2f", dist)
-                        + " 仍在激活半径 " + String.format("%.1f", VAULT_ACTIVATION_RANGE) + " 之外");
+            double dist = this.distanceToVaultCenter(mc, this.targetVault);
+            if (dist > 4.0) {
+                if (this.closeInAttempts >= 2) {
+                    FOElytraLog.warn("\u5b9d\u5e93 %s \u8fdb\u4e0d\u53bb\u5b83\u7684\u6fc0\u6d3b\u534a\u5f84\uff083D \u8ddd\u79bb %.2f > %.1f\uff0c\u5df2\u5c1d\u8bd5\u8d70\u8fd1 %d \u6b21\uff09", this.targetVault.toShortString(), dist, 4.0, this.closeInAttempts);
+                    this.softSkipCurrentVault("\u8d70\u5230\u4f4d\u4e86\u4f46 3D \u8ddd\u79bb " + String.format("%.2f", dist) + " \u4ecd\u5728\u6fc0\u6d3b\u534a\u5f84 " + String.format("%.1f", 4.0) + " \u4e4b\u5916");
                     return;
                 }
-                closeInAttempts++;
-                requiredOpenDistance = CLOSE_IN_DISTANCE;
-                inactiveRecheckTicks = 0;
-                walkTicks = 0;
-                FOElytraLog.detail("宝库 %s 读到 INACTIVE 但先不采信：3D 距离 %.2f > 激活半径 %.1f"
-                    + "（WALK 的到位判定只看水平距离，上一层/下一层就会这样）→ 回 WALK 走到 %.1f 格内"
-                    + "再试（第 %d/%d 次）",
-                    targetVault.toShortString(), dist, VAULT_ACTIVATION_RANGE, CLOSE_IN_DISTANCE,
-                    closeInAttempts, MAX_CLOSE_IN_ATTEMPTS);
-                if (BaritoneHook.ready()) BaritoneHook.stop();
-                next(State.WALK, opts.actionDelay());
+                ++this.closeInAttempts;
+                this.requiredOpenDistance = 2.0;
+                this.inactiveRecheckTicks = 0;
+                this.walkTicks = 0;
+                FOElytraLog.detail("\u5b9d\u5e93 %s \u8bfb\u5230 INACTIVE \u4f46\u5148\u4e0d\u91c7\u4fe1\uff1a3D \u8ddd\u79bb %.2f > \u6fc0\u6d3b\u534a\u5f84 %.1f\uff08WALK \u7684\u5230\u4f4d\u5224\u5b9a\u53ea\u770b\u6c34\u5e73\u8ddd\u79bb\uff0c\u4e0a\u4e00\u5c42/\u4e0b\u4e00\u5c42\u5c31\u4f1a\u8fd9\u6837\uff09\u2192 \u56de WALK \u8d70\u5230 %.1f \u683c\u5185\u518d\u8bd5\uff08\u7b2c %d/%d \u6b21\uff09", this.targetVault.toShortString(), dist, 4.0, 2.0, this.closeInAttempts, 2);
+                if (BaritoneHook.ready()) {
+                    BaritoneHook.stop();
+                }
+                this.next(State.WALK, this.opts.actionDelay());
                 return;
             }
-            if (inactiveRecheckTicks < INACTIVE_RECHECK_TICKS) {
-                inactiveRecheckTicks++;
-                FOElytraLog.detail("INACTIVE 复核中 %d/%d tick（服务端状态最多滞后 %d tick，先不点击）："
-                    + "宝库 %s，3D 距离 %.2f ≤ %.1f",
-                    inactiveRecheckTicks, INACTIVE_RECHECK_TICKS, INACTIVE_RECHECK_TICKS,
-                    targetVault.toShortString(), dist, VAULT_ACTIVATION_RANGE);
-                next(State.OPEN, 0);
+            if (this.inactiveRecheckTicks < 30) {
+                ++this.inactiveRecheckTicks;
+                FOElytraLog.detail("INACTIVE \u590d\u6838\u4e2d %d/%d tick\uff08\u670d\u52a1\u7aef\u72b6\u6001\u6700\u591a\u6ede\u540e %d tick\uff0c\u5148\u4e0d\u70b9\u51fb\uff09\uff1a\u5b9d\u5e93 %s\uff0c3D \u8ddd\u79bb %.2f \u2264 %.1f", this.inactiveRecheckTicks, 30, 30, this.targetVault.toShortString(), dist, 4.0);
+                this.next(State.OPEN, 0);
                 return;
             }
-            FOElytraLog.warn("宝库 %s 处于 INACTIVE（等了 %d tick 也没变成 ACTIVE，而且我确实在它的激活半径内："
-                + "3D 距离 %.2f ≤ %.1f）= 这个宝库已经给我发过奖励，或数据包改了它的 key_item。"
-                + "不浪费钥匙，换下一个",
-                targetVault.toShortString(), INACTIVE_RECHECK_TICKS, dist, VAULT_ACTIVATION_RANGE);
-            next(State.NEXT, opts.actionDelay());
+            FOElytraLog.warn("\u5b9d\u5e93 %s \u5904\u4e8e INACTIVE\uff08\u7b49\u4e86 %d tick \u4e5f\u6ca1\u53d8\u6210 ACTIVE\uff0c\u800c\u4e14\u6211\u786e\u5b9e\u5728\u5b83\u7684\u6fc0\u6d3b\u534a\u5f84\u5185\uff1a3D \u8ddd\u79bb %.2f \u2264 %.1f\uff09= \u8fd9\u4e2a\u5b9d\u5e93\u5df2\u7ecf\u7ed9\u6211\u53d1\u8fc7\u5956\u52b1\uff0c\u6216\u6570\u636e\u5305\u6539\u4e86\u5b83\u7684 key_item\u3002\u4e0d\u6d6a\u8d39\u94a5\u5319\uff0c\u6362\u4e0b\u4e00\u4e2a", this.targetVault.toShortString(), 30, dist, 4.0);
+            this.next(State.NEXT, this.opts.actionDelay());
             return;
         }
-        int recheckWaited = inactiveRecheckTicks;
-        inactiveRecheckTicks = 0;
+        int recheckWaited = this.inactiveRecheckTicks;
+        this.inactiveRecheckTicks = 0;
         if (vaultState == VaultState.UNLOCKING || vaultState == VaultState.EJECTING) {
-            FOElytraLog.warn("宝库 %s 已经在 %s（正在解锁 / 正在喷战利品），别重复开，换下一个",
-                targetVault.toShortString(), vaultState);
-            next(State.NEXT, opts.actionDelay());
+            FOElytraLog.warn("\u5b9d\u5e93 %s \u5df2\u7ecf\u5728 %s\uff08\u6b63\u5728\u89e3\u9501 / \u6b63\u5728\u55b7\u6218\u5229\u54c1\uff09\uff0c\u522b\u91cd\u590d\u5f00\uff0c\u6362\u4e0b\u4e00\u4e2a", this.targetVault.toShortString(), vaultState);
+            this.next(State.NEXT, this.opts.actionDelay());
             return;
         }
         if (recheckWaited > 0) {
-            FOElytraLog.detail("状态刷新为 ACTIVE，继续开宝库 %s（INACTIVE 复核等了 %d tick，之前不点击是对的）",
-                targetVault.toShortString(), recheckWaited);
+            FOElytraLog.detail("\u72b6\u6001\u5237\u65b0\u4e3a ACTIVE\uff0c\u7ee7\u7eed\u5f00\u5b9d\u5e93 %s\uff08INACTIVE \u590d\u6838\u7b49\u4e86 %d tick\uff0c\u4e4b\u524d\u4e0d\u70b9\u51fb\u662f\u5bf9\u7684\uff09", this.targetVault.toShortString(), recheckWaited);
         }
-        Item key = requiredKey(mc);
+        Item key = this.requiredKey(mc);
         ItemStack held = mc.player.getInventory().getSelectedStack();
-        if (!keyMatches(held, key, mc)) {
-            keyCheckFails++;
-            String heldName = held.isEmpty() ? "空" : held.getName().getString();
-            FOElytraLog.detail("OPEN 前发现手持是 %s，不是 %s，回 EQUIP 重换（累计第 %d 次换不上手，"
-                + "上限 %d 次）", heldName, key.getName().getString(), keyCheckFails, EQUIP_MAX_KEY_CHECK_FAILS);
-            if (keyCheckFails > EQUIP_MAX_KEY_CHECK_FAILS) {
-                fail("钥匙换到手上失败超过 " + EQUIP_MAX_KEY_CHECK_FAILS + " 次（第 " + keyCheckFails
-                    + " 次 OPEN 前手持是 " + heldName + "，期望 " + key.getName().getString()
-                    + "）——可能有别的模块一直在抢手持格");
+        if (!this.keyMatches(held, key, mc)) {
+            ++this.keyCheckFails;
+            String heldName = held.isEmpty() ? "\u7a7a" : held.getName().getString();
+            FOElytraLog.detail("OPEN \u524d\u53d1\u73b0\u624b\u6301\u662f %s\uff0c\u4e0d\u662f %s\uff0c\u56de EQUIP \u91cd\u6362\uff08\u7d2f\u8ba1\u7b2c %d \u6b21\u6362\u4e0d\u4e0a\u624b\uff0c\u4e0a\u9650 %d \u6b21\uff09", heldName, key.getName().getString(), this.keyCheckFails, 3);
+            if (this.keyCheckFails > 3) {
+                this.fail("\u94a5\u5319\u6362\u5230\u624b\u4e0a\u5931\u8d25\u8d85\u8fc7 3 \u6b21\uff08\u7b2c " + this.keyCheckFails + " \u6b21 OPEN \u524d\u624b\u6301\u662f " + heldName + "\uff0c\u671f\u671b " + key.getName().getString() + "\uff09\u2014\u2014\u53ef\u80fd\u6709\u522b\u7684\u6a21\u5757\u4e00\u76f4\u5728\u62a2\u624b\u6301\u683c");
                 return;
             }
-            next(State.EQUIP, opts.actionDelay());
+            this.next(State.EQUIP, this.opts.actionDelay());
             return;
         }
-        boolean accepted = InvHelper.interactBlock(targetVault);
-        openAttempts++;
-        FOElytraLog.detail("OPEN 第 %d/%d 次右键 %s（%s，方块状态 %s，手持 %s），interactBlock=%s",
-            openAttempts, OPEN_MAX_RETRIES, targetVault.toShortString(),
-            targetOminous ? "不祥宝库" : "普通宝库", vaultState, held.getName().getString(), accepted);
+        boolean accepted = InvHelper.interactBlock(this.targetVault);
+        ++this.openAttempts;
+        FOElytraLog.detail("OPEN \u7b2c %d/%d \u6b21\u53f3\u952e %s\uff08%s\uff0c\u65b9\u5757\u72b6\u6001 %s\uff0c\u624b\u6301 %s\uff09\uff0cinteractBlock=%s", this.openAttempts, 3, this.targetVault.toShortString(), this.targetOminous ? "\u4e0d\u7965\u5b9d\u5e93" : "\u666e\u901a\u5b9d\u5e93", vaultState, held.getName().getString(), accepted);
         if (!accepted) {
-            if (openAttempts >= OPEN_MAX_RETRIES) {
-                FOElytraLog.warn("宝库 %s 右键 %d 次都没被接受（视线被挡？距离太远？服务器没批准），换下一个",
-                    targetVault.toShortString(), openAttempts);
-                next(State.NEXT, opts.actionDelay());
+            if (this.openAttempts >= 3) {
+                FOElytraLog.warn("\u5b9d\u5e93 %s \u53f3\u952e %d \u6b21\u90fd\u6ca1\u88ab\u63a5\u53d7\uff08\u89c6\u7ebf\u88ab\u6321\uff1f\u8ddd\u79bb\u592a\u8fdc\uff1f\u670d\u52a1\u5668\u6ca1\u6279\u51c6\uff09\uff0c\u6362\u4e0b\u4e00\u4e2a", this.targetVault.toShortString(), this.openAttempts);
+                this.next(State.NEXT, this.opts.actionDelay());
                 return;
             }
-            FOElytraLog.detail("OPEN 第 %d 次右键被拒，留在 OPEN 重试（同一状态自转 + delay 节流，上限 %d 次）",
-                openAttempts, OPEN_MAX_RETRIES);
-            next(State.OPEN, Math.max(1, opts.actionDelay()));
+            FOElytraLog.detail("OPEN \u7b2c %d \u6b21\u53f3\u952e\u88ab\u62d2\uff0c\u7559\u5728 OPEN \u91cd\u8bd5\uff08\u540c\u4e00\u72b6\u6001\u81ea\u8f6c + delay \u8282\u6d41\uff0c\u4e0a\u9650 %d \u6b21\uff09", this.openAttempts, 3);
+            this.next(State.OPEN, this.opts.actionDelay());
             return;
         }
-        clickedThisVault = true;
-        lootBox = new Box(targetVault).expand(LOOT_BOX_RADIUS);
-        lootBoxVault = targetVault.toImmutable();
-        spawnedCount = 0;
-        collectTicks = 0;
-        sinceLastSpawn = 0;
-        targetEvidence.clear();
-        snapshotTargetCounts(mc.player);
-        next(State.COLLECT, 1);
+        this.clickedThisVault = true;
+        this.lootBox = new Box(this.targetVault).expand(3.0);
+        this.lootBoxVault = this.targetVault.toImmutable();
+        this.spawnedCount = 0;
+        this.collectTicks = 0;
+        this.sinceLastSpawn = 0;
+        this.targetEvidence.clear();
+        this.snapshotTargetCounts((PlayerEntity)mc.player);
+        this.next(State.COLLECT, 1);
     }
+
     private void collect(MinecraftClient mc) {
-        if (targetVault == null) {
-            next(State.SCAN, 0);
+        if (this.targetVault == null) {
+            this.next(State.SCAN, 0);
             return;
         }
         if (InvHelper.screenOpen()) {
-            delay = waitForPlayerScreen();
+            this.delay = this.waitForPlayerScreen();
             return;
         }
-        scanLootEntities(mc);
-        updateTargetCounts(mc.player);
-        collectTicks++;
-        sinceLastSpawn++;
-        int wait = effectiveCollectTicks();
-        if (collectTicks == 1 && wait != opts.openWaitTicks()) {
-            FOElytraLog.detail("COLLECT 开始：等待喷出 tick 原文 %d / 实际 %d（低于下限 %d，按喷出节奏抬到下限）",
-                opts.openWaitTicks(), wait, COLLECT_MIN_TICKS);
+        this.scanLootEntities(mc);
+        this.updateTargetCounts((PlayerEntity)mc.player);
+        ++this.collectTicks;
+        ++this.sinceLastSpawn;
+        int wait = this.effectiveCollectTicks();
+        if (this.collectTicks == 1 && wait != this.opts.openWaitTicks()) {
+            FOElytraLog.detail("COLLECT \u5f00\u59cb\uff1a\u7b49\u5f85\u55b7\u51fa tick \u539f\u6587 %d / \u5b9e\u9645 %d\uff08\u4f4e\u4e8e\u4e0b\u9650 %d\uff0c\u6309\u55b7\u51fa\u8282\u594f\u62ac\u5230\u4e0b\u9650\uff09", this.opts.openWaitTicks(), wait, 90);
         }
-        if (matchAnyTarget()) {
-            onTargetFound(evidenceText());
+        if (this.matchAnyTarget()) {
+            this.onTargetFound(this.evidenceText());
             return;
         }
-        if (spawnedCount > 0 && sinceLastSpawn >= SPAWN_QUIET_TICKS) {
-            FOElytraLog.detail("COLLECT 提前收工：已见 %d 件、最后一个之后 %d tick 没有再出现（判据 %d tick）",
-                spawnedCount, sinceLastSpawn, SPAWN_QUIET_TICKS);
-            onCollectFinished();
+        if (this.spawnedCount > 0 && this.sinceLastSpawn >= 30) {
+            FOElytraLog.detail("COLLECT \u63d0\u524d\u6536\u5de5\uff1a\u5df2\u89c1 %d \u4ef6\u3001\u6700\u540e\u4e00\u4e2a\u4e4b\u540e %d tick \u6ca1\u6709\u518d\u51fa\u73b0\uff08\u5224\u636e %d tick\uff09", this.spawnedCount, this.sinceLastSpawn, 30);
+            this.onCollectFinished();
             return;
         }
-        if (collectTicks >= wait) {
-            onCollectFinished();
+        if (this.collectTicks >= wait) {
+            this.onCollectFinished();
             return;
         }
-        delay = 0;
+        this.delay = 0;
     }
+
     private void scanLootEntities(MinecraftClient mc) {
-        if (lootBox == null || targetVault == null || !targetVault.equals(lootBoxVault)) {
-            lootBox = new Box(targetVault).expand(LOOT_BOX_RADIUS);
-            lootBoxVault = targetVault.toImmutable();
-            FOElytraLog.detail("COLLECT 重建收集盒：以宝库 %s 为中心、半径 %.1f（换库必须重建，否则实体证据会落在上一个库的坐标上）",
-                targetVault.toShortString(), LOOT_BOX_RADIUS);
+        if (this.lootBox == null || this.targetVault == null || !this.targetVault.equals((Object)this.lootBoxVault)) {
+            this.lootBox = new Box(this.targetVault).expand(3.0);
+            this.lootBoxVault = this.targetVault.toImmutable();
+            FOElytraLog.detail("COLLECT \u91cd\u5efa\u6536\u96c6\u76d2\uff1a\u4ee5\u5b9d\u5e93 %s \u4e3a\u4e2d\u5fc3\u3001\u534a\u5f84 %.1f\uff08\u6362\u5e93\u5fc5\u987b\u91cd\u5efa\uff0c\u5426\u5219\u5b9e\u4f53\u8bc1\u636e\u4f1a\u843d\u5728\u4e0a\u4e00\u4e2a\u5e93\u7684\u5750\u6807\u4e0a\uff09", this.targetVault.toShortString(), 3.0);
         }
-        List<ItemEntity> ents = mc.world.getEntitiesByClass(
-            ItemEntity.class, lootBox,
-            e -> e != null && e.isAlive() && !e.getStack().isEmpty());
-        for (ItemEntity e : ents) {
-            if (!seenItems.add(e)) continue;
-            ItemStack stack = e.getStack();
+        List<ItemEntity> ents = mc.world.getEntitiesByClass(ItemEntity.class, this.lootBox, e -> e != null && e.isAlive() && !e.getStack().isEmpty());
+        for (ItemEntity e2 : ents) {
+            if (!this.seenItems.add(e2)) continue;
+            ItemStack stack = e2.getStack();
             String name = stack.getItem().getName().getString();
-            String key = shortPos(e.getBlockPos()) + "#" + name;
-            if (collectTicks >= NAME_DEDUP_WARMUP_TICKS && !seenKeys.add(key)) continue;
-            spawnedCount++;
-            sinceLastSpawn = 0;
-            boolean target = isTargetStack(stack);
-            String shown = target ? describeTargetStack(stack) : name;
-            FOElytraLog.detail("COLLECT 第 %d 件：%s x%d（实体 id=%d，位置 %s，命中目标=%s）",
-                spawnedCount, shown, stack.getCount(), e.getId(), shortPos(e.getBlockPos()), target);
-            lootLog.add("掉落：" + shown + " x" + stack.getCount() + "（宝库 " + vaultHead() + "）");
-            if (target) targetEvidence.add(shown);
+            String key = this.shortPos(e2.getBlockPos()) + "#" + name;
+            if (this.collectTicks >= 40 && !this.seenKeys.add(key)) continue;
+            ++this.spawnedCount;
+            this.sinceLastSpawn = 0;
+            boolean target = this.isTargetStack(stack);
+            String shown = target ? this.describeTargetStack(stack) : name;
+            FOElytraLog.detail("COLLECT \u7b2c %d \u4ef6\uff1a%s x%d\uff08\u5b9e\u4f53 id=%d\uff0c\u4f4d\u7f6e %s\uff0c\u547d\u4e2d\u76ee\u6807=%s\uff09", this.spawnedCount, shown, stack.getCount(), e2.getId(), this.shortPos(e2.getBlockPos()), target);
+            this.lootLog.add("\u6389\u843d\uff1a" + shown + " x" + stack.getCount() + "\uff08\u5b9d\u5e93 " + this.vaultHead() + "\uff09");
+            if (!target) continue;
+            this.targetEvidence.add(shown);
         }
     }
+
     private void snapshotTargetCounts(PlayerEntity player) {
-        itemCountBaseline.clear();
+        this.itemCountBaseline.clear();
         if (player != null) {
-            for (Item it : targetItems) itemCountBaseline.put(it, ItemHelper.countInInventory(player, it));
+            for (Item it : this.targetItems) {
+                this.itemCountBaseline.put(it, ItemHelper.countInInventory(player, it));
+            }
         }
-        targetBookBaseline = countTargetBooks(player);
-        targetBookPickup = false;
-        FOElytraLog.detail("COLLECT 背包基线：%s；带目标魔咒的附魔书 %d 本（目标物品 %d 种 / 目标魔咒 %d 个）",
-            baselineText(), targetBookBaseline, targetItems.size(), targetEnchantments.size());
+        this.targetBookBaseline = this.countTargetBooks(player);
+        this.targetBookPickup = false;
+        FOElytraLog.detail("COLLECT \u80cc\u5305\u57fa\u7ebf\uff1a%s\uff1b\u5e26\u76ee\u6807\u9b54\u5492\u7684\u9644\u9b54\u4e66 %d \u672c\uff08\u76ee\u6807\u7269\u54c1 %d \u79cd / \u76ee\u6807\u9b54\u5492 %d \u4e2a\uff09", this.baselineText(), this.targetBookBaseline, this.targetItems.size(), this.targetEnchantments.size());
     }
+
     private void updateTargetCounts(PlayerEntity player) {
-        if (player == null) return;
-        for (Item it : targetItems) {
+        if (player == null) {
+            return;
+        }
+        for (Item it : this.targetItems) {
             int now = ItemHelper.countInInventory(player, it);
-            Integer before = itemCountBaseline.get(it);
+            Integer before = this.itemCountBaseline.get(it);
             if (before == null) {
-                itemCountBaseline.put(it, now);
+                this.itemCountBaseline.put(it, now);
                 continue;
             }
-            if (now > before) {
-                itemCountBaseline.put(it, now);
-                targetEvidence.add(it.getName().getString() + "（已捡进背包）");
-            }
+            if (now <= before) continue;
+            this.itemCountBaseline.put(it, now);
+            this.targetEvidence.add(it.getName().getString() + "\uff08\u5df2\u6361\u8fdb\u80cc\u5305\uff09");
         }
-        int books = countTargetBooks(player);
-        if (books > targetBookBaseline) {
-            targetBookBaseline = books;
-            targetBookPickup = true;
-            targetEvidence.add(describeTargetBooks(player));
+        int books = this.countTargetBooks(player);
+        if (books > this.targetBookBaseline) {
+            this.targetBookBaseline = books;
+            this.targetBookPickup = true;
+            this.targetEvidence.add(this.describeTargetBooks(player));
         }
     }
+
     private int countTargetBooks(PlayerEntity player) {
-        if (player == null || targetEnchantments.isEmpty()) return 0;
+        if (player == null || this.targetEnchantments.isEmpty()) {
+            return 0;
+        }
         int total = 0;
-        for (int i = 0; i < 36; i++) {
+        for (int i = 0; i < 36; ++i) {
             ItemStack s = player.getInventory().getStack(i);
-            if (s.isEmpty() || !s.isOf(Items.ENCHANTED_BOOK)) continue;
-            if (matchesTargetEnchantment(s)) total += s.getCount();
+            if (s.isEmpty() || !s.isOf(Items.ENCHANTED_BOOK) || !this.matchesTargetEnchantment(s)) continue;
+            total += s.getCount();
         }
         return total;
     }
+
     private boolean matchAnyTarget() {
-        return !targetEvidence.isEmpty();
+        return !this.targetEvidence.isEmpty();
     }
+
     private boolean isTargetStack(ItemStack stack) {
-        if (stack == null || stack.isEmpty()) return false;
-        if (!targetItems.isEmpty() && targetItems.contains(stack.getItem())) return true;
-        return stack.isOf(Items.ENCHANTED_BOOK) && matchesTargetEnchantment(stack);
+        if (stack == null || stack.isEmpty()) {
+            return false;
+        }
+        if (!this.targetItems.isEmpty() && this.targetItems.contains(stack.getItem())) {
+            return true;
+        }
+        return stack.isOf(Items.ENCHANTED_BOOK) && this.matchesTargetEnchantment(stack);
     }
+
     private boolean matchesTargetEnchantment(ItemStack stack) {
-        if (targetEnchantments.isEmpty()) return false;
-        ItemEnchantmentsComponent stored = stack.get(DataComponentTypes.STORED_ENCHANTMENTS);
-        if (stored == null || stored.isEmpty()) return false;
-        for (RegistryEntry<Enchantment> entry : stored.getEnchantments()) {
-            for (Identifier id : targetEnchantments) {
-                if (entry.matchesId(id)) return true;
+        if (this.targetEnchantments.isEmpty()) {
+            return false;
+        }
+        ItemEnchantmentsComponent stored = (ItemEnchantmentsComponent)stack.get(DataComponentTypes.STORED_ENCHANTMENTS);
+        if (stored == null || stored.isEmpty()) {
+            return false;
+        }
+        for (RegistryEntry entry : stored.getEnchantments()) {
+            for (Identifier id : this.targetEnchantments) {
+                if (!entry.matchesId(id)) continue;
+                return true;
             }
         }
         return false;
     }
+
     private List<String> matchingEnchantmentNames(ItemStack stack) {
-        List<String> out = new ArrayList<>();
-        if (targetEnchantments.isEmpty()) return out;
-        ItemEnchantmentsComponent stored = stack.get(DataComponentTypes.STORED_ENCHANTMENTS);
-        if (stored == null || stored.isEmpty()) return out;
-        for (RegistryEntry<Enchantment> entry : stored.getEnchantments()) {
-            for (Identifier id : targetEnchantments) {
+        ArrayList<String> out = new ArrayList<String>();
+        if (this.targetEnchantments.isEmpty()) {
+            return out;
+        }
+        ItemEnchantmentsComponent stored = (ItemEnchantmentsComponent)stack.get(DataComponentTypes.STORED_ENCHANTMENTS);
+        if (stored == null || stored.isEmpty()) {
+            return out;
+        }
+        block0: for (RegistryEntry entry : stored.getEnchantments()) {
+            for (Identifier id : this.targetEnchantments) {
                 if (!entry.matchesId(id)) continue;
-                String n = enchantDisplayName(entry, id);
-                if (!out.contains(n)) out.add(n);
-                break;
+                String n = this.enchantDisplayName((RegistryEntry<Enchantment>)entry, id);
+                if (out.contains(n)) continue block0;
+                out.add(n);
+                continue block0;
             }
         }
         return out;
     }
+
     private String enchantDisplayName(RegistryEntry<Enchantment> entry, Identifier matchedId) {
         try {
-            var text = entry.value().description();
-            if (text != null) {
-                String s = text.getString();
-                if (s != null && !s.isBlank()) return s;
+            String s;
+            Text text = ((Enchantment)entry.value()).description();
+            if (text != null && (s = text.getString()) != null && !s.isBlank()) {
+                return s;
             }
-        } catch (Throwable t) {
-            FOElytraLog.detail("读魔咒名字失败（用 ID 代替显示）：%s", String.valueOf(t));
+        }
+        catch (Throwable t) {
+            FOElytraLog.detail("\u8bfb\u9b54\u5492\u540d\u5b57\u5931\u8d25\uff08\u7528 ID \u4ee3\u66ff\u663e\u793a\uff09\uff1a%s", String.valueOf(t));
         }
         return matchedId.getPath();
     }
+
     private String describeTargetStack(ItemStack stack) {
         String base = stack.getItem().getName().getString();
-        if (!stack.isOf(Items.ENCHANTED_BOOK)) return base;
-        List<String> names = matchingEnchantmentNames(stack);
-        return names.isEmpty() ? base : base + "[" + String.join("、", names) + "]";
+        if (!stack.isOf(Items.ENCHANTED_BOOK)) {
+            return base;
+        }
+        List<String> names = this.matchingEnchantmentNames(stack);
+        return names.isEmpty() ? base : base + "[" + String.join((CharSequence)"\u3001", names) + "]";
     }
+
     private String describeTargetBooks(PlayerEntity player) {
         String base = Items.ENCHANTED_BOOK.getName().getString();
-        List<String> names = new ArrayList<>();
+        ArrayList<String> names = new ArrayList<String>();
         if (player != null) {
-            for (int i = 0; i < 36; i++) {
+            for (int i = 0; i < 36; ++i) {
                 ItemStack s = player.getInventory().getStack(i);
                 if (s.isEmpty() || !s.isOf(Items.ENCHANTED_BOOK)) continue;
-                for (String n : matchingEnchantmentNames(s)) {
-                    if (!names.contains(n)) names.add(n);
+                for (String n : this.matchingEnchantmentNames(s)) {
+                    if (names.contains(n)) continue;
+                    names.add(n);
                 }
             }
         }
-        return names.isEmpty() ? base + "（带目标魔咒）" : base + "[" + String.join("、", names) + "]";
+        return names.isEmpty() ? base + "\uff08\u5e26\u76ee\u6807\u9b54\u5492\uff09" : base + "[" + String.join((CharSequence)"\u3001", names) + "]";
     }
+
     private String evidenceText() {
-        return targetEvidence.isEmpty() ? "目标战利品" : String.join("、", targetEvidence);
+        return this.targetEvidence.isEmpty() ? "\u76ee\u6807\u6218\u5229\u54c1" : String.join((CharSequence)"\u3001", this.targetEvidence);
     }
+
     private void onTargetFound(String what) {
-        foundTarget = true;
-        String line = "命中：出了 " + what + "（宝库 " + vaultHead() + "）";
-        lootLog.add(line);
-        FOElytraLog.info("命中目标！%s", line);
-        FOElytraLog.detail("COLLECT 判定完成：命中 %s（实体 %d 件；证据：%s；目标魔咒书=%s）",
-            what, spawnedCount, String.join("、", targetEvidence), targetBookPickup);
-        if (opts.stopOnTarget()) {
-            lastMessage = "已拿到目标战利品：" + what;
-            settleBeforeDone();
-            goal(State.DONE);
+        this.foundTarget = true;
+        String line = "\u547d\u4e2d\uff1a\u51fa\u4e86 " + what + "\uff08\u5b9d\u5e93 " + this.vaultHead() + "\uff09";
+        this.lootLog.add(line);
+        FOElytraLog.info("\u547d\u4e2d\u76ee\u6807\uff01%s", line);
+        FOElytraLog.detail("COLLECT \u5224\u5b9a\u5b8c\u6210\uff1a\u547d\u4e2d %s\uff08\u5b9e\u4f53 %d \u4ef6\uff1b\u8bc1\u636e\uff1a%s\uff1b\u76ee\u6807\u9b54\u5492\u4e66=%s\uff09", what, this.spawnedCount, String.join((CharSequence)"\u3001", this.targetEvidence), this.targetBookPickup);
+        if (this.opts.stopOnTarget()) {
+            this.lastMessage = "\u5df2\u62ff\u5230\u76ee\u6807\u6218\u5229\u54c1\uff1a" + what;
+            this.settleBeforeDone();
+            this.goal(State.DONE);
         } else {
-            FOElytraLog.tip("已拿到 %s，按设置继续开下一个宝库", what);
-            next(State.NEXT, opts.actionDelay());
+            FOElytraLog.tip("\u5df2\u62ff\u5230 %s\uff0c\u6309\u8bbe\u7f6e\u7ee7\u7eed\u5f00\u4e0b\u4e00\u4e2a\u5b9d\u5e93", what);
+            this.next(State.NEXT, this.opts.actionDelay());
         }
     }
+
     private void onCollectFinished() {
         MinecraftClient mc = MinecraftClient.getInstance();
-        updateTargetCounts(mc.player);
-        if (matchAnyTarget()) {
-            onTargetFound(evidenceText());
+        this.updateTargetCounts((PlayerEntity)mc.player);
+        if (this.matchAnyTarget()) {
+            this.onTargetFound(this.evidenceText());
             return;
         }
-        String head = "宝库 " + vaultHead();
-        if (spawnedCount > 0) {
-            lootLog.add("不是目标：" + head + " 喷出 " + spawnedCount + " 件，都不是要的东西");
-            FOElytraLog.tip("%s 出的不是目标（%d 件），换下一个宝库", head, spawnedCount);
+        String head = "\u5b9d\u5e93 " + this.vaultHead();
+        if (this.spawnedCount > 0) {
+            this.lootLog.add("\u4e0d\u662f\u76ee\u6807\uff1a" + head + " \u55b7\u51fa " + this.spawnedCount + " \u4ef6\uff0c\u90fd\u4e0d\u662f\u8981\u7684\u4e1c\u897f");
+            FOElytraLog.tip("%s \u51fa\u7684\u4e0d\u662f\u76ee\u6807\uff08%d \u4ef6\uff09\uff0c\u6362\u4e0b\u4e00\u4e2a\u5b9d\u5e93", head, this.spawnedCount);
         } else {
-            lootLog.add("空开：" + head + " " + collectTicks + " tick 内没有喷出任何物品");
-            FOElytraLog.warn("%s 空开（%d tick 内没喷出任何物品）——可能你之前已经开过它、钥匙没被服务端接受、"
-                + "或者站着的位置离得太远；也可能是战利品还没来得及喷完（把「等待喷出 tick」调大试试）",
-                head, collectTicks);
+            this.lootLog.add("\u7a7a\u5f00\uff1a" + head + " " + this.collectTicks + " tick \u5185\u6ca1\u6709\u55b7\u51fa\u4efb\u4f55\u7269\u54c1");
+            FOElytraLog.warn("%s \u7a7a\u5f00\uff08%d tick \u5185\u6ca1\u55b7\u51fa\u4efb\u4f55\u7269\u54c1\uff09\u2014\u2014\u53ef\u80fd\u4f60\u4e4b\u524d\u5df2\u7ecf\u5f00\u8fc7\u5b83\u3001\u94a5\u5319\u6ca1\u88ab\u670d\u52a1\u7aef\u63a5\u53d7\u3001\u6216\u8005\u7ad9\u7740\u7684\u4f4d\u7f6e\u79bb\u5f97\u592a\u8fdc\uff1b\u4e5f\u53ef\u80fd\u662f\u6218\u5229\u54c1\u8fd8\u6ca1\u6765\u5f97\u53ca\u55b7\u5b8c\uff08\u628a\u300c\u7b49\u5f85\u55b7\u51fa tick\u300d\u8c03\u5927\u8bd5\u8bd5\uff09", head, this.collectTicks);
         }
-        FOElytraLog.detail("COLLECT 结束：实体 %d 件，收集 %d tick（等待喷出 tick 原文 %d / 实际 %d），"
-            + "距最后一个新掉落物 %d tick，命中证据 %d 条",
-            spawnedCount, collectTicks, opts.openWaitTicks(), effectiveCollectTicks(),
-            sinceLastSpawn, targetEvidence.size());
-        next(State.NEXT, opts.actionDelay());
+        FOElytraLog.detail("COLLECT \u7ed3\u675f\uff1a\u5b9e\u4f53 %d \u4ef6\uff0c\u6536\u96c6 %d tick\uff08\u7b49\u5f85\u55b7\u51fa tick \u539f\u6587 %d / \u5b9e\u9645 %d\uff09\uff0c\u8ddd\u6700\u540e\u4e00\u4e2a\u65b0\u6389\u843d\u7269 %d tick\uff0c\u547d\u4e2d\u8bc1\u636e %d \u6761", this.spawnedCount, this.collectTicks, this.opts.openWaitTicks(), this.effectiveCollectTicks(), this.sinceLastSpawn, this.targetEvidence.size());
+        this.next(State.NEXT, this.opts.actionDelay());
     }
+
     private void next(MinecraftClient mc) {
-        if (targetVault != null) {
-            boolean firstTime = openedPositions.add(targetVault);
-            String pos = targetVault.toShortString();
+        if (this.targetVault != null) {
+            boolean firstTime = this.openedPositions.add(this.targetVault);
+            String pos = this.targetVault.toShortString();
             if (!firstTime) {
-                FOElytraLog.detail("NEXT 宝库 %s 之前已经记过（同一坐标重复选中 → 空开），不再重复计数", pos);
-            } else if (clickedThisVault) {
-                openedCount++;
-                FOElytraLog.detail("NEXT 记录已开宝库 %s（本次第 %d/%d 个，不祥=%s）",
-                    pos, openedCount, opts.maxVaultsPerRun(), targetOminous);
-                notifyOpened(targetVault);
+                FOElytraLog.detail("NEXT \u5b9d\u5e93 %s \u4e4b\u524d\u5df2\u7ecf\u8bb0\u8fc7\uff08\u540c\u4e00\u5750\u6807\u91cd\u590d\u9009\u4e2d \u2192 \u7a7a\u5f00\uff09\uff0c\u4e0d\u518d\u91cd\u590d\u8ba1\u6570", pos);
+            } else if (this.clickedThisVault) {
+                ++this.openedCount;
+                FOElytraLog.detail("NEXT \u8bb0\u5f55\u5df2\u5f00\u5b9d\u5e93 %s\uff08\u672c\u6b21\u7b2c %d/%d \u4e2a\uff0c\u4e0d\u7965=%s\uff09", pos, this.openedCount, this.opts.maxVaultsPerRun(), this.targetOminous);
+                this.notifyOpened(this.targetVault);
             } else {
-                FOElytraLog.detail("NEXT 宝库 %s 这次没发出过被接受的右键（走不到 / 方块变了 / 右键被拒），"
-                    + "只记坐标防止回头重选，不计入「已开」", pos);
+                FOElytraLog.detail("NEXT \u5b9d\u5e93 %s \u8fd9\u6b21\u6ca1\u53d1\u51fa\u8fc7\u88ab\u63a5\u53d7\u7684\u53f3\u952e\uff08\u8d70\u4e0d\u5230 / \u65b9\u5757\u53d8\u4e86 / \u53f3\u952e\u88ab\u62d2\uff09\uff0c\u53ea\u8bb0\u5750\u6807\u9632\u6b62\u56de\u5934\u91cd\u9009\uff0c\u4e0d\u8ba1\u5165\u300c\u5df2\u5f00\u300d", pos);
             }
         }
-        if (spawnedCount == 0) {
-            FOElytraLog.detail("NEXT 这次没拿到任何掉落物：%s 在 %d tick 里没有物品被我们看到"
-                + "（可能是空开、也可能是掉落物已经被自己捡进背包）",
-                targetVault == null ? "?" : targetVault.toShortString(), collectTicks);
+        if (this.spawnedCount == 0) {
+            FOElytraLog.detail("NEXT \u8fd9\u6b21\u6ca1\u62ff\u5230\u4efb\u4f55\u6389\u843d\u7269\uff1a%s \u5728 %d tick \u91cc\u6ca1\u6709\u7269\u54c1\u88ab\u6211\u4eec\u770b\u5230\uff08\u53ef\u80fd\u662f\u7a7a\u5f00\u3001\u4e5f\u53ef\u80fd\u662f\u6389\u843d\u7269\u5df2\u7ecf\u88ab\u81ea\u5df1\u6361\u8fdb\u80cc\u5305\uff09", this.targetVault == null ? "?" : this.targetVault.toShortString(), this.collectTicks);
         }
-        resetVaultState();
-        if (openedCount >= opts.maxVaultsPerRun()) {
-            lastMessage = "已达到本次上限 " + opts.maxVaultsPerRun() + " 个宝库";
-            FOElytraLog.info("%s（命中的目标：%s）", lastMessage, foundTarget ? "有" : "无");
-            settleBeforeDone();
-            goal(State.DONE);
+        this.resetVaultState();
+        if (this.openedCount >= this.opts.maxVaultsPerRun()) {
+            this.lastMessage = "\u5df2\u8fbe\u5230\u672c\u6b21\u4e0a\u9650 " + this.opts.maxVaultsPerRun() + " \u4e2a\u5b9d\u5e93";
+            FOElytraLog.info("%s\uff08\u547d\u4e2d\u7684\u76ee\u6807\uff1a%s\uff09", this.lastMessage, this.foundTarget ? "\u6709" : "\u65e0");
+            this.settleBeforeDone();
+            this.goal(State.DONE);
             return;
         }
-        next(State.SCAN, opts.actionDelay());
+        this.next(State.SCAN, this.opts.actionDelay());
     }
+
     private void softSkipCurrentVault(String why) {
-        BlockPos pos = targetVault == null ? null : targetVault.toImmutable();
+        BlockPos pos;
+        BlockPos blockPos2 = pos = this.targetVault == null ? null : this.targetVault.toImmutable();
         if (pos == null) {
-            next(State.SCAN, opts.actionDelay());
+            this.next(State.SCAN, this.opts.actionDelay());
             return;
         }
-        int failures = unreachableFailures.merge(pos, 1, Integer::sum);
-        softSkipCount++;
-        FOElytraLog.warn("宝库 %s 走不进去（%s，第 %d 次），本轮暂时跳过；"
-            + "如果周围有别的候选会先去别的，没有就再试它一次", pos.toShortString(), why, failures);
-        FOElytraLog.detail("软跳过 %s：%s（第 %d 次；每个坐标最多 %d 次，达到后本轮不再选它）。"
-            + "它不写进 openedPositions —— 那不是「已经处理过」，只是这一次没走到",
-            pos.toShortString(), why, failures, SOFT_SKIP_MAX_FAILURES);
-        resetVaultState();
-        if (softSkipCount >= SOFT_SKIP_BUDGET) {
-            lastMessage = "这一片已经有 " + unreachableFailures.size() + " 个宝库走不进去，本密室先收工";
-            FOElytraLog.warn("%s（累计软跳过 %d 次，上限 %d 次）—— 多半是墙多/落差大够不到；"
-                + "按「正常结束」收工（不是失败），换个密室或换个位置再跑",
-                lastMessage, softSkipCount, SOFT_SKIP_BUDGET);
-            next(State.FINISH, 0);
+        int failures = this.unreachableFailures.merge(pos, 1, Integer::sum);
+        ++this.softSkipCount;
+        FOElytraLog.warn("\u5b9d\u5e93 %s \u8d70\u4e0d\u8fdb\u53bb\uff08%s\uff0c\u7b2c %d \u6b21\uff09\uff0c\u672c\u8f6e\u6682\u65f6\u8df3\u8fc7\uff1b\u5982\u679c\u5468\u56f4\u6709\u522b\u7684\u5019\u9009\u4f1a\u5148\u53bb\u522b\u7684\uff0c\u6ca1\u6709\u5c31\u518d\u8bd5\u5b83\u4e00\u6b21", pos.toShortString(), why, failures);
+        FOElytraLog.detail("\u8f6f\u8df3\u8fc7 %s\uff1a%s\uff08\u7b2c %d \u6b21\uff1b\u6bcf\u4e2a\u5750\u6807\u6700\u591a %d \u6b21\uff0c\u8fbe\u5230\u540e\u672c\u8f6e\u4e0d\u518d\u9009\u5b83\uff09\u3002\u5b83\u4e0d\u5199\u8fdb openedPositions \u2014\u2014 \u90a3\u4e0d\u662f\u300c\u5df2\u7ecf\u5904\u7406\u8fc7\u300d\uff0c\u53ea\u662f\u8fd9\u4e00\u6b21\u6ca1\u8d70\u5230", pos.toShortString(), why, failures, 2);
+        this.resetVaultState();
+        if (this.softSkipCount >= 4) {
+            this.lastMessage = "\u8fd9\u4e00\u7247\u5df2\u7ecf\u6709 " + this.unreachableFailures.size() + " \u4e2a\u5b9d\u5e93\u8d70\u4e0d\u8fdb\u53bb\uff0c\u672c\u5bc6\u5ba4\u5148\u6536\u5de5";
+            FOElytraLog.warn("%s\uff08\u7d2f\u8ba1\u8f6f\u8df3\u8fc7 %d \u6b21\uff0c\u4e0a\u9650 %d \u6b21\uff09\u2014\u2014 \u591a\u534a\u662f\u5899\u591a/\u843d\u5dee\u5927\u591f\u4e0d\u5230\uff1b\u6309\u300c\u6b63\u5e38\u7ed3\u675f\u300d\u6536\u5de5\uff08\u4e0d\u662f\u5931\u8d25\uff09\uff0c\u6362\u4e2a\u5bc6\u5ba4\u6216\u6362\u4e2a\u4f4d\u7f6e\u518d\u8dd1", this.lastMessage, this.softSkipCount, 4);
+            this.next(State.FINISH, 0);
             return;
         }
-        next(State.SCAN, opts.actionDelay());
+        this.next(State.SCAN, this.opts.actionDelay());
     }
+
     private void resetVaultState() {
-        targetVault = null;
-        spawnedCount = 0;
-        collectTicks = 0;
-        sinceLastSpawn = 0;
-        openAttempts = 0;
-        clickedThisVault = false;
-        inactiveRecheckTicks = 0;
-        walkTicks = 0;
-        repathTicks = 0;
-        closeInAttempts = 0;
-        requiredOpenDistance = opts.openDistance();
-        lootBox = null;
-        lootBoxVault = null;
-        targetEvidence.clear();
-        itemCountBaseline.clear();
-        targetBookBaseline = 0;
-        targetBookPickup = false;
-        retryingSoftSkipped = false;
+        this.targetVault = null;
+        this.spawnedCount = 0;
+        this.collectTicks = 0;
+        this.sinceLastSpawn = 0;
+        this.openAttempts = 0;
+        this.clickedThisVault = false;
+        this.inactiveRecheckTicks = 0;
+        this.walkTicks = 0;
+        this.repathTicks = 0;
+        this.closeInAttempts = 0;
+        this.requiredOpenDistance = this.opts.openDistance();
+        this.lootBox = null;
+        this.lootBoxVault = null;
+        this.targetEvidence.clear();
+        this.itemCountBaseline.clear();
+        this.targetBookBaseline = 0;
+        this.targetBookPickup = false;
+        this.retryingSoftSkipped = false;
     }
+
     private void drink(MinecraftClient mc) {
-        if (!opts.drinkOminousBottle()) {
-            endUseHold("设置不需要喝不祥之瓶");
-            next(State.SCAN, 0);
+        if (!this.opts.drinkOminousBottle()) {
+            this.endUseHold("\u8bbe\u7f6e\u4e0d\u9700\u8981\u559d\u4e0d\u7965\u4e4b\u74f6");
+            this.next(State.SCAN, 0);
             return;
         }
         if (InvHelper.screenOpen()) {
-            if (holdingUse) {
-                endUseHold("你打开了界面，喝瓶被打断");
-                drinkWaitTicks = DRINK_ANIM_TICKS;
+            if (this.holdingUse) {
+                this.endUseHold("\u4f60\u6253\u5f00\u4e86\u754c\u9762\uff0c\u559d\u74f6\u88ab\u6253\u65ad");
+                this.drinkWaitTicks = 40;
             }
-            delay = waitForPlayerScreen();
+            this.delay = this.waitForPlayerScreen();
             return;
         }
-        if (holdingUse) {
-            if (hasOmen(mc.player)) {
-                endUseHold("已经拿到征兆");
-                drinkWaitTicks = 0;
-                FOElytraLog.tip("不祥之兆已上身（靠近试炼刷怪笼后它会变成试炼之兆，不祥刷怪笼才会掉不祥钥匙）");
-                next(State.SCAN, opts.actionDelay());
+        if (this.holdingUse) {
+            if (this.hasOmen((PlayerEntity)mc.player)) {
+                this.endUseHold("\u5df2\u7ecf\u62ff\u5230\u5f81\u5146");
+                this.drinkWaitTicks = 0;
+                FOElytraLog.tip("\u4e0d\u7965\u4e4b\u5146\u5df2\u4e0a\u8eab\uff08\u9760\u8fd1\u8bd5\u70bc\u5237\u602a\u7b3c\u540e\u5b83\u4f1a\u53d8\u6210\u8bd5\u70bc\u4e4b\u5146\uff0c\u4e0d\u7965\u5237\u602a\u7b3c\u624d\u4f1a\u6389\u4e0d\u7965\u94a5\u5319\uff09", new Object[0]);
+                this.next(State.SCAN, this.opts.actionDelay());
                 return;
             }
-            holdUseTicks--;
-            if (holdUseTicks <= 0) {
-                endUseHold("按住 " + DRINK_HOLD_TICKS + " tick 完成");
-                drinkWaitTicks = DRINK_ANIM_TICKS;
+            --this.holdUseTicks;
+            if (this.holdUseTicks <= 0) {
+                this.endUseHold("\u6309\u4f4f 35 tick \u5b8c\u6210");
+                this.drinkWaitTicks = 40;
             }
-            delay = 0;
+            this.delay = 0;
             return;
         }
-        if (hasOmen(mc.player)) {
-            FOElytraLog.detail("DRINK 身上已经有%s，不用喝不祥之瓶",
-                mc.player.hasStatusEffect(StatusEffects.TRIAL_OMEN) ? "试炼之兆" : "不祥之兆");
-            drinkWaitTicks = 0;
-            next(State.SCAN, opts.actionDelay());
+        if (this.hasOmen((PlayerEntity)mc.player)) {
+            FOElytraLog.detail("DRINK \u8eab\u4e0a\u5df2\u7ecf\u6709%s\uff0c\u4e0d\u7528\u559d\u4e0d\u7965\u4e4b\u74f6", mc.player.hasStatusEffect(StatusEffects.TRIAL_OMEN) ? "\u8bd5\u70bc\u4e4b\u5146" : "\u4e0d\u7965\u4e4b\u5146");
+            this.drinkWaitTicks = 0;
+            this.next(State.SCAN, this.opts.actionDelay());
             return;
         }
-        if (drinkWaitTicks > 0) {
-            drinkWaitTicks--;
-            if (drinkWaitTicks == 0) {
-                FOElytraLog.warn("喝了不祥之瓶但身上还是没有征兆（第 %d 次尝试）", drinkAttempts);
+        if (this.drinkWaitTicks > 0) {
+            --this.drinkWaitTicks;
+            if (this.drinkWaitTicks == 0) {
+                FOElytraLog.warn("\u559d\u4e86\u4e0d\u7965\u4e4b\u74f6\u4f46\u8eab\u4e0a\u8fd8\u662f\u6ca1\u6709\u5f81\u5146\uff08\u7b2c %d \u6b21\u5c1d\u8bd5\uff09", this.drinkAttempts);
             }
-            delay = 0;
+            this.delay = 0;
             return;
         }
-        if (drinkAttempts >= DRINK_MAX_ATTEMPTS) {
-            FOElytraLog.warn("不祥之瓶喝了 %d 次都没生效（可能被攻击打断，或服务器拦截了使用），直接去找宝库",
-                drinkAttempts);
-            next(State.SCAN, opts.actionDelay());
+        if (this.drinkAttempts >= 2) {
+            FOElytraLog.warn("\u4e0d\u7965\u4e4b\u74f6\u559d\u4e86 %d \u6b21\u90fd\u6ca1\u751f\u6548\uff08\u53ef\u80fd\u88ab\u653b\u51fb\u6253\u65ad\uff0c\u6216\u670d\u52a1\u5668\u62e6\u622a\u4e86\u4f7f\u7528\uff09\uff0c\u76f4\u63a5\u53bb\u627e\u5b9d\u5e93", this.drinkAttempts);
+            this.next(State.SCAN, this.opts.actionDelay());
             return;
         }
         int hotbar = InvHelper.findSlot(s -> s.isOf(Items.OMINOUS_BOTTLE), 0, 9);
         if (hotbar < 0) {
             int slot = InvHelper.findSlot(s -> s.isOf(Items.OMINOUS_BOTTLE));
             if (slot < 0) {
-                FOElytraLog.warn("设置要「自动喝不祥之瓶」，但背包里一个不祥之瓶都没有"
-                    + "（不祥之瓶来自不祥宝库/试炼密室战利品，或已开过的不祥宝库概率掉落）");
-                next(State.SCAN, opts.actionDelay());
+                FOElytraLog.warn("\u8bbe\u7f6e\u8981\u300c\u81ea\u52a8\u559d\u4e0d\u7965\u4e4b\u74f6\u300d\uff0c\u4f46\u80cc\u5305\u91cc\u4e00\u4e2a\u4e0d\u7965\u4e4b\u74f6\u90fd\u6ca1\u6709\uff08\u4e0d\u7965\u4e4b\u74f6\u6765\u81ea\u4e0d\u7965\u5b9d\u5e93/\u8bd5\u70bc\u5bc6\u5ba4\u6218\u5229\u54c1\uff0c\u6216\u5df2\u5f00\u8fc7\u7684\u4e0d\u7965\u5b9d\u5e93\u6982\u7387\u6389\u843d\uff09", new Object[0]);
+                this.next(State.SCAN, this.opts.actionDelay());
                 return;
             }
             int empty = InvHelper.findEmptyHotbarSlot();
-            if (empty < 0) {
-                empty = findSacrificialHotbarSlot(mc);
-                if (empty < 0) {
-                    FOElytraLog.warn("快捷栏没有空位放不祥之瓶，跳过喝瓶直接去找宝库");
-                    next(State.SCAN, opts.actionDelay());
-                    return;
-                }
+            if (empty < 0 && (empty = this.findSacrificialHotbarSlot(mc)) < 0) {
+                FOElytraLog.warn("\u5feb\u6377\u680f\u6ca1\u6709\u7a7a\u4f4d\u653e\u4e0d\u7965\u4e4b\u74f6\uff0c\u8df3\u8fc7\u559d\u74f6\u76f4\u63a5\u53bb\u627e\u5b9d\u5e93", new Object[0]);
+                this.next(State.SCAN, this.opts.actionDelay());
+                return;
             }
             InvHelper.moveInvToHotbar(slot, empty);
             hotbar = empty;
-            FOElytraLog.detail("DRINK 不祥之瓶 背包第 %d 格 → 快捷栏第 %d 格", slot, hotbar);
+            FOElytraLog.detail("DRINK \u4e0d\u7965\u4e4b\u74f6 \u80cc\u5305\u7b2c %d \u683c \u2192 \u5feb\u6377\u680f\u7b2c %d \u683c", slot, hotbar);
         }
-        mc.player.getInventory().setSelectedSlot(hotbar);
-        drinkAttempts++;
+        InvHelper.selectSlot(hotbar);
+        ++this.drinkAttempts;
         PlayerAction.pressUse(true);
-        holdingUse = true;
-        holdUseTicks = DRINK_HOLD_TICKS;
-        FOElytraLog.detail("DRINK 第 %d 次：按住右键喝不祥之瓶（快捷栏第 %d 格，按住 %d tick，期间拿到征兆会提前松开）",
-            drinkAttempts, hotbar, DRINK_HOLD_TICKS);
-        FOElytraLog.tip("正在喝不祥之瓶（不祥之兆）——靠近试炼刷怪笼后它才会变成试炼之兆，不祥刷怪笼才会掉不祥钥匙");
-        delay = 0;
+        this.holdingUse = true;
+        this.holdUseTicks = 35;
+        FOElytraLog.detail("DRINK \u7b2c %d \u6b21\uff1a\u6309\u4f4f\u53f3\u952e\u559d\u4e0d\u7965\u4e4b\u74f6\uff08\u5feb\u6377\u680f\u7b2c %d \u683c\uff0c\u6309\u4f4f %d tick\uff0c\u671f\u95f4\u62ff\u5230\u5f81\u5146\u4f1a\u63d0\u524d\u677e\u5f00\uff09", this.drinkAttempts, hotbar, 35);
+        FOElytraLog.tip("\u6b63\u5728\u559d\u4e0d\u7965\u4e4b\u74f6\uff08\u4e0d\u7965\u4e4b\u5146\uff09\u2014\u2014\u9760\u8fd1\u8bd5\u70bc\u5237\u602a\u7b3c\u540e\u5b83\u624d\u4f1a\u53d8\u6210\u8bd5\u70bc\u4e4b\u5146\uff0c\u4e0d\u7965\u5237\u602a\u7b3c\u624d\u4f1a\u6389\u4e0d\u7965\u94a5\u5319", new Object[0]);
+        this.delay = 0;
     }
+
     private void endUseHold(String why) {
-        if (!holdingUse) return;
-        holdingUse = false;
-        holdUseTicks = 0;
+        if (!this.holdingUse) {
+            return;
+        }
+        this.holdingUse = false;
+        this.holdUseTicks = 0;
         PlayerAction.pressUse(false);
-        FOElytraLog.detail("DRINK 松开右键（%s）", why);
+        FOElytraLog.detail("DRINK \u677e\u5f00\u53f3\u952e\uff08%s\uff09", why);
     }
+
     private boolean hasOmen(PlayerEntity player) {
-        RegistryEntry<StatusEffect> trial = StatusEffects.TRIAL_OMEN;
-        RegistryEntry<StatusEffect> bad = StatusEffects.BAD_OMEN;
+        RegistryEntry trial = StatusEffects.TRIAL_OMEN;
+        RegistryEntry bad = StatusEffects.BAD_OMEN;
         return player.hasStatusEffect(trial) || player.hasStatusEffect(bad);
     }
+
     private void finish(MinecraftClient mc) {
-        if (BaritoneHook.ready()) BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        endUseHold("收尾");
+        if (BaritoneHook.ready()) {
+            BaritoneHook.stop();
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.endUseHold("\u6536\u5c3e");
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
-        if (pendingFail) {
-            status = TaskStatus.FAILED;
-        } else {
-            status = TaskStatus.DONE;
-        }
-        FOElytraLog.detail("FINISH 收尾完成：%s，共开 %d 个宝库，命中目标=%s",
-            status, openedCount, foundTarget);
+        this.status = this.pendingFail ? TaskStatus.FAILED : TaskStatus.DONE;
+        FOElytraLog.detail("FINISH \u6536\u5c3e\u5b8c\u6210\uff1a%s\uff0c\u5171\u5f00 %d \u4e2a\u5b9d\u5e93\uff0c\u547d\u4e2d\u76ee\u6807=%s", new Object[]{this.status, this.openedCount, this.foundTarget});
     }
+
     private void settleBeforeDone() {
-        if (BaritoneHook.ready()) BaritoneHook.stop();
-        endUseHold("进入终态");
+        if (BaritoneHook.ready()) {
+            BaritoneHook.stop();
+        }
+        this.endUseHold("\u8fdb\u5165\u7ec8\u6001");
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
     }
+
     private void next(State ns, int delayTicks) {
-        State old = state;
-        state = ns;
-        delay = Math.max(0, delayTicks);
-        FOElytraLog.detail("状态 %s → %s（delay=%d）", old, ns, delay);
+        State old = this.state;
+        this.state = ns;
+        this.delay = Math.max(0, delayTicks);
+        FOElytraLog.detail("\u72b6\u6001 %s \u2192 %s\uff08delay=%d\uff09", new Object[]{old, ns, this.delay});
     }
+
     private void notifyOpened(BlockPos pos) {
-        if (onOpened == null) return;
-        if (pos == null) return;
+        if (this.onOpened == null) {
+            return;
+        }
+        if (pos == null) {
+            return;
+        }
         try {
-            onOpened.accept(pos.toImmutable());
-        } catch (Throwable t) {
-            FOElytraLog.err("已开宝库 %s 的回调（onOpened）出错：%s", shortPos(pos), String.valueOf(t));
-            FOElytraLog.detailError("VaultOpener.onOpened(" + shortPos(pos) + ")", t);
+            this.onOpened.accept(pos.toImmutable());
+        }
+        catch (Throwable t) {
+            FOElytraLog.err("\u5df2\u5f00\u5b9d\u5e93 %s \u7684\u56de\u8c03\uff08onOpened\uff09\u51fa\u9519\uff1a%s", this.shortPos(pos), String.valueOf(t));
+            FOElytraLog.detailError("VaultOpener.onOpened(" + this.shortPos(pos) + ")", t);
         }
     }
+
     private void goal(State terminal) {
-        State old = state;
-        state = terminal;
-        delay = 0;
-        FOElytraLog.detail("状态 %s → %s（终态，不再发包）", old, terminal);
+        State old = this.state;
+        this.state = terminal;
+        this.delay = 0;
+        FOElytraLog.detail("\u72b6\u6001 %s \u2192 %s\uff08\u7ec8\u6001\uff0c\u4e0d\u518d\u53d1\u5305\uff09", new Object[]{old, terminal});
     }
+
     private void fail(String reason) {
-        failReason = reason;
-        lastMessage = reason;
+        this.failReason = reason;
+        this.lastMessage = reason;
         FOElytraLog.err("%s", reason);
-        FOElytraLog.detail("判失败：%s（此时状态 %s，已开 %d 个宝库）", reason, state, openedCount);
-        pendingFail = true;
-        goal(State.FINISH);
+        FOElytraLog.detail("\u5224\u5931\u8d25\uff1a%s\uff08\u6b64\u65f6\u72b6\u6001 %s\uff0c\u5df2\u5f00 %d \u4e2a\u5b9d\u5e93\uff09", new Object[]{reason, this.state, this.openedCount});
+        this.pendingFail = true;
+        this.goal(State.FINISH);
     }
+
     private int waitForPlayerScreen() {
-        screenWaitTicks++;
-        if (screenWaitTicks > SCREEN_HOLD_MAX_TICKS) {
-            fail("你一直开着界面（" + (SCREEN_HOLD_MAX_TICKS / 20) + " 秒），宝库流程已取消");
+        ++this.screenWaitTicks;
+        if (this.screenWaitTicks > 200) {
+            this.fail("\u4f60\u4e00\u76f4\u5f00\u7740\u754c\u9762\uff0810 \u79d2\uff09\uff0c\u5b9d\u5e93\u6d41\u7a0b\u5df2\u53d6\u6d88");
             return 0;
         }
-        if (screenWaitTicks % SCREEN_WAIT_WARN_INTERVAL == 0) {
-            FOElytraLog.warn("检测到你开着界面，宝库流程暂停中（关掉后会自动继续）");
+        if (this.screenWaitTicks % 60 == 0) {
+            FOElytraLog.warn("\u68c0\u6d4b\u5230\u4f60\u5f00\u7740\u754c\u9762\uff0c\u5b9d\u5e93\u6d41\u7a0b\u6682\u505c\u4e2d\uff08\u5173\u6389\u540e\u4f1a\u81ea\u52a8\u7ee7\u7eed\uff09", new Object[0]);
         }
         return 10;
     }
+
     private int effectiveCollectTicks() {
-        return Math.max(COLLECT_MIN_TICKS, opts.openWaitTicks());
+        return Math.max(90, this.opts.openWaitTicks());
     }
+
     private String shortPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
+
     private String vaultHead() {
-        if (targetVault == null) return "?";
-        return targetVault.toShortString() + (targetOminous ? "（不祥宝库）" : "（普通宝库）");
+        if (this.targetVault == null) {
+            return "?";
+        }
+        return this.targetVault.toShortString() + (this.targetOminous ? "\uff08\u4e0d\u7965\u5b9d\u5e93\uff09" : "\uff08\u666e\u901a\u5b9d\u5e93\uff09");
     }
+
     private String baselineText() {
-        if (itemCountBaseline.isEmpty()) return "（没有配置目标物品）";
-        List<String> parts = new ArrayList<>();
-        for (Map.Entry<Item, Integer> e : itemCountBaseline.entrySet()) {
+        if (this.itemCountBaseline.isEmpty()) {
+            return "\uff08\u6ca1\u6709\u914d\u7f6e\u76ee\u6807\u7269\u54c1\uff09";
+        }
+        ArrayList<String> parts = new ArrayList<String>();
+        for (Map.Entry<Item, Integer> e : this.itemCountBaseline.entrySet()) {
             parts.add(e.getKey().getName().getString() + "=" + e.getValue());
         }
-        return String.join("、", parts);
+        return String.join((CharSequence)"\u3001", parts);
+    }
+
+    public static enum State {
+        IDLE("\u7a7a\u95f2"),
+        SCAN("\u626b\u63cf"),
+        EQUIP("\u88c5\u5907"),
+        WALK("\u8d70\u8fd1"),
+        OPEN("\u6253\u5f00"),
+        COLLECT("\u6536\u96c6"),
+        NEXT("\u4e0b\u4e00\u4e2a"),
+        DRINK("\u996e\u7528"),
+        FINISH("\u6536\u5c3e"),
+        DONE("\u5b8c\u6210"),
+        FAILED("\u5931\u8d25");
+
+
+        private final String label;
+
+        State(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    public record Options(int searchRadius, double openDistance, int openWaitTicks, int maxVaultsPerRun, boolean needOminous, List<Item> targetItems, List<Identifier> targetEnchantments, boolean stopOnTarget, boolean drinkOminousBottle, boolean useBaritoneWalk, int actionDelay, Predicate<BlockPos> candidateFilter, Consumer<BlockPos> onOpened) {
     }
 }
+

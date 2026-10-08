@@ -13,12 +13,20 @@ import com.fo.addon.elytra.core.TrialChamberLocator;
 import com.fo.addon.elytra.core.VaultDisplay;
 import com.fo.addon.elytra.core.VaultMarks;
 import com.fo.addon.elytra.core.VaultOpener;
+import com.fo.addon.elytra.modules.AutoElytraFlight;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.ItemListSetting;
+import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
@@ -27,392 +35,124 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.VaultBlock;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.state.property.Property;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
-
-/**
- * 「自动不祥宝库」—— 一个模块走完「找密室 → 飞过去 → 下去 → 找没开过的不祥宝库 → 开 → 标记」整条链。
- *
- * <h2>它按用户要求的八条实现</h2>
- * <ol>
- *   <li><b>自动在半径内找不祥宝库</b>，并且默认<b>避开试炼刷怪笼</b>（不在刷怪笼附近选库、不站它旁边开库），
- *       免得把普通刷怪笼转成不祥刷怪笼、把怪刷起来；</li>
- *   <li><b>背包里没有钥匙 → 聊天栏提醒 + 自动关闭</b>（{@link #noKeyStop()})；</li>
- *   <li>瞄准一个宝库后 <b>读它当前展示的物品</b>（{@link VaultDisplay}），按设置决定「命中就开 / 只是记录」；</li>
- *   <li><b>标记已打开的不祥宝库</b>（{@link VaultMarks}，落盘到 {@code fo-elytra-vaults.txt}，跨会话）；</li>
- *   <li>开关「任务结束后自动关闭」控制收工后要不要把自己关掉；</li>
- *   <li>本密室没库可开时：Baritone <b>自动爬上地表</b> → 借「自动鞘翅飞行」飞向
- *       <b>按种子（输入栏手填）推算出的最近试炼大厅</b>；</li>
- *   <li>到达后自动下降进入，再找<b>未标记</b>的不祥宝库，重复，<b>直到钥匙或食物用完</b>；</li>
- *   <li>八项相关参数全部是设置项，可手动调。</li>
- * </ol>
- *
- * <h2>必须说清楚的两个机制事实（不然你会觉得模块「笨」）</h2>
- * <ul>
- *   <li><b>展示物 ≠ 实际掉落。</b> 原版在宝库激活后每秒随机从掉落表里抽一件「展示物」循环放，
- *       而真正喷出来的战利品是<b>另外独立掷骰</b>的（wiki 原文：
- *       "the items to eject are rolled independently of whatever the idle display shows"）。
- *       所以「展示物是沉重核心才开」<b>不会</b>提高每把钥匙出目标的概率，只会让你少开很多库。
- *       因此默认是 {@link DisplayMode#LOG}（走到跟前读一眼、写进日志，但照样开），
- *       你要严格按展示物筛就改成 REQUIRE —— 模块会把这条机制写进聊天栏提醒你。</li>
- *   <li><b>钥匙和不祥刷怪笼是矛盾的。</b> 不祥试炼钥匙来自<b>不祥试炼刷怪笼</b>（喝不祥之瓶 → 靠近刷怪笼拿试炼之兆 →
- *       打死它刷出的怪，30% 概率喷钥匙），而本模块默认<b>绕开</b>刷怪笼。两条要求天生冲突，所以本模块
- *       <b>不刷钥匙</b>：钥匙得你自己准备好（或者你把「绕过试炼刷怪笼」关掉，再自己用别的模块刷）。
- *       没有钥匙时它会明确提醒并停手，而不是傻站着。</li>
- * </ul>
- *
- * <h2>状态机（{@link Phase}）</h2>
- * <pre>
- * PREPARE →（定位成功）→ CLIMB → TRAVEL → DIG → SCAN → FILTER → APPROACH → LOOK → OPEN → POST_OPEN
- *                    ↘（定位失败，就地找）→ SCAN ↗                                            ↓
- *                                     NO_VAULT ←──────────────────────────────────────────────┘
- * </pre>
- * 每个阶段都「要么推进、要么给出一条明确的中文原因」，不会静默卡死（这是前面几轮 bug 的总结）。
- */
-public class AutoOminousVault extends FOElytraModule {
-
-    /** 状态机阶段。命名 = 「这一步在干什么」。 */
-    public enum Phase {
-        /** 还没开始。 */
-        IDLE("空闲"),
-        /** 检查钥匙/食物/工具、写日志、决定要不要先飞。 */
-        PREPARE("准备"),
-        /** 在半径内增量扫描不祥宝库（每 tick 有预算，不卡客户端）。 */
-        SCAN("扫描宝库"),
-        /** 对扫到的候选做「刷怪笼距离」过滤（每个候选要读一片方块，所以也要摊到多 tick）。 */
-        FILTER("过滤候选"),
-        /** 用 Baritone 走到目标的激活范围内。 */
-        APPROACH("走近宝库"),
-        /** 到了跟前，等展示物同步过来并读一眼。 */
-        LOOK("查看展示物"),
-        /** 交给 {@link VaultOpener} 开这一个库（只开这一个）。 */
-        OPEN("开宝库"),
-        /** 处理开库结果：结算战利品、标记、决定下一个。 */
-        POST_OPEN("开库结算"),
-        /** 这个密室没有可开的库了：判断「收工」还是「换下一个密室」。 */
-        NO_VAULT("本密室无库"),
-        /** 用 Baritone 爬上地表（鞘翅在地下起飞不了）。 */
-        CLIMB("爬升到地表"),
-        /** 借「自动鞘翅飞行」飞往下一个试炼大厅坐标。 */
-        TRAVEL("飞往下一处"),
-        /** 到地方了，挖竖井下降到密室层。 */
-        DIG("挖竖井下降"),
-        /** 正常收工。 */
-        DONE("完成"),
-        /** 失败（原因见 {@link #failReason}）。 */
-        FAILED("失败");
-
-        public final String label;
-
-        Phase(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/提示均显示中文（模块列表、日志、聊天输出都会打印这个阶段） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    /** 怎么找到试炼大厅。 */
-    public enum LocateMode {
-        /** 种子推算 → 坐标列表 → 地图 → 单机种子搜索（有什么用什么）。 */
-        AUTO("自动（有什么用什么）"),
-        /** 只用手填种子推算（多人服务器上也能用）。 */
-        SEED("种子推算"),
-        /** 只用下面的坐标列表。 */
-        COORD_LIST("坐标列表"),
-        /** 只读背包里的「埋藏的试炼密室地图」。 */
-        MAP("藏宝图"),
-        /** 只用单机整合服务端的真实世界生成器搜索（只在单人存档有效）。 */
-        INTEGRATED_SEARCH("单机世界搜索");
-
-        public final String label;
-
-        LocateMode(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    /** 展示物怎么用。 */
-    public enum DisplayMode {
-        /** 不看展示物，直接开（最省事）。 */
-        OFF("不检查展示物"),
-        /** 走到跟前读一眼、写进日志和聊天栏，但照样开（默认：因为展示物不预测掉落）。 */
-        LOG("只记录展示物"),
-        /** 展示物必须命中目标才开，不命中就换下一个（按用户原文，但会显著降低开库效率）。 */
-        REQUIRE("必须命中展示物");
-
-        public final String label;
-
-        DisplayMode(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    // ------------------------------------------------------------------ 常量
-
-    /** 扫描每 tick 最多处理多少个坐标（和 VaultOpener 同一个量级：6000 个坐标 ≈ 一瞬间，不影响帧率）。 */
+public class AutoOminousVault
+extends FOElytraModule {
     private static final int SCAN_BUDGET_PER_TICK = 6000;
-    /**
-     * 扫描的高度带下限/上限：试炼密室在 Y=-40~-20 起，房间多在 -20~0，宝库不会长在地表以上。
-     *
-     * <p><b>必须和 {@link VaultOpener} 内部那一对（同样 -40 / 16）完全一致</b>：
-     * 模块自己扫出来的候选，最后是交给开库状态机去「走过去 + 开」的，而开库状态机有自己的一轮扫描。
-     * 如果这边带得更宽（原来写的是 -60~10），Y &lt; -40 的宝库会被模块选中、走过去，然后被开库状态机
-     * 判成「半径内没有可开的宝库」—— 白走一趟还白记一个「没能打开」。对齐之后这类假失败不可能发生。</p>
-     */
     private static final int SCAN_Y_MIN = -40;
     private static final int SCAN_Y_MAX = 16;
-    /** 玩家不在高度带里时的兜底上下范围（绝不放开成整个立方体，那正是卡死的成因）。 */
     private static final int SCAN_FALLBACK_HALF = 24;
-    /**
-     * 每 tick 最多做几次「刷怪笼距离」检查（每次要读约 1.5 万格方块，限流避免卡帧）。
-     *
-     * <p>默认 12 格安全距离时单次约 1.5 万次读方块，取 1 就是「每 tick 最多 1.5 万次」——
-     * 对客户端来说很轻；试炼密室里宝库也就十几个，过滤完最多十几秒。</p>
-     */
     private static final int SPAWNER_CHECK_BUDGET_PER_TICK = 1;
-    /** 挖竖井时「连续多少 tick 一格都没挖掉」就判定挖不动（没镐子/方块太硬），报失败而不是无限挖。 */
     private static final int DIG_STALL_MAX_TICKS = 400;
-    /** 挖竖井前「等落地」的上限（tick）：滑翔中截停之后要等玩家真的站到地上才开始挖。 */
     private static final int LANDING_WAIT_MAX_TICKS = 400;
-    /** 扫描进度日志间隔（tick）。 */
     private static final int SCAN_PROGRESS_LOG_TICKS = 40;
-    /** APPROACH 重发 goto 的间隔（tick）：走偏/被别人顶掉时能自愈。 */
     private static final int REPATH_TICKS = 100;
-    /** 走到跟前之后，至少等这么多 tick 才认为「展示物已经同步」（服务端状态每 20 tick 才重算一次）。 */
     private static final int DISPLAY_SYNC_MIN_WAIT = 20;
-    /** 玩家自己开着界面时最多等多久（tick）：10 秒，超时给明确原因，绝不硬关别人的界面。 */
     private static final int SCREEN_HOLD_MAX_TICKS = 200;
-
-    // ------------------------------------------------------------------ 设置
-
-    private final SettingGroup sgTarget = settings.createGroup("目标");
-    private final SettingGroup sgFind = settings.createGroup("寻找宝库");
-    private final SettingGroup sgDisplay = settings.createGroup("展示物筛选");
-    private final SettingGroup sgOpen = settings.createGroup("开宝库");
-    private final SettingGroup sgLocate = settings.createGroup("定位试炼大厅");
-    private final SettingGroup sgTravel = settings.createGroup("飞行");
-    private final SettingGroup sgDig = settings.createGroup("下降进入");
-    private final SettingGroup sgStop = settings.createGroup("停止条件");
-    private final SettingGroup sgDebug = settings.createGroup("调试");
-
-    private final ItemListSetting targetItems = SettingHelper.items(sgTarget, "目标战利品",
-        "开出来的东西命中这里任意一项就算这次有收益，默认「沉重核心 + 附魔金苹果」。",
-        List.of(Items.HEAVY_CORE, Items.ENCHANTED_GOLDEN_APPLE), false);
-
-    private final StringSetting targetEnchants = SettingHelper.string(sgTarget, "目标魔咒（附魔书）",
-        "按魔咒 ID 判定附魔书，例如 wind_burst（风爆）。多个用逗号隔开，留空就不判。",
-        "wind_burst");
-
-    private final BoolSetting stopOnTarget = SettingHelper.bool(sgTarget, "命中目标就收工",
-        "开到目标战利品就结束整个任务（关掉 = 把本密室能开的都开完再说）。", true);
-
-    private final BoolSetting alsoNormal = SettingHelper.bool(sgTarget, "也开普通宝库",
-        "打开后普通宝库也会被选中（用普通试炼钥匙）。默认只开不祥宝库 —— 沉重核心只在它的独有池里。", false);
-
-    private final IntSetting searchRadius = SettingHelper.int_(sgFind, "宝库搜索半径（格）",
-        "以你为中心、在已加载区块里找宝库的水平半径。试炼密室很大，太小会「明明在密室里却找不到库」。", 96, 16, 192);
-
-    private final BoolSetting avoidSpawner = SettingHelper.bool(sgFind, "绕过试炼刷怪笼",
-        "只挑离试炼刷怪笼够远的宝库，也不在刷怪笼旁边开库。走过去的路是 Baritone 寻路，可能会路过它。", true);
-
-    private final IntSetting spawnerAvoidRadius = SettingHelper.int_(sgFind, "离刷怪笼至少这么远（格）",
-        "候选宝库离试炼刷怪笼小于这个距离就跳过。默认 12 格，调大会跳过更多宝库。",
-        12, 4, 48);
-
-    private final EnumSetting<DisplayMode> displayMode = SettingHelper.enum_(sgDisplay, "展示物筛选方式",
-        "展示物和实际掉落无关，默认「只记录」照开；改成「必须命中才开」会少开很多库。",
-        DisplayMode.LOG);
-
-    private final ItemListSetting displayItems = SettingHelper.items(sgDisplay, "展示物 · 目标物品",
-        "「必须命中才开」/「只记录」模式下，认定「命中」的物品清单；默认沉重核心 + 附魔金苹果。",
-        List.of(Items.HEAVY_CORE, Items.ENCHANTED_GOLDEN_APPLE), false);
-
-    private final StringSetting displayEnchants = SettingHelper.string(sgDisplay, "展示物 · 目标魔咒",
-        "展示物是附魔书时按魔咒 ID 判定（例如 wind_burst）。多个用逗号隔开。",
-        "wind_burst");
-
-    private final BoolSetting openWhenUnknown = SettingHelper.bool(sgDisplay, "读不到展示物也开",
-        "读不到展示物时照开（默认）；关掉就当成不命中，换下一个。", true);
-
-    private final IntSetting displayWaitTicks = SettingHelper.int_(sgDisplay, "读展示物前等多久（tick）",
-        "站定后等这么久再读展示物，服务端每 20 tick 才刷新一次。默认 30。",
-        30, DISPLAY_SYNC_MIN_WAIT, 100);
-
-    private final DoubleSetting openDistance = SettingHelper.double_(sgOpen, "开库距离（格）",
-        "站起来到这个水平距离内才右键（别顶着方块走）。宝库的激活半径是 4.0 格（3D 含 Y），别调太大。", 3.0, 1.0, 6.0);
-
-    private final IntSetting collectTicks = SettingHelper.int_(sgOpen, "开完后收集多久（tick）",
-        "不祥宝库是「一秒喷一件、最多 1+1~3 件」，内部有保守下限，调太小会漏判最后一件（往往是目标物）。", 120, 20, 600);
-
-    private final IntSetting maxPerChamber = SettingHelper.int_(sgOpen, "一个密室最多开几个",
-        "在一个试炼大厅里最多开这么多个宝库（每个都要一把钥匙），够了就换下一个密室/收工。", 8, 1, 64);
-
-    private final IntSetting actionDelay = SettingHelper.int_(sgOpen, "动作间隔（tick）",
-        "交给开库状态机的动作节流，卡服/高延迟时调大一点更稳。", 4, 0, 40);
-
-    private final EnumSetting<LocateMode> locateMode = SettingHelper.enum_(sgLocate, "定位方式", 
-        "怎么找试炼大厅。默认「自动」：种子推算 → 坐标列表 → 读地图 → 单机搜索，有什么用什么。",
-        LocateMode.AUTO);
-
-    private final StringSetting worldSeed = SettingHelper.string(sgLocate, "世界种子（手填）",
-        "填 /seed 显示的那个数字，客户端直接算出试炼大厅候选点，多人服务器也能用。留空就跳过种子推算。",
-        "");
-
-    private final IntSetting seedRings = SettingHelper.int_(sgLocate, "种子推算圈数",
-        "以你为中心往外推几圈 region 去找密室（1 圈 = 34×34 区块）。圈数越大能算到的越远，纯计算不吃性能。", 2, 1, 8);
-
-    private final StringListSetting coordList = SettingHelper.stringList(sgLocate, "坐标列表",
-        "一行一个坐标，格式 x,z（也可用空格或中文逗号）。模块会挑离你最近、这次没去过的那个。", List.of());
-
-    private final IntSetting integratedSearchRadius = SettingHelper.int_(sgLocate, "单机种子搜索半径（区块）",
-        "只在单人存档有效：用整合服务端的真实世界生成器从你当前位置往外搜（内部会夹到 200 区块）。",
-        200, 16, 200);
-
-    private final BoolSetting startFly = SettingHelper.bool(sgLocate, "启动时就飞往最近的试炼大厅",
-        "打开模块就先定位并飞过去；关掉 = 你自己已经在密室里，直接开始找宝库。",
-        true);
-
-    private final BoolSetting autoClose = SettingHelper.bool(sgLocate, "任务结束后自动关闭",
-        "开（默认）：一个密室刷完就关掉模块收工；关：钥匙没用完就继续爬上地表飞下一个密室。",
-        true);
-
-    private final IntSetting maxChambers = SettingHelper.int_(sgLocate, "最多换几个密室",
-        "「任务结束后自动关闭」关掉时才有用：最多连续换这么多个密室就强制收工，防止挂机乱飞一晚上。", 5, 1, 20);
-
-    private final IntSetting arriveRadius = SettingHelper.int_(sgTravel, "到达判定距离（格）",
-        "水平距离小于这个值就算「到目标上空了」，开始下降。", 64, 8, 512);
-
-    private final IntSetting digArriveRadius = SettingHelper.int_(sgTravel, "飞到多近才停下来挖（格）",
-        "飞到离目标这么近才停飞下降。默认 16 格，调到 4 以下会绕圈。",
-        16, 4, 64);
-
-    private final IntSetting approachTimeoutSec = SettingHelper.int_(sgOpen, "走到宝库超时（秒）",
-        "走到宝库的时限，超时就跳过它换下一个。默认 60 秒。", 60, 10, 600);
-    private final IntSetting takeoffMinY = SettingHelper.int_(sgTravel, "最低起飞 Y",
-        "Y 高于这个值就认为「能起飞了」（通常地面在 60 以上）。爬上地表就看它和「见天」两个条件。", 60, -64, 320);
-
-    private final IntSetting climbTimeoutSec = SettingHelper.int_(sgTravel, "爬上地表超时（秒）",
-        "让 Baritone 往上走这么久还上不去（被堵死/找不到路）就报失败并说明原因，绝不无限等。", 300, 30, 3600);
-
-    private final IntSetting travelTimeoutSec = SettingHelper.int_(sgTravel, "飞行超时（秒）",
-        "飞这么久还没到就放弃飞行、直接进下降阶段。", 900, 30, 7200);
-
-    private final BoolSetting disableTravelOnArrive = SettingHelper.bool(sgTravel, "到达后关掉跑图模块",
-        "「自动鞘翅飞行」是借来用的：到达后按这个开关决定要不要还回去（关掉它 = 让它继续开着）。", true);
-
-    private final BoolSetting autoDig = SettingHelper.bool(sgDig, "自动挖竖井下降",
-        "到目标上空后自己挖一条 1×1 竖井降到密室层。关掉 = 你自己把角色带到密室层（模块只做找库+开库）。", true);
-
-    private final IntSetting digY = SettingHelper.int_(sgDig, "下降到 Y",
-        "挖到这个高度就停。试炼大厅多在 Y=-20~0。", -20, -64, 320);
-
-    private final IntSetting maxDig = SettingHelper.int_(sgDig, "单次最多挖多少格",
-        "一次下降最多挖这么多格，超了就停下报原因。", 200, 1, 400);
-
-    private final DoubleSetting digAbortHealth = SettingHelper.double_(sgDig, "下降时血量低于多少就停",
-        "血量掉到这个值就停手保命。", 6.0, 1.0, 20.0);
-
-    private final ItemListSetting foodItems = SettingHelper.items(sgStop, "算作「食物」的物品",
-        "这些物品全用完就算食物用完，只数背包、不会自动吃。默认空清单 = 不检查，判定只在开完库之后。",
-        List.of(), true);
-
-    private final BoolSetting stopWhenNoFood = SettingHelper.bool(sgStop, "食物用完就停",
-        "开着 = 食物数量变成 0 时结束任务（按「任务结束后自动关闭」决定关不关模块）。", true);
-
-    private final BoolSetting noKeyAutoClose = SettingHelper.bool(sgStop, "没钥匙时自动关闭",
-        "背包里没钥匙时聊天栏提醒并关掉模块（默认开）；关掉就只提醒、不关模块。", true);
-
-    private final BoolSetting talkInChat = SettingHelper.bool(sgStop, "关键节点发聊天栏提示",
-        "开库的关键节点（开始开库、开完、换密室等）发聊天栏，失败原因和「没钥匙停止」始终会发。"
-            + "飞行阶段的状态监控、起飞、到达提示由「自动鞘翅飞行」自己的设置控制。", true);
-
-    private final BoolSetting hudInfo = SettingHelper.bool(sgDebug, "HUD 状态",
-        "在 HUD 上显示「阶段 + 关键数字」。", true);
-
-    private final BoolSetting verboseLog = SettingHelper.bool(sgDebug, "详细文件日志",
-        "把每个判断都写进 fo-elytra-*.log（排查问题用）。", true);
-
-    private final BoolSetting debugMessages = SettingHelper.bool(sgDebug, "调试输出到聊天栏",
-        "把 FOElytraLog.debug 的内容也发到聊天栏。本模块没有调试级输出，这个开关只对其他模块有效。", false);
-
-    // ------------------------------------------------------------------ 运行状态
-
-    private Phase phase = Phase.IDLE;
-    private Phase lastPhase = Phase.IDLE;
+    private final SettingGroup sgTarget;
+    private final SettingGroup sgFind;
+    private final SettingGroup sgDisplay;
+    private final SettingGroup sgOpen;
+    private final SettingGroup sgLocate;
+    private final SettingGroup sgTravel;
+    private final SettingGroup sgDig;
+    private final SettingGroup sgStop;
+    private final SettingGroup sgDebug;
+    private final ItemListSetting targetItems;
+    private final StringSetting targetEnchants;
+    private final BoolSetting stopOnTarget;
+    private final BoolSetting alsoNormal;
+    private final IntSetting searchRadius;
+    private final BoolSetting avoidSpawner;
+    private final IntSetting spawnerAvoidRadius;
+    private final EnumSetting<DisplayMode> displayMode;
+    private final ItemListSetting displayItems;
+    private final StringSetting displayEnchants;
+    private final BoolSetting openWhenUnknown;
+    private final IntSetting displayWaitTicks;
+    private final DoubleSetting openDistance;
+    private final IntSetting collectTicks;
+    private final IntSetting maxPerChamber;
+    private final IntSetting actionDelay;
+    private final EnumSetting<LocateMode> locateMode;
+    private final StringSetting worldSeed;
+    private final IntSetting seedRings;
+    private final StringListSetting coordList;
+    private final IntSetting integratedSearchRadius;
+    private final BoolSetting startFly;
+    private final BoolSetting autoClose;
+    private final IntSetting maxChambers;
+    private final IntSetting arriveRadius;
+    private final IntSetting digArriveRadius;
+    private final IntSetting approachTimeoutSec;
+    private final IntSetting takeoffMinY;
+    private final IntSetting climbTimeoutSec;
+    private final IntSetting travelTimeoutSec;
+    private final BoolSetting disableTravelOnArrive;
+    private final BoolSetting autoDig;
+    private final IntSetting digY;
+    private final IntSetting maxDig;
+    private final DoubleSetting digAbortHealth;
+    private final ItemListSetting foodItems;
+    private final BoolSetting stopWhenNoFood;
+    private final BoolSetting noKeyAutoClose;
+    private final BoolSetting talkInChat;
+    private final BoolSetting hudInfo;
+    private final BoolSetting verboseLog;
+    private final BoolSetting debugMessages;
+    private Phase phase;
+    private Phase lastPhase;
     private int phaseTicks;
-    private String failReason = "";
-
-    /** 定位器：种子推算/地图/单机搜索都走它（它内部不记「已去过」，那是模块自己的事）。 */
-    private final TrialChamberLocator locator = new TrialChamberLocator();
-    /** 这次已经去过的密室坐标（"x,z"）—— 同一个密室刷完不要再来回横跳。 */
-    private final Set<String> usedTargets = new HashSet<>();
-    /** 本次运行已经进过几个密室。 */
+    private String failReason;
+    private final TrialChamberLocator locator;
+    private final Set<String> usedTargets;
     private int chambersVisited;
     private int targetX;
     private int targetZ;
-    private String targetNote = "";
+    private String targetNote;
     private boolean integratedSearchStarted;
-    private String locateFail = "";
-
-    /** 扫描游标与统计（增量扫描，跨 tick 续扫）。 */
+    private String locateFail;
     private boolean scanning;
-    private int scanOriginX, scanOriginY, scanOriginZ, scanRadius;
-    private int scanDx, scanDyRel, scanDz, scanDyMin, scanDyMax;
-    private long scanDone, scanTotal;
-    private long scanChecked, scanSkippedUnloaded;
+    private int scanOriginX;
+    private int scanOriginY;
+    private int scanOriginZ;
+    private int scanRadius;
+    private int scanDx;
+    private int scanDyRel;
+    private int scanDz;
+    private int scanDyMin;
+    private int scanDyMax;
+    private long scanDone;
+    private long scanTotal;
+    private long scanChecked;
+    private long scanSkippedUnloaded;
     private int scanTicks;
-    private int scanChunkX = Integer.MIN_VALUE, scanChunkZ = Integer.MIN_VALUE;
+    private int scanChunkX;
+    private int scanChunkZ;
     private boolean scanChunkLoadedFlag;
-    /** 扫到的原始候选（还没做刷怪笼距离过滤）。 */
-    private final List<BlockPos> pendingCandidates = new ArrayList<>();
-    private final Set<Long> pendingKeys = new HashSet<>();
-    /** 过滤之后的候选（按距离排序，最近的在前）。 */
-    private final List<BlockPos> candidates = new ArrayList<>();
+    private final List<BlockPos> pendingCandidates;
+    private final Set<Long> pendingKeys;
+    private final List<BlockPos> candidates;
     private int filterIndex;
     private int filteredSpawner;
     private int filteredMarked;
-
-    /** 本次运行跳过/试过的库（展示物不命中、走不到、没开开）—— 本轮不再选它。 */
-    private final Set<Long> skipped = new HashSet<>();
-
-    /** 当前盯上的宝库。 */
+    private final Set<Long> skipped;
     private BlockPos current;
-    private String displayDesc = "（还没看）";
+    private String displayDesc;
     private int displayReadTicks;
-
     private VaultOpener vaultOpener;
     private int openedTotal;
     private int openedThisChamber;
-    private int travelTicks = 0;
+    private int travelTicks;
     private boolean weEnabledTravel;
-    /** 借调「自动鞘翅飞行」前的全局详细日志开关（对方的 onActivate 会覆盖它，还回去时要恢复）。 */
     private boolean prevFileVerbose;
     private boolean verboseSaved;
     private boolean warnedNoTravel;
@@ -421,1560 +161,1454 @@ public class AutoOminousVault extends FOElytraModule {
     private int airBelowTicks;
     private int landingWaitTicks;
     private int digDelayTicks;
-    private int surfaceYCache = Integer.MIN_VALUE;
+    private int surfaceYCache;
     private int screenWaitTicks;
     private int gotoResend;
 
     public AutoOminousVault() {
-        super("FO 自动开宝库", "找不祥宝库→避开刷怪笼→用不祥钥匙开→标记已开；本密室刷完自动换下一个，钥匙或食物用完即停。",
-            "ominous-vault", "vault", "aov", "fovault");
+        super("FO \u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93", "\u627e\u4e0d\u7965\u5b9d\u5e93\u2192\u907f\u5f00\u5237\u602a\u7b3c\u2192\u7528\u4e0d\u7965\u94a5\u5319\u5f00\u2192\u6807\u8bb0\u5df2\u5f00\uff1b\u672c\u5bc6\u5ba4\u5237\u5b8c\u81ea\u52a8\u6362\u4e0b\u4e00\u4e2a\uff0c\u94a5\u5319\u6216\u98df\u7269\u7528\u5b8c\u5373\u505c\u3002", "ominous-vault", "vault", "aov");
+        this.sgTarget = this.settings.createGroup("\u76ee\u6807");
+        this.sgFind = this.settings.createGroup("\u5bfb\u627e\u5b9d\u5e93");
+        this.sgDisplay = this.settings.createGroup("\u5c55\u793a\u7269\u7b5b\u9009");
+        this.sgOpen = this.settings.createGroup("\u5f00\u5b9d\u5e93");
+        this.sgLocate = this.settings.createGroup("\u5b9a\u4f4d\u8bd5\u70bc\u5927\u5385");
+        this.sgTravel = this.settings.createGroup("\u98de\u884c");
+        this.sgDig = this.settings.createGroup("\u4e0b\u964d\u8fdb\u5165");
+        this.sgStop = this.settings.createGroup("\u505c\u6b62\u6761\u4ef6");
+        this.sgDebug = this.settings.createGroup("\u8c03\u8bd5");
+        this.targetItems = SettingHelper.items(this.sgTarget, "\u76ee\u6807\u6218\u5229\u54c1", "\u5f00\u51fa\u6765\u7684\u4e1c\u897f\u547d\u4e2d\u8fd9\u91cc\u4efb\u610f\u4e00\u9879\u5c31\u7b97\u8fd9\u6b21\u6709\u6536\u76ca\uff0c\u9ed8\u8ba4\u300c\u6c89\u91cd\u6838\u5fc3 + \u9644\u9b54\u91d1\u82f9\u679c\u300d\u3002", List.of(Items.HEAVY_CORE, Items.ENCHANTED_GOLDEN_APPLE), false);
+        this.targetEnchants = SettingHelper.string(this.sgTarget, "\u76ee\u6807\u9b54\u5492\uff08\u9644\u9b54\u4e66\uff09", "\u6309\u9b54\u5492 ID \u5224\u5b9a\u9644\u9b54\u4e66\uff0c\u4f8b\u5982 wind_burst\uff08\u98ce\u7206\uff09\u3002\u591a\u4e2a\u7528\u9017\u53f7\u9694\u5f00\uff0c\u7559\u7a7a\u5c31\u4e0d\u5224\u3002", "wind_burst");
+        this.stopOnTarget = SettingHelper.bool(this.sgTarget, "\u547d\u4e2d\u76ee\u6807\u5c31\u6536\u5de5", "\u5f00\u5230\u76ee\u6807\u6218\u5229\u54c1\u5c31\u7ed3\u675f\u6574\u4e2a\u4efb\u52a1\uff08\u5173\u6389 = \u628a\u672c\u5bc6\u5ba4\u80fd\u5f00\u7684\u90fd\u5f00\u5b8c\u518d\u8bf4\uff09\u3002", true);
+        this.alsoNormal = SettingHelper.bool(this.sgTarget, "\u4e5f\u5f00\u666e\u901a\u5b9d\u5e93", "\u6253\u5f00\u540e\u666e\u901a\u5b9d\u5e93\u4e5f\u4f1a\u88ab\u9009\u4e2d\uff08\u7528\u666e\u901a\u8bd5\u70bc\u94a5\u5319\uff09\u3002\u9ed8\u8ba4\u53ea\u5f00\u4e0d\u7965\u5b9d\u5e93 \u2014\u2014 \u6c89\u91cd\u6838\u5fc3\u53ea\u5728\u5b83\u7684\u72ec\u6709\u6c60\u91cc\u3002", false);
+        this.searchRadius = SettingHelper.int_(this.sgFind, "\u5b9d\u5e93\u641c\u7d22\u534a\u5f84\uff08\u683c\uff09", "\u4ee5\u4f60\u4e3a\u4e2d\u5fc3\u3001\u5728\u5df2\u52a0\u8f7d\u533a\u5757\u91cc\u627e\u5b9d\u5e93\u7684\u6c34\u5e73\u534a\u5f84\u3002\u8bd5\u70bc\u5bc6\u5ba4\u5f88\u5927\uff0c\u592a\u5c0f\u4f1a\u300c\u660e\u660e\u5728\u5bc6\u5ba4\u91cc\u5374\u627e\u4e0d\u5230\u5e93\u300d\u3002", 96, 16, 192);
+        this.avoidSpawner = SettingHelper.bool(this.sgFind, "\u7ed5\u8fc7\u8bd5\u70bc\u5237\u602a\u7b3c", "\u53ea\u6311\u79bb\u8bd5\u70bc\u5237\u602a\u7b3c\u591f\u8fdc\u7684\u5b9d\u5e93\uff0c\u4e5f\u4e0d\u5728\u5237\u602a\u7b3c\u65c1\u8fb9\u5f00\u5e93\u3002\u8d70\u8fc7\u53bb\u7684\u8def\u662f Baritone \u5bfb\u8def\uff0c\u53ef\u80fd\u4f1a\u8def\u8fc7\u5b83\u3002", true);
+        this.spawnerAvoidRadius = SettingHelper.int_(this.sgFind, "\u79bb\u5237\u602a\u7b3c\u81f3\u5c11\u8fd9\u4e48\u8fdc\uff08\u683c\uff09", "\u5019\u9009\u5b9d\u5e93\u79bb\u8bd5\u70bc\u5237\u602a\u7b3c\u5c0f\u4e8e\u8fd9\u4e2a\u8ddd\u79bb\u5c31\u8df3\u8fc7\u3002\u9ed8\u8ba4 12 \u683c\uff0c\u8c03\u5927\u4f1a\u8df3\u8fc7\u66f4\u591a\u5b9d\u5e93\u3002", 12, 4, 48);
+        this.displayMode = SettingHelper.enum_(this.sgDisplay, "\u5c55\u793a\u7269\u7b5b\u9009\u65b9\u5f0f", "\u5c55\u793a\u7269\u548c\u5b9e\u9645\u6389\u843d\u65e0\u5173\uff0c\u9ed8\u8ba4\u300c\u53ea\u8bb0\u5f55\u300d\u7167\u5f00\uff1b\u6539\u6210\u300c\u5fc5\u987b\u547d\u4e2d\u624d\u5f00\u300d\u4f1a\u5c11\u5f00\u5f88\u591a\u5e93\u3002", DisplayMode.LOG);
+        this.displayItems = SettingHelper.items(this.sgDisplay, "\u5c55\u793a\u7269 \u00b7 \u76ee\u6807\u7269\u54c1", "\u300c\u5fc5\u987b\u547d\u4e2d\u624d\u5f00\u300d/\u300c\u53ea\u8bb0\u5f55\u300d\u6a21\u5f0f\u4e0b\uff0c\u8ba4\u5b9a\u300c\u547d\u4e2d\u300d\u7684\u7269\u54c1\u6e05\u5355\uff1b\u9ed8\u8ba4\u6c89\u91cd\u6838\u5fc3 + \u9644\u9b54\u91d1\u82f9\u679c\u3002", List.of(Items.HEAVY_CORE, Items.ENCHANTED_GOLDEN_APPLE), false);
+        this.displayEnchants = SettingHelper.string(this.sgDisplay, "\u5c55\u793a\u7269 \u00b7 \u76ee\u6807\u9b54\u5492", "\u5c55\u793a\u7269\u662f\u9644\u9b54\u4e66\u65f6\u6309\u9b54\u5492 ID \u5224\u5b9a\uff08\u4f8b\u5982 wind_burst\uff09\u3002\u591a\u4e2a\u7528\u9017\u53f7\u9694\u5f00\u3002", "wind_burst");
+        this.openWhenUnknown = SettingHelper.bool(this.sgDisplay, "\u8bfb\u4e0d\u5230\u5c55\u793a\u7269\u4e5f\u5f00", "\u8bfb\u4e0d\u5230\u5c55\u793a\u7269\u65f6\u7167\u5f00\uff08\u9ed8\u8ba4\uff09\uff1b\u5173\u6389\u5c31\u5f53\u6210\u4e0d\u547d\u4e2d\uff0c\u6362\u4e0b\u4e00\u4e2a\u3002", true);
+        this.displayWaitTicks = SettingHelper.int_(this.sgDisplay, "\u8bfb\u5c55\u793a\u7269\u524d\u7b49\u591a\u4e45\uff08tick\uff09", "\u7ad9\u5b9a\u540e\u7b49\u8fd9\u4e48\u4e45\u518d\u8bfb\u5c55\u793a\u7269\uff0c\u670d\u52a1\u7aef\u6bcf 20 tick \u624d\u5237\u65b0\u4e00\u6b21\u3002\u9ed8\u8ba4 30\u3002", 30, 20, 100);
+        this.openDistance = SettingHelper.double_(this.sgOpen, "\u5f00\u5e93\u8ddd\u79bb\uff08\u683c\uff09", "\u7ad9\u8d77\u6765\u5230\u8fd9\u4e2a\u6c34\u5e73\u8ddd\u79bb\u5185\u624d\u53f3\u952e\uff08\u522b\u9876\u7740\u65b9\u5757\u8d70\uff09\u3002\u5b9d\u5e93\u7684\u6fc0\u6d3b\u534a\u5f84\u662f 4.0 \u683c\uff083D \u542b Y\uff09\uff0c\u522b\u8c03\u592a\u5927\u3002", 3.0, 1.0, 6.0);
+        this.collectTicks = SettingHelper.int_(this.sgOpen, "\u5f00\u5b8c\u540e\u6536\u96c6\u591a\u4e45\uff08tick\uff09", "\u4e0d\u7965\u5b9d\u5e93\u662f\u300c\u4e00\u79d2\u55b7\u4e00\u4ef6\u3001\u6700\u591a 1+1~3 \u4ef6\u300d\uff0c\u5185\u90e8\u6709\u4fdd\u5b88\u4e0b\u9650\uff0c\u8c03\u592a\u5c0f\u4f1a\u6f0f\u5224\u6700\u540e\u4e00\u4ef6\uff08\u5f80\u5f80\u662f\u76ee\u6807\u7269\uff09\u3002", 120, 20, 600);
+        this.maxPerChamber = SettingHelper.int_(this.sgOpen, "\u4e00\u4e2a\u5bc6\u5ba4\u6700\u591a\u5f00\u51e0\u4e2a", "\u5728\u4e00\u4e2a\u8bd5\u70bc\u5927\u5385\u91cc\u6700\u591a\u5f00\u8fd9\u4e48\u591a\u4e2a\u5b9d\u5e93\uff08\u6bcf\u4e2a\u90fd\u8981\u4e00\u628a\u94a5\u5319\uff09\uff0c\u591f\u4e86\u5c31\u6362\u4e0b\u4e00\u4e2a\u5bc6\u5ba4/\u6536\u5de5\u3002", 8, 1, 64);
+        this.actionDelay = SettingHelper.int_(this.sgOpen, "\u52a8\u4f5c\u95f4\u9694\uff08tick\uff09", "\u4ea4\u7ed9\u5f00\u5e93\u72b6\u6001\u673a\u7684\u52a8\u4f5c\u8282\u6d41\uff0c\u5361\u670d/\u9ad8\u5ef6\u8fdf\u65f6\u8c03\u5927\u4e00\u70b9\u66f4\u7a33\u3002", 4, 0, 40);
+        this.locateMode = SettingHelper.enum_(this.sgLocate, "\u5b9a\u4f4d\u65b9\u5f0f", "\u600e\u4e48\u627e\u8bd5\u70bc\u5927\u5385\u3002\u9ed8\u8ba4\u300c\u81ea\u52a8\u300d\uff1a\u79cd\u5b50\u63a8\u7b97 \u2192 \u5750\u6807\u5217\u8868 \u2192 \u8bfb\u5730\u56fe \u2192 \u5355\u673a\u641c\u7d22\uff0c\u6709\u4ec0\u4e48\u7528\u4ec0\u4e48\u3002", LocateMode.AUTO);
+        this.worldSeed = SettingHelper.string(this.sgLocate, "\u4e16\u754c\u79cd\u5b50\uff08\u624b\u586b\uff09", "\u586b /seed \u663e\u793a\u7684\u90a3\u4e2a\u6570\u5b57\uff0c\u5ba2\u6237\u7aef\u76f4\u63a5\u7b97\u51fa\u8bd5\u70bc\u5927\u5385\u5019\u9009\u70b9\uff0c\u591a\u4eba\u670d\u52a1\u5668\u4e5f\u80fd\u7528\u3002\u7559\u7a7a\u5c31\u8df3\u8fc7\u79cd\u5b50\u63a8\u7b97\u3002", "");
+        this.seedRings = SettingHelper.int_(this.sgLocate, "\u79cd\u5b50\u63a8\u7b97\u5708\u6570", "\u4ee5\u4f60\u4e3a\u4e2d\u5fc3\u5f80\u5916\u63a8\u51e0\u5708 region \u53bb\u627e\u5bc6\u5ba4\uff081 \u5708 = 34\u00d734 \u533a\u5757\uff09\u3002\u5708\u6570\u8d8a\u5927\u80fd\u7b97\u5230\u7684\u8d8a\u8fdc\uff0c\u7eaf\u8ba1\u7b97\u4e0d\u5403\u6027\u80fd\u3002", 2, 1, 8);
+        this.coordList = SettingHelper.stringList(this.sgLocate, "\u5750\u6807\u5217\u8868", "\u4e00\u884c\u4e00\u4e2a\u5750\u6807\uff0c\u683c\u5f0f x,z\uff08\u4e5f\u53ef\u7528\u7a7a\u683c\u6216\u4e2d\u6587\u9017\u53f7\uff09\u3002\u6a21\u5757\u4f1a\u6311\u79bb\u4f60\u6700\u8fd1\u3001\u8fd9\u6b21\u6ca1\u53bb\u8fc7\u7684\u90a3\u4e2a\u3002", List.of());
+        this.integratedSearchRadius = SettingHelper.int_(this.sgLocate, "\u5355\u673a\u79cd\u5b50\u641c\u7d22\u534a\u5f84\uff08\u533a\u5757\uff09", "\u53ea\u5728\u5355\u4eba\u5b58\u6863\u6709\u6548\uff1a\u7528\u6574\u5408\u670d\u52a1\u7aef\u7684\u771f\u5b9e\u4e16\u754c\u751f\u6210\u5668\u4ece\u4f60\u5f53\u524d\u4f4d\u7f6e\u5f80\u5916\u641c\uff08\u5185\u90e8\u4f1a\u5939\u5230 200 \u533a\u5757\uff09\u3002", 200, 16, 200);
+        this.startFly = SettingHelper.bool(this.sgLocate, "\u542f\u52a8\u65f6\u5c31\u98de\u5f80\u6700\u8fd1\u7684\u8bd5\u70bc\u5927\u5385", "\u6253\u5f00\u6a21\u5757\u5c31\u5148\u5b9a\u4f4d\u5e76\u98de\u8fc7\u53bb\uff1b\u5173\u6389 = \u4f60\u81ea\u5df1\u5df2\u7ecf\u5728\u5bc6\u5ba4\u91cc\uff0c\u76f4\u63a5\u5f00\u59cb\u627e\u5b9d\u5e93\u3002", true);
+        this.autoClose = SettingHelper.bool(this.sgLocate, "\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed", "\u5f00\uff08\u9ed8\u8ba4\uff09\uff1a\u4e00\u4e2a\u5bc6\u5ba4\u5237\u5b8c\u5c31\u5173\u6389\u6a21\u5757\u6536\u5de5\uff1b\u5173\uff1a\u94a5\u5319\u6ca1\u7528\u5b8c\u5c31\u7ee7\u7eed\u722c\u4e0a\u5730\u8868\u98de\u4e0b\u4e00\u4e2a\u5bc6\u5ba4\u3002", true);
+        this.maxChambers = SettingHelper.int_(this.sgLocate, "\u6700\u591a\u6362\u51e0\u4e2a\u5bc6\u5ba4", "\u300c\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed\u300d\u5173\u6389\u65f6\u624d\u6709\u7528\uff1a\u6700\u591a\u8fde\u7eed\u6362\u8fd9\u4e48\u591a\u4e2a\u5bc6\u5ba4\u5c31\u5f3a\u5236\u6536\u5de5\uff0c\u9632\u6b62\u6302\u673a\u4e71\u98de\u4e00\u665a\u4e0a\u3002", 5, 1, 20);
+        this.arriveRadius = SettingHelper.int_(this.sgTravel, "\u5230\u8fbe\u5224\u5b9a\u8ddd\u79bb\uff08\u683c\uff09", "\u6c34\u5e73\u8ddd\u79bb\u5c0f\u4e8e\u8fd9\u4e2a\u503c\u5c31\u7b97\u300c\u5230\u76ee\u6807\u4e0a\u7a7a\u4e86\u300d\uff0c\u5f00\u59cb\u4e0b\u964d\u3002", 64, 8, 512);
+        this.digArriveRadius = SettingHelper.int_(this.sgTravel, "\u98de\u5230\u591a\u8fd1\u624d\u505c\u4e0b\u6765\u6316\uff08\u683c\uff09", "\u98de\u5230\u79bb\u76ee\u6807\u8fd9\u4e48\u8fd1\u624d\u505c\u98de\u4e0b\u964d\u3002\u9ed8\u8ba4 16 \u683c\uff0c\u8c03\u5230 4 \u4ee5\u4e0b\u4f1a\u7ed5\u5708\u3002", 16, 4, 64);
+        this.approachTimeoutSec = SettingHelper.int_(this.sgOpen, "\u8d70\u5230\u5b9d\u5e93\u8d85\u65f6\uff08\u79d2\uff09", "\u8d70\u5230\u5b9d\u5e93\u7684\u65f6\u9650\uff0c\u8d85\u65f6\u5c31\u8df3\u8fc7\u5b83\u6362\u4e0b\u4e00\u4e2a\u3002\u9ed8\u8ba4 60 \u79d2\u3002", 60, 10, 600);
+        this.takeoffMinY = SettingHelper.int_(this.sgTravel, "\u6700\u4f4e\u8d77\u98de Y", "Y \u9ad8\u4e8e\u8fd9\u4e2a\u503c\u5c31\u8ba4\u4e3a\u300c\u80fd\u8d77\u98de\u4e86\u300d\uff08\u901a\u5e38\u5730\u9762\u5728 60 \u4ee5\u4e0a\uff09\u3002\u722c\u4e0a\u5730\u8868\u5c31\u770b\u5b83\u548c\u300c\u89c1\u5929\u300d\u4e24\u4e2a\u6761\u4ef6\u3002", 60, -64, 320);
+        this.climbTimeoutSec = SettingHelper.int_(this.sgTravel, "\u722c\u4e0a\u5730\u8868\u8d85\u65f6\uff08\u79d2\uff09", "\u8ba9 Baritone \u5f80\u4e0a\u8d70\u8fd9\u4e48\u4e45\u8fd8\u4e0a\u4e0d\u53bb\uff08\u88ab\u5835\u6b7b/\u627e\u4e0d\u5230\u8def\uff09\u5c31\u62a5\u5931\u8d25\u5e76\u8bf4\u660e\u539f\u56e0\uff0c\u7edd\u4e0d\u65e0\u9650\u7b49\u3002", 300, 30, 3600);
+        this.travelTimeoutSec = SettingHelper.int_(this.sgTravel, "\u98de\u884c\u8d85\u65f6\uff08\u79d2\uff09", "\u98de\u8fd9\u4e48\u4e45\u8fd8\u6ca1\u5230\u5c31\u653e\u5f03\u98de\u884c\u3001\u76f4\u63a5\u8fdb\u4e0b\u964d\u9636\u6bb5\u3002", 900, 30, 7200);
+        this.disableTravelOnArrive = SettingHelper.bool(this.sgTravel, "\u5230\u8fbe\u540e\u5173\u6389\u8dd1\u56fe\u6a21\u5757", "\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u662f\u501f\u6765\u7528\u7684\uff1a\u5230\u8fbe\u540e\u6309\u8fd9\u4e2a\u5f00\u5173\u51b3\u5b9a\u8981\u4e0d\u8981\u8fd8\u56de\u53bb\uff08\u5173\u6389\u5b83 = \u8ba9\u5b83\u7ee7\u7eed\u5f00\u7740\uff09\u3002", true);
+        this.autoDig = SettingHelper.bool(this.sgDig, "\u81ea\u52a8\u6316\u7ad6\u4e95\u4e0b\u964d", "\u5230\u76ee\u6807\u4e0a\u7a7a\u540e\u81ea\u5df1\u6316\u4e00\u6761 1\u00d71 \u7ad6\u4e95\u964d\u5230\u5bc6\u5ba4\u5c42\u3002\u5173\u6389 = \u4f60\u81ea\u5df1\u628a\u89d2\u8272\u5e26\u5230\u5bc6\u5ba4\u5c42\uff08\u6a21\u5757\u53ea\u505a\u627e\u5e93+\u5f00\u5e93\uff09\u3002", true);
+        this.digY = SettingHelper.int_(this.sgDig, "\u4e0b\u964d\u5230 Y", "\u6316\u5230\u8fd9\u4e2a\u9ad8\u5ea6\u5c31\u505c\u3002\u8bd5\u70bc\u5927\u5385\u591a\u5728 Y=-20~0\u3002", -20, -64, 320);
+        this.maxDig = SettingHelper.int_(this.sgDig, "\u5355\u6b21\u6700\u591a\u6316\u591a\u5c11\u683c", "\u4e00\u6b21\u4e0b\u964d\u6700\u591a\u6316\u8fd9\u4e48\u591a\u683c\uff0c\u8d85\u4e86\u5c31\u505c\u4e0b\u62a5\u539f\u56e0\u3002", 200, 1, 400);
+        this.digAbortHealth = SettingHelper.double_(this.sgDig, "\u4e0b\u964d\u65f6\u8840\u91cf\u4f4e\u4e8e\u591a\u5c11\u5c31\u505c", "\u8840\u91cf\u6389\u5230\u8fd9\u4e2a\u503c\u5c31\u505c\u624b\u4fdd\u547d\u3002", 6.0, 1.0, 20.0);
+        this.foodItems = SettingHelper.items(this.sgStop, "\u7b97\u4f5c\u300c\u98df\u7269\u300d\u7684\u7269\u54c1", "\u8fd9\u4e9b\u7269\u54c1\u5168\u7528\u5b8c\u5c31\u7b97\u98df\u7269\u7528\u5b8c\uff0c\u53ea\u6570\u80cc\u5305\u3001\u4e0d\u4f1a\u81ea\u52a8\u5403\u3002\u9ed8\u8ba4\u7a7a\u6e05\u5355 = \u4e0d\u68c0\u67e5\uff0c\u5224\u5b9a\u53ea\u5728\u5f00\u5b8c\u5e93\u4e4b\u540e\u3002", List.of(), true);
+        this.stopWhenNoFood = SettingHelper.bool(this.sgStop, "\u98df\u7269\u7528\u5b8c\u5c31\u505c", "\u5f00\u7740 = \u98df\u7269\u6570\u91cf\u53d8\u6210 0 \u65f6\u7ed3\u675f\u4efb\u52a1\uff08\u6309\u300c\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed\u300d\u51b3\u5b9a\u5173\u4e0d\u5173\u6a21\u5757\uff09\u3002", true);
+        this.noKeyAutoClose = SettingHelper.bool(this.sgStop, "\u6ca1\u94a5\u5319\u65f6\u81ea\u52a8\u5173\u95ed", "\u80cc\u5305\u91cc\u6ca1\u94a5\u5319\u65f6\u804a\u5929\u680f\u63d0\u9192\u5e76\u5173\u6389\u6a21\u5757\uff08\u9ed8\u8ba4\u5f00\uff09\uff1b\u5173\u6389\u5c31\u53ea\u63d0\u9192\u3001\u4e0d\u5173\u6a21\u5757\u3002", true);
+        this.talkInChat = SettingHelper.bool(this.sgStop, "\u5173\u952e\u8282\u70b9\u53d1\u804a\u5929\u680f\u63d0\u793a", "\u5f00\u5e93\u7684\u5173\u952e\u8282\u70b9\uff08\u5f00\u59cb\u5f00\u5e93\u3001\u5f00\u5b8c\u3001\u6362\u5bc6\u5ba4\u7b49\uff09\u53d1\u804a\u5929\u680f\uff0c\u5931\u8d25\u539f\u56e0\u548c\u300c\u6ca1\u94a5\u5319\u505c\u6b62\u300d\u59cb\u7ec8\u4f1a\u53d1\u3002\u98de\u884c\u9636\u6bb5\u7684\u72b6\u6001\u76d1\u63a7\u3001\u8d77\u98de\u3001\u5230\u8fbe\u63d0\u793a\u7531\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u81ea\u5df1\u7684\u8bbe\u7f6e\u63a7\u5236\u3002", true);
+        this.hudInfo = SettingHelper.bool(this.sgDebug, "HUD \u72b6\u6001", "\u5728 HUD \u4e0a\u663e\u793a\u300c\u9636\u6bb5 + \u5173\u952e\u6570\u5b57\u300d\u3002", true);
+        this.verboseLog = SettingHelper.bool(this.sgDebug, "\u8be6\u7ec6\u6587\u4ef6\u65e5\u5fd7", "\u628a\u6bcf\u4e2a\u5224\u65ad\u90fd\u5199\u8fdb icehack-*.log\uff08\u6392\u67e5\u95ee\u9898\u7528\uff09\u3002", true);
+        this.debugMessages = SettingHelper.bool(this.sgDebug, "\u8c03\u8bd5\u8f93\u51fa\u5230\u804a\u5929\u680f", "\u628a FOElytraLog.debug \u7684\u5185\u5bb9\u4e5f\u53d1\u5230\u804a\u5929\u680f\u3002\u672c\u6a21\u5757\u6ca1\u6709\u8c03\u8bd5\u7ea7\u8f93\u51fa\uff0c\u8fd9\u4e2a\u5f00\u5173\u53ea\u5bf9\u5176\u4ed6\u6a21\u5757\u6709\u6548\u3002", false);
+        this.phase = Phase.IDLE;
+        this.lastPhase = Phase.IDLE;
+        this.failReason = "";
+        this.locator = new TrialChamberLocator();
+        this.usedTargets = new HashSet<String>();
+        this.targetNote = "";
+        this.locateFail = "";
+        this.scanChunkX = Integer.MIN_VALUE;
+        this.scanChunkZ = Integer.MIN_VALUE;
+        this.pendingCandidates = new ArrayList<BlockPos>();
+        this.pendingKeys = new HashSet<Long>();
+        this.candidates = new ArrayList<BlockPos>();
+        this.skipped = new HashSet<Long>();
+        this.displayDesc = "\uff08\u8fd8\u6ca1\u770b\uff09";
+        this.travelTicks = 0;
+        this.surfaceYCache = Integer.MIN_VALUE;
     }
 
-    // ------------------------------------------------------------------ 生命周期
-
-    @Override
     public void onActivate() {
-        FOElytraLog.fileVerbose = verboseLog.get();
-        if (mc.runDirectory != null) {
+        FOElytraLog.fileVerbose = (Boolean)this.verboseLog.get();
+        if (this.mc.runDirectory != null) {
             try {
-                FOElytraLog.setGameDir(mc.runDirectory.toPath());
-                FOElytraLog.ensureOpen(mc.runDirectory.toPath(), 10);
-            } catch (Throwable t) {
-                LOG.error("打开日志文件失败", t);
+                FOElytraLog.setGameDir(this.mc.runDirectory.toPath());
+                FOElytraLog.ensureOpen(this.mc.runDirectory.toPath(), 10);
+            }
+            catch (Throwable t) {
+                LOG.error("\u6253\u5f00\u65e5\u5fd7\u6587\u4ef6\u5931\u8d25", t);
             }
         }
-
-        phase = Phase.PREPARE;
-        lastPhase = Phase.IDLE;
-        phaseTicks = 0;
-        failReason = "";
-        usedTargets.clear();
-        chambersVisited = 0;
-        targetX = 0;
-        targetZ = 0;
-        targetNote = "";
-        integratedSearchStarted = false;
-        locateFail = "";
-        resetScanState();
-        skipped.clear();
-        current = null;
-        displayDesc = "（还没看）";
-        displayReadTicks = 0;
-        vaultOpener = null;
-        openedTotal = 0;
-        openedThisChamber = 0;
-        travelTicks = 0;
-        weEnabledTravel = false;
-        warnedNoTravel = false;
-        digCount = 0;
-        digDelayTicks = 0;
-        surfaceYCache = Integer.MIN_VALUE;
-        screenWaitTicks = 0;
-        gotoResend = 0;
-
-        FOElytraLog.info("自动不祥宝库启动：半径 %d 格｜%s｜目标 %s｜展示物 %s｜结束后自动关闭 %s",
-            searchRadius.get(), alsoNormal.get() ? "不祥宝库 + 普通宝库" : "只开不祥宝库",
-            describeLoot(), displayMode.get(), autoClose.get() ? "是" : "否（会继续换密室）");
-        FOElytraLog.detail("—— 本次设置 ——");
-        for (SettingGroup g : settings) {
-            for (var s : g) FOElytraLog.detail("    %s = %s", s.name, s.get());
+        this.phase = Phase.PREPARE;
+        this.lastPhase = Phase.IDLE;
+        this.phaseTicks = 0;
+        this.failReason = "";
+        this.usedTargets.clear();
+        this.chambersVisited = 0;
+        this.targetX = 0;
+        this.targetZ = 0;
+        this.targetNote = "";
+        this.integratedSearchStarted = false;
+        this.locateFail = "";
+        this.resetScanState();
+        this.skipped.clear();
+        this.current = null;
+        this.displayDesc = "\uff08\u8fd8\u6ca1\u770b\uff09";
+        this.displayReadTicks = 0;
+        this.vaultOpener = null;
+        this.openedTotal = 0;
+        this.openedThisChamber = 0;
+        this.travelTicks = 0;
+        this.weEnabledTravel = false;
+        this.warnedNoTravel = false;
+        this.digCount = 0;
+        this.digDelayTicks = 0;
+        this.surfaceYCache = Integer.MIN_VALUE;
+        this.screenWaitTicks = 0;
+        this.gotoResend = 0;
+        FOElytraLog.info("\u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93\u542f\u52a8\uff1a\u534a\u5f84 %d \u683c\uff5c%s\uff5c\u76ee\u6807 %s\uff5c\u5c55\u793a\u7269 %s\uff5c\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed %s", this.searchRadius.get(), (Boolean)this.alsoNormal.get() != false ? "\u4e0d\u7965\u5b9d\u5e93 + \u666e\u901a\u5b9d\u5e93" : "\u53ea\u5f00\u4e0d\u7965\u5b9d\u5e93", this.describeLoot(), this.displayMode.get(), (Boolean)this.autoClose.get() != false ? "\u662f" : "\u5426\uff08\u4f1a\u7ee7\u7eed\u6362\u5bc6\u5ba4\uff09");
+        FOElytraLog.detail("\u2014\u2014 \u672c\u6b21\u8bbe\u7f6e \u2014\u2014", new Object[0]);
+        for (SettingGroup g : this.settings) {
+            for (Setting s : g) {
+                FOElytraLog.detail("    %s = %s", s.name, s.get());
+            }
         }
-        FOElytraLog.detail("已记录的「已打开宝库」标记：%d 个（文件 %s）",
-            VaultMarks.get().count(), VaultMarks.get().filePath());
-        FOElytraLog.detail("钥匙：不祥试炼钥匙 %d 个；普通试炼钥匙 %d 个；%s",
-            countKey(Items.OMINOUS_TRIAL_KEY), countKey(Items.TRIAL_KEY), foodCountText());
-
+        FOElytraLog.detail("\u5df2\u8bb0\u5f55\u7684\u300c\u5df2\u6253\u5f00\u5b9d\u5e93\u300d\u6807\u8bb0\uff1a%d \u4e2a\uff08\u6587\u4ef6 %s\uff09", VaultMarks.get().count(), VaultMarks.get().filePath());
+        FOElytraLog.detail("\u94a5\u5319\uff1a\u4e0d\u7965\u8bd5\u70bc\u94a5\u5319 %d \u4e2a\uff1b\u666e\u901a\u8bd5\u70bc\u94a5\u5319 %d \u4e2a\uff1b%s", this.countKey(Items.OMINOUS_TRIAL_KEY), this.countKey(Items.TRIAL_KEY), this.foodCountText());
         if (!BaritoneHook.available()) {
-            warning("没有检测到 Baritone：走到宝库、爬上地表都会用不了（会直接报失败原因，不会静默卡住）。");
+            this.warning("\u6ca1\u6709\u68c0\u6d4b\u5230 Baritone\uff1a\u8d70\u5230\u5b9d\u5e93\u3001\u722c\u4e0a\u5730\u8868\u90fd\u4f1a\u7528\u4e0d\u4e86\uff08\u4f1a\u76f4\u63a5\u62a5\u5931\u8d25\u539f\u56e0\uff0c\u4e0d\u4f1a\u9759\u9ed8\u5361\u4f4f\uff09\u3002", new Object[0]);
         }
         if (!TrialChamberLocator.seedSearchAvailable()) {
-            FOElytraLog.detail("当前是多人服务器：单机种子搜索不可用，"
-                + "想自动飞往下一个密室请在「定位试炼大厅 → 世界种子（手填）」里填 /seed 的数字。");
+            FOElytraLog.detail("\u5f53\u524d\u662f\u591a\u4eba\u670d\u52a1\u5668\uff1a\u5355\u673a\u79cd\u5b50\u641c\u7d22\u4e0d\u53ef\u7528\uff0c\u60f3\u81ea\u52a8\u98de\u5f80\u4e0b\u4e00\u4e2a\u5bc6\u5ba4\u8bf7\u5728\u300c\u5b9a\u4f4d\u8bd5\u70bc\u5927\u5385 \u2192 \u4e16\u754c\u79cd\u5b50\uff08\u624b\u586b\uff09\u300d\u91cc\u586b /seed \u7684\u6570\u5b57\u3002", new Object[0]);
         }
-        if (avoidSpawner.get()) {
-            FOElytraLog.detail("已开启「绕过试炼刷怪笼」：只在离刷怪笼 ≥ %d 格的地方选库/开库。"
-                + "走过去的路是 Baritone 寻路，可能会路过刷怪笼，只能保证不在它旁边开库。", spawnerAvoidRadius.get());
+        if (((Boolean)this.avoidSpawner.get()).booleanValue()) {
+            FOElytraLog.detail("\u5df2\u5f00\u542f\u300c\u7ed5\u8fc7\u8bd5\u70bc\u5237\u602a\u7b3c\u300d\uff1a\u53ea\u5728\u79bb\u5237\u602a\u7b3c \u2265 %d \u683c\u7684\u5730\u65b9\u9009\u5e93/\u5f00\u5e93\u3002\u8d70\u8fc7\u53bb\u7684\u8def\u662f Baritone \u5bfb\u8def\uff0c\u53ef\u80fd\u4f1a\u8def\u8fc7\u5237\u602a\u7b3c\uff0c\u53ea\u80fd\u4fdd\u8bc1\u4e0d\u5728\u5b83\u65c1\u8fb9\u5f00\u5e93\u3002", this.spawnerAvoidRadius.get());
         }
     }
 
-    @Override
     public void onDeactivate() {
-        cleanup(true);
-        FOElytraLog.info("自动不祥宝库已关闭（阶段 %s｜本次共开 %d 个库｜去过 %d 个密室）",
-            phase.toString(), openedTotal, chambersVisited);
-        phase = Phase.IDLE;
+        this.cleanup(true);
+        FOElytraLog.info("\u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93\u5df2\u5173\u95ed\uff08\u9636\u6bb5 %s\uff5c\u672c\u6b21\u5171\u5f00 %d \u4e2a\u5e93\uff5c\u53bb\u8fc7 %d \u4e2a\u5bc6\u5ba4\uff09", this.phase.name(), this.openedTotal, this.chambersVisited);
+        this.phase = Phase.IDLE;
     }
 
-    @Override
     public String getInfoString() {
-        if (!hudInfo.get() || mc.player == null) return null;
-        StringBuilder sb = new StringBuilder(phase.toString());
-        if (current != null) {
-            double d = Math.hypot(mc.player.getX() - (current.getX() + 0.5), mc.player.getZ() - (current.getZ() + 0.5));
-            sb.append(String.format(Locale.ROOT, " 库%.0fm", d));
-        } else if (phase == Phase.CLIMB || phase == Phase.TRAVEL) {
-            double d = Math.hypot(mc.player.getX() - (targetX + 0.5), mc.player.getZ() - (targetZ + 0.5));
-            sb.append(String.format(Locale.ROOT, " 大厅%.0fm", d));
+        if (!((Boolean)this.hudInfo.get()).booleanValue() || this.mc.player == null) {
+            return null;
         }
-        if (phase == Phase.SCAN && scanning) {
-            sb.append(String.format(Locale.ROOT, " 扫%d%%", (int) (100 * scanDone / Math.max(1L, scanTotal))));
+        StringBuilder sb = new StringBuilder(this.phase.name());
+        if (this.current != null) {
+            double d = Math.hypot(this.mc.player.getX() - ((double)this.current.getX() + 0.5), this.mc.player.getZ() - ((double)this.current.getZ() + 0.5));
+            sb.append(String.format(Locale.ROOT, " \u5e93%.0fm", d));
+        } else if (this.phase == Phase.CLIMB || this.phase == Phase.TRAVEL) {
+            double d = Math.hypot(this.mc.player.getX() - ((double)this.targetX + 0.5), this.mc.player.getZ() - ((double)this.targetZ + 0.5));
+            sb.append(String.format(Locale.ROOT, " \u5927\u5385%.0fm", d));
         }
-        sb.append(" 已开").append(openedTotal);
-        sb.append(" 钥").append(keyCount());
+        if (this.phase == Phase.SCAN && this.scanning) {
+            sb.append(String.format(Locale.ROOT, " \u626b%d%%", (int)(100L * this.scanDone / Math.max(1L, this.scanTotal))));
+        }
+        sb.append(" \u5df2\u5f00").append(this.openedTotal);
+        sb.append(" \u94a5").append(this.keyCount());
         return sb.toString();
     }
 
-    // ------------------------------------------------------------------ 主循环
-
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (!isActive() || mc.player == null || mc.world == null) return;
-        // 只在值变化时写这个全局开关：借调「自动鞘翅飞行」时它每 tick 也在写同一个字段，互相覆盖会让调试输出时有时无
-        boolean dbg = debugMessages.get();
-        if (FOElytraLog.debugEnabled != dbg) FOElytraLog.debugEnabled = dbg;
+        if (!this.isActive() || this.mc.player == null || this.mc.world == null) {
+            return;
+        }
+        boolean dbg = (Boolean)this.debugMessages.get();
+        if (FOElytraLog.debugEnabled != dbg) {
+            FOElytraLog.debugEnabled = dbg;
+        }
         try {
-            if (phase != lastPhase) {
-                lastPhase = phase;
-                phaseTicks = 0;
-                FOElytraLog.detail("阶段切换 → %s", phase.toString());
+            if (this.phase != this.lastPhase) {
+                this.lastPhase = this.phase;
+                this.phaseTicks = 0;
+                FOElytraLog.detail("\u9636\u6bb5\u5207\u6362 \u2192 %s", this.phase.name());
             }
-            phaseTicks++;
-
-            /*
-             * 玩家自己开着界面时一行包都不发（原版开界面会清空按键状态，插一手只会搅乱玩家操作）。
-             *
-             * ⚠️ PREPARE 也**不能**豁免（审查抓出来的 P2）：PREPARE 里可能走到 finish()/noKeyStop()，
-             * 而它们会调 cleanup() → InvHelper.closeScreen()，等于你在开箱子的时候插件把你的界面关了。
-             * 放行到 here 之前只做纯读取，不动机器，所以这里一律等。
-             */
-            if (InvHelper.screenOpen() && phase != Phase.DONE && phase != Phase.FAILED) {
-                if (screenWaitTicks++ > SCREEN_HOLD_MAX_TICKS) {
-                    fail("你已经开着界面超过 " + (SCREEN_HOLD_MAX_TICKS / 20) + " 秒了，我先停下，不硬关你的界面");
+            ++this.phaseTicks;
+            if (InvHelper.screenOpen() && this.phase != Phase.DONE && this.phase != Phase.FAILED) {
+                if (this.screenWaitTicks++ > 200) {
+                    this.fail("\u4f60\u5df2\u7ecf\u5f00\u7740\u754c\u9762\u8d85\u8fc7 10 \u79d2\u4e86\uff0c\u6211\u5148\u505c\u4e0b\uff0c\u4e0d\u786c\u5173\u4f60\u7684\u754c\u9762");
                     return;
                 }
                 return;
             }
-            screenWaitTicks = 0;
-
-            switch (phase) {
-                case PREPARE -> prepareTick();
-                case SCAN -> scanTick();
-                case FILTER -> filterTick();
-                case APPROACH -> approachTick();
-                case LOOK -> lookTick();
-                case OPEN -> openTick();
-                case POST_OPEN -> postOpenTick();
-                case NO_VAULT -> noVaultTick();
-                case CLIMB -> climbTick();
-                case TRAVEL -> travelTick();
-                case DIG -> digTick();
-                case DONE, FAILED -> {
-                    // 已收尾：停在这里等玩家处理
+            this.screenWaitTicks = 0;
+            switch (this.phase.ordinal()) {
+                case 1: {
+                    this.prepareTick();
+                    break;
                 }
-                case IDLE -> phase = Phase.PREPARE;
+                case 2: {
+                    this.scanTick();
+                    break;
+                }
+                case 3: {
+                    this.filterTick();
+                    break;
+                }
+                case 4: {
+                    this.approachTick();
+                    break;
+                }
+                case 5: {
+                    this.lookTick();
+                    break;
+                }
+                case 6: {
+                    this.openTick();
+                    break;
+                }
+                case 7: {
+                    this.postOpenTick();
+                    break;
+                }
+                case 8: {
+                    this.noVaultTick();
+                    break;
+                }
+                case 9: {
+                    this.climbTick();
+                    break;
+                }
+                case 10: {
+                    this.travelTick();
+                    break;
+                }
+                case 11: {
+                    this.digTick();
+                    break;
+                }
+                case 12: 
+                case 13: {
+                    break;
+                }
+                case 0: {
+                    this.phase = Phase.PREPARE;
+                }
             }
-        } catch (Throwable t) {
-            onError("onTick", t);
-            fail("内部异常 " + t.getClass().getSimpleName() + "：" + t.getMessage());
+        }
+        catch (Throwable t) {
+            this.onError("onTick", t);
+            this.fail("\u5185\u90e8\u5f02\u5e38 " + t.getClass().getSimpleName() + "\uff1a" + t.getMessage());
         }
     }
-
-    // ------------------------------------------------------------------ 1) 准备
 
     private void prepareTick() {
-        // 需求 2：没钥匙 → 聊天栏提醒 + 自动关闭（这条优先级最高，先查）
-        if (!hasAnyKey()) {
-            noKeyStop();
+        if (!this.hasAnyKey()) {
+            this.noKeyStop();
             return;
         }
-        /*
-         * ⚠️ 食物检查在这里**只提醒、不停止**。
-         *
-         * 为什么（这是审查抓出来的 P0）：原来这里一发现「食物数量 0」就 finish()，
-         * 而 finish() 会按默认开着的「任务结束后自动关闭」把自己关掉 ——
-         * 结果是「身上没带食物的人一开模块，模块立刻自己消失」，看起来就是「模块坏了/没反应」。
-         * 「食物用完就停」这条停止条件应该只管**流程中**的判断（开完一个库之后、本密室没库可开时），
-         * 不该在「还没开始干活」的时候把你拦下来。
-         */
-        if (stopWhenNoFood.get() && countFood() <= 0) {
-            if (phaseTicks % 600 == 1) {
-                FOElytraLog.warn("「%s」现在是 0 个（只提醒，不停手）：这条停止条件要等开完宝库才生效，"
-                    + "想现在就停请自己往背包放点 %s", foodName(), foodName());
+        if (((Boolean)this.stopWhenNoFood.get()).booleanValue() && this.countFood() <= 0 && this.phaseTicks % 600 == 1) {
+            FOElytraLog.warn("\u300c%s\u300d\u73b0\u5728\u662f 0 \u4e2a\uff08\u53ea\u63d0\u9192\uff0c\u4e0d\u505c\u624b\uff09\uff1a\u8fd9\u6761\u505c\u6b62\u6761\u4ef6\u8981\u7b49\u5f00\u5b8c\u5b9d\u5e93\u624d\u751f\u6548\uff0c\u60f3\u73b0\u5728\u5c31\u505c\u8bf7\u81ea\u5df1\u5f80\u80cc\u5305\u653e\u70b9 %s", this.foodName(), this.foodName());
+        }
+        if (this.phaseTicks == 1) {
+            this.say("\u51c6\u5907\u5c31\u7eea\uff1a%s %d \u4e2a\uff5c%s", this.keyName(), this.keyCount(), this.foodCountText());
+            if (this.targetItems.get() == null || ((List)this.targetItems.get()).isEmpty()) {
+                this.warning("\u300c\u76ee\u6807\u6218\u5229\u54c1\u300d\u662f\u7a7a\u7684\uff1a\u6a21\u5757\u4e0d\u4f1a\u5224\u300c\u547d\u4e2d\u300d\uff0c\u53ea\u4f1a\u8bb0\u5f55\u6bcf\u6b21\u5f00\u51fa\u4e86\u4ec0\u4e48\u3002", new Object[0]);
+            }
+            if (this.displayMode.get() == DisplayMode.REQUIRE) {
+                this.warning("\u5df2\u542f\u7528\u300c\u5fc5\u987b\u547d\u4e2d\u624d\u5f00\u300d\uff1a\u5c55\u793a\u7269\u548c\u5b9e\u9645\u6389\u843d\u65e0\u5173\uff0c\u8fd9\u6837\u53ea\u4f1a\u5c11\u5f00\u5f88\u591a\u5b9d\u5e93\u3002", new Object[0]);
             }
         }
-        if (phaseTicks == 1) {
-            say("准备就绪：%s %d 个｜%s", keyName(), keyCount(), foodCountText());
-            if (targetItems.get() == null || targetItems.get().isEmpty()) {
-                warning("「目标战利品」是空的：模块不会判「命中」，只会记录每次开出了什么。");
-            }
-            if (displayMode.get() == DisplayMode.REQUIRE) {
-                warning("已启用「必须命中才开」：展示物和实际掉落无关，这样只会少开很多宝库。");
-            }
-        }
-
-        if (!startFly.get()) {
-            FOElytraLog.detail("「启动时就飞往最近的试炼大厅」是关的：直接就地开始找宝库");
-            enterScan();
+        if (!((Boolean)this.startFly.get()).booleanValue()) {
+            FOElytraLog.detail("\u300c\u542f\u52a8\u65f6\u5c31\u98de\u5f80\u6700\u8fd1\u7684\u8bd5\u70bc\u5927\u5385\u300d\u662f\u5173\u7684\uff1a\u76f4\u63a5\u5c31\u5730\u5f00\u59cb\u627e\u5b9d\u5e93", new Object[0]);
+            this.enterScan();
             return;
         }
-
-        switch (tryLocate()) {
-            case WAITING -> {
-                if (phaseTicks % 100 == 0) {
-                    FOElytraLog.detail("正在后台搜索试炼大厅（整合服务端线程）…已等 %d 秒", phaseTicks / 20);
-                }
+        switch (this.tryLocate().ordinal()) {
+            case 2: {
+                if (this.phaseTicks % 100 != 0) break;
+                FOElytraLog.detail("\u6b63\u5728\u540e\u53f0\u641c\u7d22\u8bd5\u70bc\u5927\u5385\uff08\u6574\u5408\u670d\u52a1\u7aef\u7ebf\u7a0b\uff09\u2026\u5df2\u7b49 %d \u79d2", this.phaseTicks / 20);
+                break;
             }
-            case FOUND -> goToTarget();
-            case FAILED -> {
-                FOElytraLog.warn("没能定位到试炼大厅：%s", locateFail);
-                FOElytraLog.warn("改成「就在当前位置附近找宝库」。要是本来不在密室里，请填「世界种子」或「坐标列表」。");
-                enterScan();
+            case 0: {
+                this.goToTarget();
+                break;
+            }
+            case 1: {
+                FOElytraLog.warn("\u6ca1\u80fd\u5b9a\u4f4d\u5230\u8bd5\u70bc\u5927\u5385\uff1a%s", this.locateFail);
+                FOElytraLog.warn("\u6539\u6210\u300c\u5c31\u5728\u5f53\u524d\u4f4d\u7f6e\u9644\u8fd1\u627e\u5b9d\u5e93\u300d\u3002\u8981\u662f\u672c\u6765\u4e0d\u5728\u5bc6\u5ba4\u91cc\uff0c\u8bf7\u586b\u300c\u4e16\u754c\u79cd\u5b50\u300d\u6216\u300c\u5750\u6807\u5217\u8868\u300d\u3002", new Object[0]);
+                this.enterScan();
             }
         }
     }
 
-    // ------------------------------------------------------------------ 2) 扫描（增量）
-
     private void enterScan() {
-        resetScanState();
-        phase = Phase.SCAN;
+        this.resetScanState();
+        this.phase = Phase.SCAN;
     }
 
     private void resetScanState() {
-        scanning = false;
-        scanDone = 0;
-        scanTotal = 0;
-        scanChecked = 0;
-        scanSkippedUnloaded = 0;
-        scanTicks = 0;
-        scanChunkX = Integer.MIN_VALUE;
-        scanChunkZ = Integer.MIN_VALUE;
-        scanChunkLoadedFlag = false;
-        pendingCandidates.clear();
-        pendingKeys.clear();
-        candidates.clear();
-        filterIndex = 0;
-        filteredSpawner = 0;
-        filteredMarked = 0;
+        this.scanning = false;
+        this.scanDone = 0L;
+        this.scanTotal = 0L;
+        this.scanChecked = 0L;
+        this.scanSkippedUnloaded = 0L;
+        this.scanTicks = 0;
+        this.scanChunkX = Integer.MIN_VALUE;
+        this.scanChunkZ = Integer.MIN_VALUE;
+        this.scanChunkLoadedFlag = false;
+        this.pendingCandidates.clear();
+        this.pendingKeys.clear();
+        this.candidates.clear();
+        this.filterIndex = 0;
+        this.filteredSpawner = 0;
+        this.filteredMarked = 0;
     }
 
-    /**
-     * 一轮扫描：在已加载区块里找出**未标记、类型符合**的宝库方块（刷怪笼过滤放到下一个阶段，
-     * 因为那一步每个候选要读一片方块，混进来会把单 tick 成本放大几十倍）。
-     *
-     * <p>为什么必须增量：半径 96 + Y 带（-40~16，57 层）≈ 193×193×57 ≈ 212 万个坐标。一次性扫完会卡住画面
-     * （上一轮就是这么卡的），现在每 tick 只处理 {@value #SCAN_BUDGET_PER_TICK} 个，游标续扫。</p>
-     */
     private void scanTick() {
-        if (!scanning) beginScan();
-        scanTicks++;
-
-        int budget = SCAN_BUDGET_PER_TICK;
+        if (!this.scanning) {
+            this.beginScan();
+        }
+        ++this.scanTicks;
+        int budget = 6000;
         while (budget-- > 0) {
-            int x = scanOriginX + scanDx;
-            int y = scanOriginY + scanDyRel;
-            int z = scanOriginZ + scanDz;
+            int x = this.scanOriginX + this.scanDx;
+            int y = this.scanOriginY + this.scanDyRel;
+            int z = this.scanOriginZ + this.scanDz;
             BlockPos pos = new BlockPos(x, y, z);
-            scanDone++;
-
-            if (!chunkLoaded(x >> 4, z >> 4)) {
-                scanSkippedUnloaded++;
+            ++this.scanDone;
+            if (!this.chunkLoaded(x >> 4, z >> 4)) {
+                ++this.scanSkippedUnloaded;
             } else {
-                scanChecked++;
-                BlockState st = mc.world.getBlockState(pos);
+                ++this.scanChecked;
+                BlockState st = this.mc.world.getBlockState(pos);
                 if (st.isOf(Blocks.VAULT)) {
-                    boolean ominous = Boolean.TRUE.equals(st.get(VaultBlock.OMINOUS));
-                    boolean typeOk = ominous || alsoNormal.get();
+                    BlockPos fixed;
+                    boolean typeOk;
+                    boolean ominous = Boolean.TRUE.equals(st.get((Property)VaultBlock.OMINOUS));
+                    boolean bl = typeOk = ominous || (Boolean)this.alsoNormal.get() != false;
                     if (typeOk && VaultMarks.get().isMarked(pos)) {
-                        filteredMarked++;
-                    } else if (typeOk && !skipped.contains(pos.asLong())) {
-                        BlockPos fixed = pos.toImmutable();
-                        if (pendingKeys.add(fixed.asLong())) pendingCandidates.add(fixed);
+                        ++this.filteredMarked;
+                    } else if (typeOk && !this.skipped.contains(pos.asLong()) && this.pendingKeys.add((fixed = pos.toImmutable()).asLong())) {
+                        this.pendingCandidates.add(fixed);
                     }
                 }
             }
-
-            if (!scanAdvance()) {
-                finishScan();
-                return;
-            }
+            if (this.scanAdvance()) continue;
+            this.finishScan();
+            return;
         }
-
-        // 进度日志放在循环外：循环里每 tick 要跑 6000 次，塞日志会变成每秒几千行落盘（上一轮修过的坑）
-        if (scanTicks % SCAN_PROGRESS_LOG_TICKS == 0) {
-            FOElytraLog.detail("扫描进度 %d/%d（%.0f%%）第 %d tick：已读 %d 格、跳过未加载 %d 格，"
-                + "待过滤候选 %d 个（已排除已标记 %d 个）",
-                scanDone, scanTotal, 100.0 * scanDone / Math.max(1L, scanTotal), scanTicks,
-                scanChecked, scanSkippedUnloaded, pendingCandidates.size(), filteredMarked);
+        if (this.scanTicks % 40 == 0) {
+            FOElytraLog.detail("\u626b\u63cf\u8fdb\u5ea6 %d/%d\uff08%.0f%%\uff09\u7b2c %d tick\uff1a\u5df2\u8bfb %d \u683c\u3001\u8df3\u8fc7\u672a\u52a0\u8f7d %d \u683c\uff0c\u5f85\u8fc7\u6ee4\u5019\u9009 %d \u4e2a\uff08\u5df2\u6392\u9664\u5df2\u6807\u8bb0 %d \u4e2a\uff09", this.scanDone, this.scanTotal, 100.0 * (double)this.scanDone / (double)Math.max(1L, this.scanTotal), this.scanTicks, this.scanChecked, this.scanSkippedUnloaded, this.pendingCandidates.size(), this.filteredMarked);
         }
     }
 
     private void beginScan() {
-        BlockPos origin = mc.player.getBlockPos().toImmutable();
-        scanOriginX = origin.getX();
-        scanOriginY = origin.getY();
-        scanOriginZ = origin.getZ();
-        scanRadius = Math.max(8, searchRadius.get());
-
-        int yMin = Math.max(SCAN_Y_MIN, scanOriginY - scanRadius);
-        int yMax = Math.min(SCAN_Y_MAX, scanOriginY + scanRadius);
-        if (yMin > yMax) {
-            // 玩家不在试炼密室高度带里（例如还站在地表）：只扫「玩家上下几层」，绝不放开成整个立方体
-            yMin = Math.max(-64, scanOriginY - SCAN_FALLBACK_HALF);
-            yMax = Math.min(319, scanOriginY + SCAN_FALLBACK_HALF);
-            FOElytraLog.warn("你现在在 Y=%d，不在试炼密室的高度带（%d~%d）里：本次只在 Y=%d~%d 找宝库",
-                scanOriginY, SCAN_Y_MIN, SCAN_Y_MAX, yMin, yMax);
+        int yMax;
+        BlockPos origin = this.mc.player.getBlockPos().toImmutable();
+        this.scanOriginX = origin.getX();
+        this.scanOriginY = origin.getY();
+        this.scanOriginZ = origin.getZ();
+        this.scanRadius = Math.max(8, (Integer)this.searchRadius.get());
+        int yMin = Math.max(-40, this.scanOriginY - this.scanRadius);
+        if (yMin > (yMax = Math.min(16, this.scanOriginY + this.scanRadius))) {
+            yMin = Math.max(-64, this.scanOriginY - 24);
+            yMax = Math.min(319, this.scanOriginY + 24);
+            FOElytraLog.warn("\u4f60\u73b0\u5728\u5728 Y=%d\uff0c\u4e0d\u5728\u8bd5\u70bc\u5bc6\u5ba4\u7684\u9ad8\u5ea6\u5e26\uff08%d~%d\uff09\u91cc\uff1a\u672c\u6b21\u53ea\u5728 Y=%d~%d \u627e\u5b9d\u5e93", this.scanOriginY, -40, 16, yMin, yMax);
         }
-        scanDyMin = yMin - scanOriginY;
-        scanDyMax = yMax - scanOriginY;
-        scanDyRel = scanDyMin;
-        scanDz = -scanRadius;
-        scanDx = -scanRadius;
-
-        long width = 2L * scanRadius + 1;
-        scanTotal = width * width * (scanDyMax - scanDyMin + 1);
-        scanDone = 0;
-        scanChecked = 0;
-        scanSkippedUnloaded = 0;
-        scanTicks = 0;
-        pendingCandidates.clear();
-        pendingKeys.clear();
-        candidates.clear();
-        scanning = true;
-        say("开始在 %d 格半径内找宝库（Y=%d~%d，共 %d 个坐标）", scanRadius, yMin, yMax, scanTotal);
-        FOElytraLog.detail("扫描中心 %s｜每 tick 最多 %d 个坐标，跨 tick 续扫｜区块未加载整列跳过",
-            origin.toShortString(), SCAN_BUDGET_PER_TICK);
+        this.scanDyMin = yMin - this.scanOriginY;
+        this.scanDyMax = yMax - this.scanOriginY;
+        this.scanDyRel = this.scanDyMin;
+        this.scanDz = -this.scanRadius;
+        this.scanDx = -this.scanRadius;
+        long width = 2L * (long)this.scanRadius + 1L;
+        this.scanTotal = width * width * (long)(this.scanDyMax - this.scanDyMin + 1);
+        this.scanDone = 0L;
+        this.scanChecked = 0L;
+        this.scanSkippedUnloaded = 0L;
+        this.scanTicks = 0;
+        this.pendingCandidates.clear();
+        this.pendingKeys.clear();
+        this.candidates.clear();
+        this.scanning = true;
+        this.say("\u5f00\u59cb\u5728 %d \u683c\u534a\u5f84\u5185\u627e\u5b9d\u5e93\uff08Y=%d~%d\uff0c\u5171 %d \u4e2a\u5750\u6807\uff09", this.scanRadius, yMin, yMax, this.scanTotal);
+        FOElytraLog.detail("\u626b\u63cf\u4e2d\u5fc3 %s\uff5c\u6bcf tick \u6700\u591a %d \u4e2a\u5750\u6807\uff0c\u8de8 tick \u7eed\u626b\uff5c\u533a\u5757\u672a\u52a0\u8f7d\u6574\u5217\u8df3\u8fc7", origin.toShortString(), 6000);
     }
 
-    /** 游标前进一步；扫完返回 false。顺序是 Y 外层 → Z → X 内层，让相邻 X 落在同一区块列里。 */
     private boolean scanAdvance() {
-        scanDx++;
-        if (scanDx <= scanRadius) return true;
-        scanDx = -scanRadius;
-        scanDz++;
-        if (scanDz <= scanRadius) return true;
-        scanDz = -scanRadius;
-        scanDyRel++;
-        if (scanDyRel <= scanDyMax) return true;
-        scanDyRel = scanDyMin;
+        ++this.scanDx;
+        if (this.scanDx <= this.scanRadius) {
+            return true;
+        }
+        this.scanDx = -this.scanRadius;
+        ++this.scanDz;
+        if (this.scanDz <= this.scanRadius) {
+            return true;
+        }
+        this.scanDz = -this.scanRadius;
+        ++this.scanDyRel;
+        if (this.scanDyRel <= this.scanDyMax) {
+            return true;
+        }
+        this.scanDyRel = this.scanDyMin;
         return false;
     }
 
     private void finishScan() {
-        scanning = false;
-        filterIndex = 0;
-        filteredSpawner = 0;
-        phase = Phase.FILTER;
-        say("扫描完成：读了 %d 格（跳过未加载 %d 格），待过滤候选 %d 个",
-            scanChecked, scanSkippedUnloaded, pendingCandidates.size());
-        FOElytraLog.detail("扫描统计：总坐标 %d｜已标记跳过 %d（标记总数 %d）",
-            scanTotal, filteredMarked, VaultMarks.get().count());
+        this.scanning = false;
+        this.filterIndex = 0;
+        this.filteredSpawner = 0;
+        this.phase = Phase.FILTER;
+        this.say("\u626b\u63cf\u5b8c\u6210\uff1a\u8bfb\u4e86 %d \u683c\uff08\u8df3\u8fc7\u672a\u52a0\u8f7d %d \u683c\uff09\uff0c\u5f85\u8fc7\u6ee4\u5019\u9009 %d \u4e2a", this.scanChecked, this.scanSkippedUnloaded, this.pendingCandidates.size());
+        FOElytraLog.detail("\u626b\u63cf\u7edf\u8ba1\uff1a\u603b\u5750\u6807 %d\uff5c\u5df2\u6807\u8bb0\u8df3\u8fc7 %d\uff08\u6807\u8bb0\u603b\u6570 %d\uff09", this.scanTotal, this.filteredMarked, VaultMarks.get().count());
     }
 
-    /** 区块是否加载（同一区块列连续 16 格只查一次）。 */
     private boolean chunkLoaded(int cx, int cz) {
-        if (cx == scanChunkX && cz == scanChunkZ) return scanChunkLoadedFlag;
-        scanChunkX = cx;
-        scanChunkZ = cz;
-        try {
-            scanChunkLoadedFlag = mc.world.isChunkLoaded(cx, cz);
-        } catch (Throwable t) {
-            scanChunkLoadedFlag = false;
+        if (cx == this.scanChunkX && cz == this.scanChunkZ) {
+            return this.scanChunkLoadedFlag;
         }
-        return scanChunkLoadedFlag;
+        this.scanChunkX = cx;
+        this.scanChunkZ = cz;
+        try {
+            this.scanChunkLoadedFlag = this.mc.world.isChunkLoaded(cx, cz);
+        }
+        catch (Throwable t) {
+            this.scanChunkLoadedFlag = false;
+        }
+        return this.scanChunkLoadedFlag;
     }
-
-    // ------------------------------------------------------------------ 3) 过滤（刷怪笼距离）
 
     private void filterTick() {
-        int budget = SPAWNER_CHECK_BUDGET_PER_TICK;
-        while (budget-- > 0 && filterIndex < pendingCandidates.size()) {
-            BlockPos p = pendingCandidates.get(filterIndex++);
-            // 方块可能在这几 tick 里被挖了/换了：落地复核一次，避免对空气走过去
-            BlockState st = mc.world.getBlockState(p);
-            if (!st.isOf(Blocks.VAULT)) {
-                FOElytraLog.detail("过滤：%s 已经不是宝库方块了（被挖了？），跳过", p.toShortString());
+        int budget = 1;
+        while (budget-- > 0 && this.filterIndex < this.pendingCandidates.size()) {
+            BlockPos p;
+            BlockState st;
+            if (!(st = this.mc.world.getBlockState(p = this.pendingCandidates.get(this.filterIndex++))).isOf(Blocks.VAULT)) {
+                FOElytraLog.detail("\u8fc7\u6ee4\uff1a%s \u5df2\u7ecf\u4e0d\u662f\u5b9d\u5e93\u65b9\u5757\u4e86\uff08\u88ab\u6316\u4e86\uff1f\uff09\uff0c\u8df3\u8fc7", p.toShortString());
                 continue;
             }
-            /*
-             * 高度带复核（审查抓出来的 P1）：
-             * 开库状态机自己的扫描只覆盖 Y=-40~16（那两条常量它没公开），所以模块选出来的候选
-             * 必须也落在同一个带里 —— 否则会出现「我走过去 → 它说半径内没有可开的宝库 → 白走一趟」。
-             * 模块扫描已经用了同一个带，这里再兜一层：玩家在带里、库却在带外时直接排除。
-             */
             int y = p.getY();
-            if (y < SCAN_Y_MIN || y > SCAN_Y_MAX) {
-                FOElytraLog.detail("过滤：%s 在 Y=%d，超出开库状态机能扫的高度带（%d~%d），跳过",
-                    p.toShortString(), y, SCAN_Y_MIN, SCAN_Y_MAX);
+            if (y < -40 || y > 16) {
+                FOElytraLog.detail("\u8fc7\u6ee4\uff1a%s \u5728 Y=%d\uff0c\u8d85\u51fa\u5f00\u5e93\u72b6\u6001\u673a\u80fd\u626b\u7684\u9ad8\u5ea6\u5e26\uff08%d~%d\uff09\uff0c\u8df3\u8fc7", p.toShortString(), y, -40, 16);
                 continue;
             }
-            if (avoidSpawner.get()) {
+            if (((Boolean)this.avoidSpawner.get()).booleanValue()) {
                 boolean tooClose;
                 try {
-                    tooClose = VaultDisplay.tooCloseToSpawner(p, spawnerAvoidRadius.get());
-                } catch (Throwable t) {
+                    tooClose = VaultDisplay.tooCloseToSpawner(p, (Integer)this.spawnerAvoidRadius.get());
+                }
+                catch (Throwable t) {
                     FOElytraLog.detailError("tooCloseToSpawner", t);
-                    tooClose = false;      // 读不出来就按「不近」处理：宁可多开一个，也不要因为读不到而全跳过
+                    tooClose = false;
                 }
                 if (tooClose) {
-                    filteredSpawner++;
-                    FOElytraLog.detail("过滤：%s 离试炼刷怪笼 < %d 格（不在它旁边开库）",
-                        p.toShortString(), spawnerAvoidRadius.get());
+                    ++this.filteredSpawner;
+                    FOElytraLog.detail("\u8fc7\u6ee4\uff1a%s \u79bb\u8bd5\u70bc\u5237\u602a\u7b3c < %d \u683c\uff08\u4e0d\u5728\u5b83\u65c1\u8fb9\u5f00\u5e93\uff09", p.toShortString(), this.spawnerAvoidRadius.get());
                     continue;
                 }
             }
-            candidates.add(p);
+            this.candidates.add(p);
         }
-
-        if (filterIndex < pendingCandidates.size()) return;      // 还没过滤完，下一 tick 继续
-
-        candidates.sort(Comparator.comparingDouble(this::distanceTo));
-        if (candidates.isEmpty()) {
-            FOElytraLog.warn("半径 %d 格内没有可开的不祥宝库（待过滤 %d 个，其中 %d 个因为离刷怪笼太近被跳过）",
-                scanRadius, pendingCandidates.size(), filteredSpawner);
-            phase = Phase.NO_VAULT;
+        if (this.filterIndex < this.pendingCandidates.size()) {
             return;
         }
-        say("找到 %d 个可开的不祥宝库（跳过 %d 个离刷怪笼太近的），最近的是 %s（%.0f 格）",
-            candidates.size(), filteredSpawner, candidates.get(0).toShortString(), distanceTo(candidates.get(0)));
-        FOElytraLog.detail("候选清单（前 10）：%s", describeCandidates(10));
-        current = candidates.get(0);
-        phase = Phase.APPROACH;
+        this.candidates.sort(Comparator.comparingDouble(this::distanceTo));
+        if (this.candidates.isEmpty()) {
+            FOElytraLog.warn("\u534a\u5f84 %d \u683c\u5185\u6ca1\u6709\u53ef\u5f00\u7684\u4e0d\u7965\u5b9d\u5e93\uff08\u5f85\u8fc7\u6ee4 %d \u4e2a\uff0c\u5176\u4e2d %d \u4e2a\u56e0\u4e3a\u79bb\u5237\u602a\u7b3c\u592a\u8fd1\u88ab\u8df3\u8fc7\uff09", this.scanRadius, this.pendingCandidates.size(), this.filteredSpawner);
+            this.phase = Phase.NO_VAULT;
+            return;
+        }
+        this.say("\u627e\u5230 %d \u4e2a\u53ef\u5f00\u7684\u4e0d\u7965\u5b9d\u5e93\uff08\u8df3\u8fc7 %d \u4e2a\u79bb\u5237\u602a\u7b3c\u592a\u8fd1\u7684\uff09\uff0c\u6700\u8fd1\u7684\u662f %s\uff08%.0f \u683c\uff09", this.candidates.size(), this.filteredSpawner, this.candidates.get(0).toShortString(), this.distanceTo(this.candidates.get(0)));
+        FOElytraLog.detail("\u5019\u9009\u6e05\u5355\uff08\u524d 10\uff09\uff1a%s", this.describeCandidates(10));
+        this.current = this.candidates.get(0);
+        this.phase = Phase.APPROACH;
     }
 
     private String describeCandidates(int max) {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < Math.min(max, candidates.size()); i++) {
-            if (i > 0) sb.append("、");
-            sb.append(candidates.get(i).toShortString());
+        for (int i = 0; i < Math.min(max, this.candidates.size()); ++i) {
+            if (i > 0) {
+                sb.append("\u3001");
+            }
+            sb.append(this.candidates.get(i).toShortString());
         }
         return sb.toString();
     }
 
     private double distanceTo(BlockPos pos) {
-        if (mc.player == null) return Double.MAX_VALUE;
-        double dx = mc.player.getX() - (pos.getX() + 0.5);
-        double dy = mc.player.getY() - (pos.getY() + 0.5);
-        double dz = mc.player.getZ() - (pos.getZ() + 0.5);
+        if (this.mc.player == null) {
+            return Double.MAX_VALUE;
+        }
+        double dx = this.mc.player.getX() - ((double)pos.getX() + 0.5);
+        double dy = this.mc.player.getY() - ((double)pos.getY() + 0.5);
+        double dz = this.mc.player.getZ() - ((double)pos.getZ() + 0.5);
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    // ------------------------------------------------------------------ 4) 走过去
-
     private void approachTick() {
-        if (current == null) {
-            phase = Phase.SCAN;
+        if (this.current == null) {
+            this.phase = Phase.SCAN;
             return;
         }
-        if (phaseTicks == 1) {
-            gotoResend = 0;
+        if (this.phaseTicks == 1) {
+            this.gotoResend = 0;
             BaritoneHook.stop();
-            say("走向不祥宝库 %s（距离 %.0f 格）", current.toShortString(), distanceTo(current));
-            FOElytraLog.detail("APPROACH：目标 %s｜安全距离（离刷怪笼）%d 格｜超时 %d 秒",
-                current.toShortString(), spawnerAvoidRadius.get(), approachTimeoutSec.get());
+            this.say("\u8d70\u5411\u4e0d\u7965\u5b9d\u5e93 %s\uff08\u8ddd\u79bb %.0f \u683c\uff09", this.current.toShortString(), this.distanceTo(this.current));
+            FOElytraLog.detail("APPROACH\uff1a\u76ee\u6807 %s\uff5c\u5b89\u5168\u8ddd\u79bb\uff08\u79bb\u5237\u602a\u7b3c\uff09%d \u683c\uff5c\u8d85\u65f6 %d \u79d2", this.current.toShortString(), this.spawnerAvoidRadius.get(), this.approachTimeoutSec.get());
         }
-
-        if (!mc.world.getBlockState(current).isOf(Blocks.VAULT)) {
-            skipCurrent("这个宝库方块不见了（被挖掉/换掉了）");
+        if (!this.mc.world.getBlockState(this.current).isOf(Blocks.VAULT)) {
+            this.skipCurrent("\u8fd9\u4e2a\u5b9d\u5e93\u65b9\u5757\u4e0d\u89c1\u4e86\uff08\u88ab\u6316\u6389/\u6362\u6389\u4e86\uff09");
             return;
         }
-
-        double d = horizontalDistanceTo(current);
-        // 交接阈值必须**不比开库状态机自己的判断更严**（它的到位判定是 openDistance），
-        // 否则会出现「我这边没到位、它那边早就当到了」的白等；取 max 就是「谁的都不严于设置值」。
-        if (d <= Math.max(1.0, openDistance.get())) {
+        double d = this.horizontalDistanceTo(this.current);
+        if (d <= Math.max(1.0, (Double)this.openDistance.get())) {
             BaritoneHook.stop();
-            FOElytraLog.detail("已到位（水平 %.1f 格）→ 进入读取展示物阶段", d);
-            displayReadTicks = 0;
-            displayDesc = "（还没看）";
-            phase = Phase.LOOK;
+            FOElytraLog.detail("\u5df2\u5230\u4f4d\uff08\u6c34\u5e73 %.1f \u683c\uff09\u2192 \u8fdb\u5165\u8bfb\u53d6\u5c55\u793a\u7269\u9636\u6bb5", d);
+            this.displayReadTicks = 0;
+            this.displayDesc = "\uff08\u8fd8\u6ca1\u770b\uff09";
+            this.phase = Phase.LOOK;
             return;
         }
-
-        if (avoidSpawner.get()) {
+        if (((Boolean)this.avoidSpawner.get()).booleanValue()) {
             boolean tooClose;
             try {
-                tooClose = VaultDisplay.tooCloseToSpawner(mc.player.getBlockPos(), spawnerAvoidRadius.get());
-            } catch (Throwable t) {
+                tooClose = VaultDisplay.tooCloseToSpawner(this.mc.player.getBlockPos(), (Integer)this.spawnerAvoidRadius.get());
+            }
+            catch (Throwable t) {
                 tooClose = false;
             }
-            if (tooClose && phaseTicks % 200 == 0) {
-                // 这个库本来就被过滤过，走到跟前却还是太近：说明刷怪笼就在旁边（候选检查时那次读可能没加载）。
-                FOElytraLog.warn("我现在站的位置离试炼刷怪笼不到 %d 格，可能会把怪刷起来",
-                    spawnerAvoidRadius.get());
+            if (tooClose && this.phaseTicks % 200 == 0) {
+                FOElytraLog.warn("\u6211\u73b0\u5728\u7ad9\u7684\u4f4d\u7f6e\u79bb\u8bd5\u70bc\u5237\u602a\u7b3c\u4e0d\u5230 %d \u683c\uff0c\u53ef\u80fd\u4f1a\u628a\u602a\u5237\u8d77\u6765", this.spawnerAvoidRadius.get());
             }
         }
-
         if (!BaritoneHook.ready()) {
-            fail("没有可用的 Baritone，走不到宝库 " + current.toShortString()
-                + "。请装 Baritone，或把「自动挖竖井下降」关掉自己走过去。");
+            this.fail("\u6ca1\u6709\u53ef\u7528\u7684 Baritone\uff0c\u8d70\u4e0d\u5230\u5b9d\u5e93 " + this.current.toShortString() + "\u3002\u8bf7\u88c5 Baritone\uff0c\u6216\u628a\u300c\u81ea\u52a8\u6316\u7ad6\u4e95\u4e0b\u964d\u300d\u5173\u6389\u81ea\u5df1\u8d70\u8fc7\u53bb\u3002");
             return;
         }
-        if (phaseTicks == 1 || phaseTicks % REPATH_TICKS == 0) {
-            BaritoneHook.command("goto " + current.getX() + " " + current.getY() + " " + current.getZ());
-            gotoResend++;
-            FOElytraLog.detail("下发 goto %d %d %d（第 %d 次；走偏/被顶掉时会自动重发）",
-                current.getX(), current.getY(), current.getZ(), gotoResend);
+        if (this.phaseTicks == 1 || this.phaseTicks % 100 == 0) {
+            BaritoneHook.command("goto " + this.current.getX() + " " + this.current.getY() + " " + this.current.getZ());
+            ++this.gotoResend;
+            FOElytraLog.detail("\u4e0b\u53d1 goto %d %d %d\uff08\u7b2c %d \u6b21\uff1b\u8d70\u504f/\u88ab\u9876\u6389\u65f6\u4f1a\u81ea\u52a8\u91cd\u53d1\uff09", this.current.getX(), this.current.getY(), this.current.getZ(), this.gotoResend);
         }
-        if (phaseTicks % 200 == 0) {
-            FOElytraLog.detail("走向宝库中：距 %s 还有 %.0f 格（已走 %d 秒）", current.toShortString(), d, phaseTicks / 20);
+        if (this.phaseTicks % 200 == 0) {
+            FOElytraLog.detail("\u8d70\u5411\u5b9d\u5e93\u4e2d\uff1a\u8ddd %s \u8fd8\u6709 %.0f \u683c\uff08\u5df2\u8d70 %d \u79d2\uff09", this.current.toShortString(), d, this.phaseTicks / 20);
         }
-        if (phaseTicks > approachTimeoutSec.get() * 20) {
-            skipCurrent(String.format(Locale.ROOT, "走了 %d 秒还没到（还差 %.0f 格，被封起来或路不通）",
-                approachTimeoutSec.get(), d));
+        if (this.phaseTicks > (Integer)this.approachTimeoutSec.get() * 20) {
+            this.skipCurrent(String.format(Locale.ROOT, "\u8d70\u4e86 %d \u79d2\u8fd8\u6ca1\u5230\uff08\u8fd8\u5dee %.0f \u683c\uff0c\u88ab\u5c01\u8d77\u6765\u6216\u8def\u4e0d\u901a\uff09", this.approachTimeoutSec.get(), d));
         }
     }
 
     private double horizontalDistanceTo(BlockPos pos) {
-        return Math.hypot(mc.player.getX() - (pos.getX() + 0.5), mc.player.getZ() - (pos.getZ() + 0.5));
+        return Math.hypot(this.mc.player.getX() - ((double)pos.getX() + 0.5), this.mc.player.getZ() - ((double)pos.getZ() + 0.5));
     }
 
     private void skipCurrent(String why) {
-        if (current != null) {
-            skipped.add(current.asLong());
-            say("跳过这个宝库 %s：%s", current.toShortString(), why);
+        if (this.current != null) {
+            this.skipped.add(this.current.asLong());
+            this.say("\u8df3\u8fc7\u8fd9\u4e2a\u5b9d\u5e93 %s\uff1a%s", this.current.toShortString(), why);
         }
         BaritoneHook.stop();
-        current = null;
-        candidates.removeIf(p -> skipped.contains(p.asLong()));
-        if (!candidates.isEmpty()) {
-            current = candidates.get(0);
-            phase = Phase.APPROACH;
+        this.current = null;
+        this.candidates.removeIf(p -> this.skipped.contains(p.asLong()));
+        if (!this.candidates.isEmpty()) {
+            this.current = this.candidates.get(0);
+            this.phase = Phase.APPROACH;
         } else {
-            phase = Phase.NO_VAULT;
+            this.phase = Phase.NO_VAULT;
         }
     }
 
-    // ------------------------------------------------------------------ 5) 读展示物
-
     private void lookTick() {
-        if (current == null) {
-            phase = Phase.SCAN;
+        boolean hit;
+        ItemStack shown;
+        if (this.current == null) {
+            this.phase = Phase.SCAN;
             return;
         }
-        int wait = Math.max(DISPLAY_SYNC_MIN_WAIT, displayWaitTicks.get());
-        if (phaseTicks < wait) {
-            if (phaseTicks == 1) {
-                FOElytraLog.detail("站到激活范围内，等 %d tick 让服务端把「展示物」同步过来"
-                    + "（服务端宝库状态每 20 tick 重算一次）", wait);
+        int wait = Math.max(20, (Integer)this.displayWaitTicks.get());
+        if (this.phaseTicks < wait) {
+            if (this.phaseTicks == 1) {
+                FOElytraLog.detail("\u7ad9\u5230\u6fc0\u6d3b\u8303\u56f4\u5185\uff0c\u7b49 %d tick \u8ba9\u670d\u52a1\u7aef\u628a\u300c\u5c55\u793a\u7269\u300d\u540c\u6b65\u8fc7\u6765\uff08\u670d\u52a1\u7aef\u5b9d\u5e93\u72b6\u6001\u6bcf 20 tick \u91cd\u7b97\u4e00\u6b21\uff09", wait);
             }
             return;
         }
-
-        DisplayMode mode = displayMode.get();
-        boolean hit;
-        ItemStack shown;
+        DisplayMode mode = (DisplayMode)((Object)this.displayMode.get());
         try {
-            shown = VaultDisplay.displayItem(current);
-            displayDesc = VaultDisplay.describe(current);
-            hit = VaultDisplay.displayContainsTarget(current, displayItems.get(), parseIds(displayEnchants.get()));
-        } catch (Throwable t) {
-            FOElytraLog.detailError("读取宝库展示物", t);
+            shown = VaultDisplay.displayItem(this.current);
+            this.displayDesc = VaultDisplay.describe(this.current);
+            hit = VaultDisplay.displayContainsTarget(this.current, (List)this.displayItems.get(), this.parseIds((String)this.displayEnchants.get()));
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("\u8bfb\u53d6\u5b9d\u5e93\u5c55\u793a\u7269", t);
             shown = ItemStack.EMPTY;
-            displayDesc = "（读取失败：" + t.getClass().getSimpleName() + "）";
+            this.displayDesc = "\uff08\u8bfb\u53d6\u5931\u8d25\uff1a" + t.getClass().getSimpleName() + "\uff09";
             hit = false;
         }
         boolean unknown = shown == null || shown.isEmpty();
-        displayReadTicks = phaseTicks;
-
+        this.displayReadTicks = this.phaseTicks;
         if (mode == DisplayMode.OFF) {
-            openCurrent("展示物筛选已关（不看展示物）");
+            this.openCurrent("\u5c55\u793a\u7269\u7b5b\u9009\u5df2\u5173\uff08\u4e0d\u770b\u5c55\u793a\u7269\uff09");
             return;
         }
         if (mode == DisplayMode.LOG) {
-            // 「只记录」是一条**信息**，不是关键节点：进日志即可，命中时才值得说一句
-            FOElytraLog.detail("宝库 %s 现在展示的是：%s", current.toShortString(), displayDesc);
+            FOElytraLog.detail("\u5b9d\u5e93 %s \u73b0\u5728\u5c55\u793a\u7684\u662f\uff1a%s", this.current.toShortString(), this.displayDesc);
             if (hit) {
-                say("宝库 %s 展示物 = %s（命中清单，但展示物和实际掉落无关，照开）",
-                    current.toShortString(), displayDesc);
+                this.say("\u5b9d\u5e93 %s \u5c55\u793a\u7269 = %s\uff08\u547d\u4e2d\u6e05\u5355\uff0c\u4f46\u5c55\u793a\u7269\u548c\u5b9e\u9645\u6389\u843d\u65e0\u5173\uff0c\u7167\u5f00\uff09", this.current.toShortString(), this.displayDesc);
             }
-            openCurrent(hit ? "展示物命中（只记录模式，照开）" : "只记录模式，照开");
+            this.openCurrent(hit ? "\u5c55\u793a\u7269\u547d\u4e2d\uff08\u53ea\u8bb0\u5f55\u6a21\u5f0f\uff0c\u7167\u5f00\uff09" : "\u53ea\u8bb0\u5f55\u6a21\u5f0f\uff0c\u7167\u5f00");
             return;
         }
-
-        // REQUIRE：严格按「展示物命中才开」
         if (hit) {
-            say("展示物命中目标（%s）→ 立刻用%s打开 %s", displayDesc, keyName(), current.toShortString());
-            openCurrent("展示物命中");
+            this.say("\u5c55\u793a\u7269\u547d\u4e2d\u76ee\u6807\uff08%s\uff09\u2192 \u7acb\u523b\u7528%s\u6253\u5f00 %s", this.displayDesc, this.keyName(), this.current.toShortString());
+            this.openCurrent("\u5c55\u793a\u7269\u547d\u4e2d");
             return;
         }
-        if (unknown && openWhenUnknown.get()) {
-            say("读不到宝库 %s 的展示物（可能没同步/已经被人开过）→ 按设置照样开", current.toShortString());
-            openCurrent("读不到展示物，按设置照开");
+        if (unknown && ((Boolean)this.openWhenUnknown.get()).booleanValue()) {
+            this.say("\u8bfb\u4e0d\u5230\u5b9d\u5e93 %s \u7684\u5c55\u793a\u7269\uff08\u53ef\u80fd\u6ca1\u540c\u6b65/\u5df2\u7ecf\u88ab\u4eba\u5f00\u8fc7\uff09\u2192 \u6309\u8bbe\u7f6e\u7167\u6837\u5f00", this.current.toShortString());
+            this.openCurrent("\u8bfb\u4e0d\u5230\u5c55\u793a\u7269\uff0c\u6309\u8bbe\u7f6e\u7167\u5f00");
             return;
         }
-        skipCurrent("展示物是「" + displayDesc + "」，不在目标清单里（这次不浪费钥匙）");
+        this.skipCurrent("\u5c55\u793a\u7269\u662f\u300c" + this.displayDesc + "\u300d\uff0c\u4e0d\u5728\u76ee\u6807\u6e05\u5355\u91cc\uff08\u8fd9\u6b21\u4e0d\u6d6a\u8d39\u94a5\u5319\uff09");
     }
 
-    // ------------------------------------------------------------------ 6) 开（借 VaultOpener，只开这一个）
-
     private void openCurrent(String why) {
-        if (!hasAnyKey()) {
-            noKeyStop();
+        if (!this.hasAnyKey()) {
+            this.noKeyStop();
             return;
         }
         BaritoneHook.stop();
-        FOElytraLog.detail("准备开库：%s（原因：%s）", current.toShortString(), why);
-        phase = Phase.OPEN;
+        FOElytraLog.detail("\u51c6\u5907\u5f00\u5e93\uff1a%s\uff08\u539f\u56e0\uff1a%s\uff09", this.current.toShortString(), why);
+        this.phase = Phase.OPEN;
     }
 
     private void openTick() {
-        if (current == null) {
-            phase = Phase.SCAN;
+        if (this.current == null) {
+            this.phase = Phase.SCAN;
             return;
         }
-        if (vaultOpener == null) {
-            if (!mc.world.getBlockState(current).isOf(Blocks.VAULT)) {
-                skipCurrent("准备开的时候它已经不是宝库方块了");
+        if (this.vaultOpener == null) {
+            if (!this.mc.world.getBlockState(this.current).isOf(Blocks.VAULT)) {
+                this.skipCurrent("\u51c6\u5907\u5f00\u7684\u65f6\u5019\u5b83\u5df2\u7ecf\u4e0d\u662f\u5b9d\u5e93\u65b9\u5757\u4e86");
                 return;
             }
-            int radius = (int) Math.max(16, Math.min(64, Math.ceil(horizontalDistanceTo(current)) + 16));
-            final BlockPos focus = current.toImmutable();
-            vaultOpener = new VaultOpener(new VaultOpener.Options(
-                radius,
-                openDistance.get(),
-                collectTicks.get(),
-                1,                                  // 一次只开这一个（多开由模块自己循环控制，才能穿插展示物判断）
-                !alsoNormal.get(),                   // needOminous：只有「也开普通宝库」关掉时才强制不祥
-                safeItems(targetItems.get()),
-                parseIds(targetEnchants.get()),
-                stopOnTarget.get(),
-                false,                               // drinkOminousBottle：本模块不喝瓶（要把普通刷怪笼转成不祥的，违背「绕开刷怪笼」）
-                true,                                // useBaritoneWalk
-                actionDelay.get(),
-                pos -> pos != null && pos.equals(focus),   // candidateFilter：只认盯上的这一个
-                this::onVaultOpened                        // onOpened：真开掉了就落盘标记
-            ));
-            vaultOpener.start();
-            say("开始开库：%s｜半径 %d｜开完收集 %d tick｜目标 %s",
-                current.toShortString(), radius, collectTicks.get(), describeLoot());
+            int radius = (int)Math.max(16.0, Math.min(64.0, Math.ceil(this.horizontalDistanceTo(this.current)) + 16.0));
+            BlockPos focus = this.current.toImmutable();
+            this.vaultOpener = new VaultOpener(new VaultOpener.Options(radius, (Double)this.openDistance.get(), (Integer)this.collectTicks.get(), 1, (Boolean)this.alsoNormal.get() == false, AutoOminousVault.safeItems((List)this.targetItems.get()), this.parseIds((String)this.targetEnchants.get()), (Boolean)this.stopOnTarget.get(), false, true, (Integer)this.actionDelay.get(), pos -> pos != null && pos.equals((Object)focus), this::onVaultOpened));
+            this.vaultOpener.start();
+            this.say("\u5f00\u59cb\u5f00\u5e93\uff1a%s\uff5c\u534a\u5f84 %d\uff5c\u5f00\u5b8c\u6536\u96c6 %d tick\uff5c\u76ee\u6807 %s", this.current.toShortString(), radius, this.collectTicks.get(), this.describeLoot());
         }
-
-        vaultOpener.tick();
-        TaskStatus st = vaultOpener.status();
+        this.vaultOpener.tick();
+        TaskStatus st = this.vaultOpener.status();
         if (st == TaskStatus.RUNNING) {
-            if (phaseTicks % 100 == 0) {
-                FOElytraLog.detail("开库中：%s｜已开 %d 个｜%s", vaultOpener.progress(), vaultOpener.openedCount(),
-                    vaultOpener.foundTarget() ? "已命中目标" : "还没命中");
+            if (this.phaseTicks % 100 == 0) {
+                FOElytraLog.detail("\u5f00\u5e93\u4e2d\uff1a%s\uff5c\u5df2\u5f00 %d \u4e2a\uff5c%s", this.vaultOpener.progress(), this.vaultOpener.openedCount(), this.vaultOpener.foundTarget() ? "\u5df2\u547d\u4e2d\u76ee\u6807" : "\u8fd8\u6ca1\u547d\u4e2d");
             }
-            if (phaseTicks > 1200) {      // 60 秒还开不完：不再等，交给 POST_OPEN 按结果处理
-                FOElytraLog.warn("开库流程跑了 %d 秒还没结束（状态 %s），先按当前结果处理", phaseTicks / 20,
-                    vaultOpener.state());
-                phase = Phase.POST_OPEN;
+            if (this.phaseTicks > 1200) {
+                FOElytraLog.warn("\u5f00\u5e93\u6d41\u7a0b\u8dd1\u4e86 %d \u79d2\u8fd8\u6ca1\u7ed3\u675f\uff08\u72b6\u6001 %s\uff09\uff0c\u5148\u6309\u5f53\u524d\u7ed3\u679c\u5904\u7406", new Object[]{this.phaseTicks / 20, this.vaultOpener.state()});
+                this.phase = Phase.POST_OPEN;
             }
             return;
         }
-        phase = Phase.POST_OPEN;
+        this.phase = Phase.POST_OPEN;
     }
 
-    /** 方块被真的打开时的回调（由 VaultOpener 在同一条件下调用一次）。 */
     private void onVaultOpened(BlockPos pos) {
         try {
             VaultMarks.get().mark(pos);
-            say("已标记这个宝库为「已打开」：%s（以后不会再选它）", pos.toShortString());
-        } catch (Throwable t) {
+            this.say("\u5df2\u6807\u8bb0\u8fd9\u4e2a\u5b9d\u5e93\u4e3a\u300c\u5df2\u6253\u5f00\u300d\uff1a%s\uff08\u4ee5\u540e\u4e0d\u4f1a\u518d\u9009\u5b83\uff09", pos.toShortString());
+        }
+        catch (Throwable t) {
             FOElytraLog.detailError("onVaultOpened", t);
         }
     }
 
-    // ------------------------------------------------------------------ 7) 开完结算
-
     private void postOpenTick() {
-        if (vaultOpener == null) {
-            phase = Phase.SCAN;
+        if (this.vaultOpener == null) {
+            this.phase = Phase.SCAN;
             return;
         }
-        boolean found = vaultOpener.foundTarget();
-        int opened = vaultOpener.openedCount();
-        List<String> loot = vaultOpener.lootLog();
-        String state = vaultOpener.state().toString();
-        String fail = vaultOpener.failReason();
-        String last = vaultOpener.lastMessage();
-
+        boolean found = this.vaultOpener.foundTarget();
+        int opened = this.vaultOpener.openedCount();
+        List<String> loot = this.vaultOpener.lootLog();
+        String state = this.vaultOpener.state().name();
+        String fail = this.vaultOpener.failReason();
+        String last = this.vaultOpener.lastMessage();
         for (String line : loot) {
-            // 只走 say（= 聊天栏 + 文件，或只进文件）：原来这里 info + chatRaw 会让同一行在聊天栏出现两遍
-            say("战利品：%s", line);
+            this.say("\u6218\u5229\u54c1\uff1a%s", line);
         }
-
         if (opened > 0) {
-            // 双保险：即使回调没被触发（例如注入点没走到），也把标记写上 —— 标记是幂等的
-            if (current != null) {
+            if (this.current != null) {
                 try {
-                    VaultMarks.get().mark(current);
-                } catch (Throwable t) {
+                    VaultMarks.get().mark(this.current);
+                }
+                catch (Throwable t) {
                     FOElytraLog.detailError("mark(postOpen)", t);
                 }
-                skipped.add(current.asLong());
+                this.skipped.add(this.current.asLong());
             }
-            openedTotal++;
-            openedThisChamber++;
-            say("第 %d 个不祥宝库开完了（本密室第 %d 个，本次共开 %d 个，已标记 %d 个）",
-                openedTotal, openedThisChamber, openedTotal, VaultMarks.get().count());
+            ++this.openedTotal;
+            ++this.openedThisChamber;
+            this.say("\u7b2c %d \u4e2a\u4e0d\u7965\u5b9d\u5e93\u5f00\u5b8c\u4e86\uff08\u672c\u5bc6\u5ba4\u7b2c %d \u4e2a\uff0c\u672c\u6b21\u5171\u5f00 %d \u4e2a\uff0c\u5df2\u6807\u8bb0 %d \u4e2a\uff09", this.openedTotal, this.openedThisChamber, this.openedTotal, VaultMarks.get().count());
         } else {
-            FOElytraLog.warn("没能打开 %s：状态 %s｜原因 %s｜最后一步 %s", current == null ? "?" : current.toShortString(),
-                state, fail.isEmpty() ? "没有给出具体原因" : fail, safe(last));
-            if (current != null) skipped.add(current.asLong());
+            FOElytraLog.warn("\u6ca1\u80fd\u6253\u5f00 %s\uff1a\u72b6\u6001 %s\uff5c\u539f\u56e0 %s\uff5c\u6700\u540e\u4e00\u6b65 %s", this.current == null ? "?" : this.current.toShortString(), state, fail.isEmpty() ? "\u6ca1\u6709\u7ed9\u51fa\u5177\u4f53\u539f\u56e0" : fail, AutoOminousVault.safe(last));
+            if (this.current != null) {
+                this.skipped.add(this.current.asLong());
+            }
         }
-
-        BlockPos openedPos = current;
-        /*
-         * 一定要先 abort() 再丢掉引用（审查抓出来的 P1）：
-         * openTick 里「跑满 1200 tick 强制收尾」那条路会让子状态机还停在 RUNNING，
-         * 直接置 null 等于把「Baritone goto 还在走 / 我们按着的键 / 它自己开的界面」全丢给下一次运行去踩。
-         * abort() 是幂等的，正常结束（DONE）时调它也没副作用。
-         */
-        if (vaultOpener.status() == TaskStatus.RUNNING) {
-            vaultOpener.abort("本次开库结算，交给模块处理下一个");
+        BlockPos openedPos = this.current;
+        if (this.vaultOpener.status() == TaskStatus.RUNNING) {
+            this.vaultOpener.abort("\u672c\u6b21\u5f00\u5e93\u7ed3\u7b97\uff0c\u4ea4\u7ed9\u6a21\u5757\u5904\u7406\u4e0b\u4e00\u4e2a");
         }
-        vaultOpener = null;
-        current = null;
-
+        this.vaultOpener = null;
+        this.current = null;
         if (found) {
-            String msg = String.format(Locale.ROOT,
-                "拿到目标战利品了！（本次共开 %d 个不祥宝库，命中在 %s）", openedTotal, String.join("、", loot));
-            finish(msg);
+            String msg = String.format(Locale.ROOT, "\u62ff\u5230\u76ee\u6807\u6218\u5229\u54c1\u4e86\uff01\uff08\u672c\u6b21\u5171\u5f00 %d \u4e2a\u4e0d\u7965\u5b9d\u5e93\uff0c\u547d\u4e2d\u5728 %s\uff09", this.openedTotal, String.join((CharSequence)"\u3001", loot));
+            this.finish(msg);
             return;
         }
-
-        // 还有钥匙吗？
-        if (!hasAnyKey()) {
-            noKeyStop();
+        if (!this.hasAnyKey()) {
+            this.noKeyStop();
             return;
         }
-        if (stopWhenNoFood.get() && countFood() <= 0) {
-            finish(String.format(Locale.ROOT, "食物用完了（%s 0 个）——先回去补货", foodName()));
+        if (((Boolean)this.stopWhenNoFood.get()).booleanValue() && this.countFood() <= 0) {
+            this.finish(String.format(Locale.ROOT, "\u98df\u7269\u7528\u5b8c\u4e86\uff08%s 0 \u4e2a\uff09\u2014\u2014\u5148\u56de\u53bb\u8865\u8d27", this.foodName()));
             return;
         }
-
-        // 一个密室开够了：交给 NO_VAULT 统一决定「收工」还是「换下一个密室」。
-        // ⚠️ 这里绝不能偷偷再扫一轮 —— 那会让「一个密室最多开几个」这个设置形同虚设（扫到就接着开）。
-        if (openedThisChamber >= maxPerChamber.get()) {
-            say("本密室已经开了 %d 个（上限 %d）→ 交给「任务结束后自动关闭」决定收工还是换密室",
-                openedThisChamber, maxPerChamber.get());
-            openedThisChamber = 0;
-            candidates.clear();
-            phase = Phase.NO_VAULT;
+        if (this.openedThisChamber >= (Integer)this.maxPerChamber.get()) {
+            this.say("\u672c\u5bc6\u5ba4\u5df2\u7ecf\u5f00\u4e86 %d \u4e2a\uff08\u4e0a\u9650 %d\uff09\u2192 \u4ea4\u7ed9\u300c\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed\u300d\u51b3\u5b9a\u6536\u5de5\u8fd8\u662f\u6362\u5bc6\u5ba4", this.openedThisChamber, this.maxPerChamber.get());
+            this.openedThisChamber = 0;
+            this.candidates.clear();
+            this.phase = Phase.NO_VAULT;
             return;
         }
-
-        // 本密室的候选表里还有下一个 → 直接接着走，省掉「每开一个就重扫一遍半径 96」的完整扫描
-        if (openedPos != null) candidates.removeIf(p -> p.equals(openedPos));
-        if (!candidates.isEmpty()) {
-            current = candidates.get(0);
-            FOElytraLog.detail("本密室还有 %d 个候选没开，去下一个：%s（%.0f 格）",
-                candidates.size(), current.toShortString(), distanceTo(current));
-            phase = Phase.APPROACH;
+        if (openedPos != null) {
+            this.candidates.removeIf(p -> p.equals((Object)openedPos));
+        }
+        if (!this.candidates.isEmpty()) {
+            this.current = this.candidates.get(0);
+            FOElytraLog.detail("\u672c\u5bc6\u5ba4\u8fd8\u6709 %d \u4e2a\u5019\u9009\u6ca1\u5f00\uff0c\u53bb\u4e0b\u4e00\u4e2a\uff1a%s\uff08%.0f \u683c\uff09", this.candidates.size(), this.current.toShortString(), this.distanceTo(this.current));
+            this.phase = Phase.APPROACH;
             return;
         }
-        enterScan();
+        this.enterScan();
     }
-
-    // ------------------------------------------------------------------ 8) 这个密室还有别的库吗
 
     private void noVaultTick() {
-        // 需求 7：钥匙或食物用完就停
-        if (!hasAnyKey()) {
-            noKeyStop();
+        if (!this.hasAnyKey()) {
+            this.noKeyStop();
             return;
         }
-        if (stopWhenNoFood.get() && countFood() <= 0) {
-            finish(String.format(Locale.ROOT, "食物用完了（%s 0 个）——按设置停手", foodName()));
+        if (((Boolean)this.stopWhenNoFood.get()).booleanValue() && this.countFood() <= 0) {
+            this.finish(String.format(Locale.ROOT, "\u98df\u7269\u7528\u5b8c\u4e86\uff08%s 0 \u4e2a\uff09\u2014\u2014\u6309\u8bbe\u7f6e\u505c\u624b", this.foodName()));
             return;
         }
-
-        if (autoClose.get()) {
-            finish(String.format(Locale.ROOT,
-                "这个试炼大厅没有可开的未标记不祥宝库了（本次共开 %d 个）——按设置收工并关闭模块", openedTotal));
+        if (((Boolean)this.autoClose.get()).booleanValue()) {
+            this.finish(String.format(Locale.ROOT, "\u8fd9\u4e2a\u8bd5\u70bc\u5927\u5385\u6ca1\u6709\u53ef\u5f00\u7684\u672a\u6807\u8bb0\u4e0d\u7965\u5b9d\u5e93\u4e86\uff08\u672c\u6b21\u5171\u5f00 %d \u4e2a\uff09\u2014\u2014\u6309\u8bbe\u7f6e\u6536\u5de5\u5e76\u5173\u95ed\u6a21\u5757", this.openedTotal));
             return;
         }
-
-        // 「任务结束后自动关闭」是关的 → 继续找下一个密室（钥匙还没用完）
-        if (chambersVisited >= maxChambers.get()) {
-            finish(String.format(Locale.ROOT,
-                "已经连着换过 %d 个密室（上限）——收工，防止挂机乱飞", chambersVisited));
+        if (this.chambersVisited >= (Integer)this.maxChambers.get()) {
+            this.finish(String.format(Locale.ROOT, "\u5df2\u7ecf\u8fde\u7740\u6362\u8fc7 %d \u4e2a\u5bc6\u5ba4\uff08\u4e0a\u9650\uff09\u2014\u2014\u6536\u5de5\uff0c\u9632\u6b62\u6302\u673a\u4e71\u98de", this.chambersVisited));
             return;
         }
-        if (phaseTicks == 1) {
-            say("本密室没库可开了：按设置（任务结束后自动关闭 = 否）去下一个试炼大厅（已去 %d 个，上限 %d）",
-                chambersVisited, maxChambers.get());
+        if (this.phaseTicks == 1) {
+            this.say("\u672c\u5bc6\u5ba4\u6ca1\u5e93\u53ef\u5f00\u4e86\uff1a\u6309\u8bbe\u7f6e\uff08\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed = \u5426\uff09\u53bb\u4e0b\u4e00\u4e2a\u8bd5\u70bc\u5927\u5385\uff08\u5df2\u53bb %d \u4e2a\uff0c\u4e0a\u9650 %d\uff09", this.chambersVisited, this.maxChambers.get());
         }
-
-        switch (tryLocate()) {
-            case WAITING -> {
-                if (phaseTicks % 100 == 0) FOElytraLog.detail("正在后台搜索下一个试炼大厅…已等 %d 秒", phaseTicks / 20);
+        switch (this.tryLocate().ordinal()) {
+            case 2: {
+                if (this.phaseTicks % 100 != 0) break;
+                FOElytraLog.detail("\u6b63\u5728\u540e\u53f0\u641c\u7d22\u4e0b\u4e00\u4e2a\u8bd5\u70bc\u5927\u5385\u2026\u5df2\u7b49 %d \u79d2", this.phaseTicks / 20);
+                break;
             }
-            case FOUND -> goToTarget();
-            case FAILED -> finish(String.format(Locale.ROOT,
-                "本密室没库可开了，也定位不到下一个试炼大厅：%s（可填「世界种子」或「坐标列表」）", locateFail));
-        }
-    }
-
-    // ------------------------------------------------------------------ 9) 定位
-
-    private enum LocateResult {
-        FOUND("找到了"),
-        FAILED("失败"),
-        WAITING("等待中");
-
-        public final String label;
-
-        LocateResult(String label) {
-            this.label = label;
-        }
-
-        @Override
-        public String toString() {
-            return label;
+            case 0: {
+                this.goToTarget();
+                break;
+            }
+            case 1: {
+                this.finish(String.format(Locale.ROOT, "\u672c\u5bc6\u5ba4\u6ca1\u5e93\u53ef\u5f00\u4e86\uff0c\u4e5f\u5b9a\u4f4d\u4e0d\u5230\u4e0b\u4e00\u4e2a\u8bd5\u70bc\u5927\u5385\uff1a%s\uff08\u53ef\u586b\u300c\u4e16\u754c\u79cd\u5b50\u300d\u6216\u300c\u5750\u6807\u5217\u8868\u300d\uff09", this.locateFail));
+            }
         }
     }
 
     private LocateResult tryLocate() {
-        if (mc.player == null) return LocateResult.FAILED;
-        int px = mc.player.getBlockX();
-        int pz = mc.player.getBlockZ();
-        LocateMode mode = locateMode.get();
-        locateFail = "";
-
-        // ① 手填种子推算（多人服务器上也成立，且是用户点名要的那条路）
+        TrialChamberLocator.Target t;
+        if (this.mc.player == null) {
+            return LocateResult.FAILED;
+        }
+        int px = this.mc.player.getBlockX();
+        int pz = this.mc.player.getBlockZ();
+        LocateMode mode = (LocateMode)((Object)this.locateMode.get());
+        this.locateFail = "";
         if (mode == LocateMode.AUTO || mode == LocateMode.SEED) {
-            Long seed = parseSeed();
+            Long seed = this.parseSeed();
             if (seed != null) {
-                List<TrialChamberLocator.Target> all = locator.locateBySeedValues(seed, px, pz, seedRings.get());
-                TrialChamberLocator.Target t = pickUnvisited(all);
-                if (t != null) {
-                    usedTargets.add(t.x() + "," + t.z());
-                    return useTarget(t);
+                List<TrialChamberLocator.Target> all = this.locator.locateBySeedValues(seed, px, pz, (Integer)this.seedRings.get());
+                TrialChamberLocator.Target t2 = this.pickUnvisited(all);
+                if (t2 != null) {
+                    this.usedTargets.add(t2.x() + "," + t2.z());
+                    return this.useTarget(t2);
                 }
-                locateFail = String.format(Locale.ROOT, "按种子 %d 推算出的 %d 个候选点都已经去过了（圈数 %d，可调大）",
-                    seed, all == null ? 0 : all.size(), seedRings.get());
+                this.locateFail = String.format(Locale.ROOT, "\u6309\u79cd\u5b50 %d \u63a8\u7b97\u51fa\u7684 %d \u4e2a\u5019\u9009\u70b9\u90fd\u5df2\u7ecf\u53bb\u8fc7\u4e86\uff08\u5708\u6570 %d\uff0c\u53ef\u8c03\u5927\uff09", seed, all == null ? 0 : all.size(), this.seedRings.get());
             } else {
-                locateFail = "「定位方式」要用种子推算，但「世界种子（手填）」是空的";
+                this.locateFail = "\u300c\u5b9a\u4f4d\u65b9\u5f0f\u300d\u8981\u7528\u79cd\u5b50\u63a8\u7b97\uff0c\u4f46\u300c\u4e16\u754c\u79cd\u5b50\uff08\u624b\u586b\uff09\u300d\u662f\u7a7a\u7684";
             }
-            if (mode == LocateMode.SEED) return LocateResult.FAILED;
+            if (mode == LocateMode.SEED) {
+                return LocateResult.FAILED;
+            }
         }
-
-        // ② 坐标列表
         if (mode == LocateMode.AUTO || mode == LocateMode.COORD_LIST) {
-            TrialChamberLocator.Target t = pickCoords(px, pz);
+            t = this.pickCoords(px, pz);
             if (t != null) {
-                usedTargets.add(t.x() + "," + t.z());
-                return useTarget(t);
+                this.usedTargets.add(t.x() + "," + t.z());
+                return this.useTarget(t);
             }
-            locateFail = "坐标列表里没有可用坐标（空、格式不对、或者都去过了）";
-            if (mode == LocateMode.COORD_LIST) return LocateResult.FAILED;
+            this.locateFail = "\u5750\u6807\u5217\u8868\u91cc\u6ca1\u6709\u53ef\u7528\u5750\u6807\uff08\u7a7a\u3001\u683c\u5f0f\u4e0d\u5bf9\u3001\u6216\u8005\u90fd\u53bb\u8fc7\u4e86\uff09";
+            if (mode == LocateMode.COORD_LIST) {
+                return LocateResult.FAILED;
+            }
         }
-
-        // ③ 读「埋藏的试炼密室地图」
         if (mode == LocateMode.AUTO || mode == LocateMode.MAP) {
-            TrialChamberLocator.Target t = locator.readMapTarget();
-            if (t != null && !usedTargets.contains(t.x() + "," + t.z())) {
-                usedTargets.add(t.x() + "," + t.z());
-                return useTarget(t);
+            t = this.locator.readMapTarget();
+            if (t != null && !this.usedTargets.contains(t.x() + "," + t.z())) {
+                this.usedTargets.add(t.x() + "," + t.z());
+                return this.useTarget(t);
             }
-            /*
-             * ⚠️ 地图只有一张，同一张图永远返回同一个目标 —— 必须显式识别「已经去过了」，
-             * 不然在「任务结束后自动关闭 = 否」时会把同一个密室当成「下一个」反复跑，
-             * 直到 maxChambers 耗尽才报「已经连着换过 N 个密室」（审查抓出来的 P1）。
-             */
-            if (t != null) {
-                locateFail = String.format(Locale.ROOT, "地图指向的试炼大厅 %d, %d 这次已经去过了"
-                    + "（一张地图只给一个目标，换下一个请用「世界种子」或「坐标列表」）", t.x(), t.z());
-            } else {
-                locateFail = "背包里没有「埋藏的试炼密室地图」，或读不到标记点（" + safe(locator.failReason()) + "）";
+            this.locateFail = t != null ? String.format(Locale.ROOT, "\u5730\u56fe\u6307\u5411\u7684\u8bd5\u70bc\u5927\u5385 %d, %d \u8fd9\u6b21\u5df2\u7ecf\u53bb\u8fc7\u4e86\uff08\u4e00\u5f20\u5730\u56fe\u53ea\u7ed9\u4e00\u4e2a\u76ee\u6807\uff0c\u6362\u4e0b\u4e00\u4e2a\u8bf7\u7528\u300c\u4e16\u754c\u79cd\u5b50\u300d\u6216\u300c\u5750\u6807\u5217\u8868\u300d\uff09", t.x(), t.z()) : "\u80cc\u5305\u91cc\u6ca1\u6709\u300c\u57cb\u85cf\u7684\u8bd5\u70bc\u5bc6\u5ba4\u5730\u56fe\u300d\uff0c\u6216\u8bfb\u4e0d\u5230\u6807\u8bb0\u70b9\uff08" + AutoOminousVault.safe(this.locator.failReason()) + "\uff09";
+            if (mode == LocateMode.MAP) {
+                return LocateResult.FAILED;
             }
-            if (mode == LocateMode.MAP) return LocateResult.FAILED;
         }
-
-        // ④ 单机：整合服务端真实世界生成器搜索（异步，必须等 isSearching() 变 false）
         if (mode == LocateMode.AUTO || mode == LocateMode.INTEGRATED_SEARCH) {
             if (!TrialChamberLocator.seedSearchAvailable()) {
-                // 只在前面几条路线都没留下原因时才写（第三轮复验新问题#4）：
-                // 否则 AUTO 模式下「候选点都去过了（圈数可调大）」「地图目标已去过」这些更可操作的原因会被盖掉。
-                if (locateFail.isEmpty()) {
-                    locateFail = "单机种子搜索不可用（多人服务器没有世界种子，请用「手填种子」或坐标列表）";
+                if (this.locateFail.isEmpty()) {
+                    this.locateFail = "\u5355\u673a\u79cd\u5b50\u641c\u7d22\u4e0d\u53ef\u7528\uff08\u591a\u4eba\u670d\u52a1\u5668\u6ca1\u6709\u4e16\u754c\u79cd\u5b50\uff0c\u8bf7\u7528\u300c\u624b\u586b\u79cd\u5b50\u300d\u6216\u5750\u6807\u5217\u8868\uff09";
                 }
                 return LocateResult.FAILED;
             }
-            // ④ 只在前面几条路线都没留下原因时才改写 locateFail，
-            //    否则 AUTO 模式下会把「地图目标已去过」这种更具体的原因盖成「单机搜索不可用」（第二轮审查 N7）
-            if (!integratedSearchStarted) {
-                integratedSearchStarted = true;
-                locator.locateBySeed(px, pz, integratedSearchRadius.get());
-                FOElytraLog.detail("已发起单机种子搜索（跑在整合服务端线程上，不卡画面）：起点 %d, %d，半径 %d 区块",
-                    px, pz, integratedSearchRadius.get());
+            if (!this.integratedSearchStarted) {
+                this.integratedSearchStarted = true;
+                this.locator.locateBySeed(px, pz, (Integer)this.integratedSearchRadius.get());
+                FOElytraLog.detail("\u5df2\u53d1\u8d77\u5355\u673a\u79cd\u5b50\u641c\u7d22\uff08\u8dd1\u5728\u6574\u5408\u670d\u52a1\u7aef\u7ebf\u7a0b\u4e0a\uff0c\u4e0d\u5361\u753b\u9762\uff09\uff1a\u8d77\u70b9 %d, %d\uff0c\u534a\u5f84 %d \u533a\u5757", px, pz, this.integratedSearchRadius.get());
             }
-            if (locator.isSearching()) return LocateResult.WAITING;
-            integratedSearchStarted = false;
-            TrialChamberLocator.Target t = locator.pollSeedSearch();
-            if (t != null && !usedTargets.contains(t.x() + "," + t.z())) {
-                usedTargets.add(t.x() + "," + t.z());
-                return useTarget(t);
+            if (this.locator.isSearching()) {
+                return LocateResult.WAITING;
             }
-            // 同上：搜索永远是「离搜索起点最近的那一个」，同一个起点必然给出同一个目标
-            if (locateFail.isEmpty()) {
-                locateFail = t != null
-                    ? String.format(Locale.ROOT, "单机搜索给出的还是刚才那个试炼大厅 %d, %d（已经去过了），"
-                        + "继续刷请用「世界种子」", t.x(), t.z())
-                    : "单机种子搜索没找到：" + safe(locator.failReason());
+            this.integratedSearchStarted = false;
+            t = this.locator.pollSeedSearch();
+            if (t != null && !this.usedTargets.contains(t.x() + "," + t.z())) {
+                this.usedTargets.add(t.x() + "," + t.z());
+                return this.useTarget(t);
+            }
+            if (this.locateFail.isEmpty()) {
+                this.locateFail = t != null ? String.format(Locale.ROOT, "\u5355\u673a\u641c\u7d22\u7ed9\u51fa\u7684\u8fd8\u662f\u521a\u624d\u90a3\u4e2a\u8bd5\u70bc\u5927\u5385 %d, %d\uff08\u5df2\u7ecf\u53bb\u8fc7\u4e86\uff09\uff0c\u7ee7\u7eed\u5237\u8bf7\u7528\u300c\u4e16\u754c\u79cd\u5b50\u300d", t.x(), t.z()) : "\u5355\u673a\u79cd\u5b50\u641c\u7d22\u6ca1\u627e\u5230\uff1a" + AutoOminousVault.safe(this.locator.failReason());
             }
             return LocateResult.FAILED;
         }
-
-        if (locateFail.isEmpty()) locateFail = "没有可用的定位方式";
+        if (this.locateFail.isEmpty()) {
+            this.locateFail = "\u6ca1\u6709\u53ef\u7528\u7684\u5b9a\u4f4d\u65b9\u5f0f";
+        }
         return LocateResult.FAILED;
     }
 
     private LocateResult useTarget(TrialChamberLocator.Target t) {
-        targetX = t.x();
-        targetZ = t.z();
-        targetNote = t.note() == null ? "" : t.note();
-        say("定位到试炼大厅候选人：%d, %d（来源 %s）", targetX, targetZ, t.source());
-        FOElytraLog.detail("定位说明：%s", targetNote);
+        this.targetX = t.x();
+        this.targetZ = t.z();
+        this.targetNote = t.note() == null ? "" : t.note();
+        this.say("\u5b9a\u4f4d\u5230\u8bd5\u70bc\u5927\u5385\u5019\u9009\u4eba\uff1a%d, %d\uff08\u6765\u6e90 %s\uff09", new Object[]{this.targetX, this.targetZ, t.source()});
+        FOElytraLog.detail("\u5b9a\u4f4d\u8bf4\u660e\uff1a%s", this.targetNote);
         return LocateResult.FOUND;
     }
 
-    /** 定位到之后怎么走：已经很近就地下降/找库，否则先上地表再飞。 */
     private void goToTarget() {
-        double d = Math.hypot(mc.player.getX() - (targetX + 0.5), mc.player.getZ() - (targetZ + 0.5));
-        chambersVisited++;
-        openedThisChamber = 0;
-        if (d <= arriveRadius.get()) {
-            say("已经在这个密室 %.0f 格范围内（判定距离 %d）：不飞了", d, arriveRadius.get());
-            if (mc.player.getBlockY() > digY.get() + 8 && autoDig.get()) {
-                phase = Phase.DIG;
+        double d = Math.hypot(this.mc.player.getX() - ((double)this.targetX + 0.5), this.mc.player.getZ() - ((double)this.targetZ + 0.5));
+        ++this.chambersVisited;
+        this.openedThisChamber = 0;
+        if (d <= (double)((Integer)this.arriveRadius.get()).intValue()) {
+            this.say("\u5df2\u7ecf\u5728\u8fd9\u4e2a\u5bc6\u5ba4 %.0f \u683c\u8303\u56f4\u5185\uff08\u5224\u5b9a\u8ddd\u79bb %d\uff09\uff1a\u4e0d\u98de\u4e86", d, this.arriveRadius.get());
+            if (this.mc.player.getBlockY() > (Integer)this.digY.get() + 8 && ((Boolean)this.autoDig.get()).booleanValue()) {
+                this.phase = Phase.DIG;
             } else {
-                enterScan();
+                this.enterScan();
             }
             return;
         }
-        say("距目标 %.0f 格（阈值 %d）：先上地表再开鞘翅飞过去", d, arriveRadius.get());
-        phase = Phase.CLIMB;
+        this.say("\u8ddd\u76ee\u6807 %.0f \u683c\uff08\u9608\u503c %d\uff09\uff1a\u5148\u4e0a\u5730\u8868\u518d\u5f00\u9798\u7fc5\u98de\u8fc7\u53bb", d, this.arriveRadius.get());
+        this.phase = Phase.CLIMB;
     }
 
     private TrialChamberLocator.Target pickUnvisited(List<TrialChamberLocator.Target> all) {
-        if (all == null) return null;
+        if (all == null) {
+            return null;
+        }
         for (TrialChamberLocator.Target t : all) {
-            if (!usedTargets.contains(t.x() + "," + t.z())) return t;
+            if (this.usedTargets.contains(t.x() + "," + t.z())) continue;
+            return t;
         }
         return null;
     }
 
     private TrialChamberLocator.Target pickCoords(int px, int pz) {
-        List<String> lines = coordList.get();
-        if (lines == null || lines.isEmpty()) return null;
+        List<String> lines = this.coordList.get();
+        if (lines == null || lines.isEmpty()) {
+            return null;
+        }
         double best = Double.MAX_VALUE;
         TrialChamberLocator.Target bestT = null;
         for (String line : lines) {
-            if (line == null) continue;
-            String s = line.trim();
-            if (s.isEmpty()) continue;
-            String[] parts = s.split("[,，\\s]+");
+            String s;
+            if (line == null || (s = line.trim()).isEmpty()) continue;
+            String[] parts = s.split("[,\uff0c\\s]+");
             if (parts.length < 2) {
-                FOElytraLog.warn("坐标列表里这一行看不懂（应为 x,z）：%s", s);
+                FOElytraLog.warn("\u5750\u6807\u5217\u8868\u91cc\u8fd9\u4e00\u884c\u770b\u4e0d\u61c2\uff08\u5e94\u4e3a x,z\uff09\uff1a%s", s);
                 continue;
             }
             try {
+                double d;
+                int z;
                 int x = Integer.parseInt(parts[0].trim());
-                int z = Integer.parseInt(parts[1].trim());
-                if (usedTargets.contains(x + "," + z)) continue;
-                double d = Math.hypot(px - x, pz - z);
-                if (d < best) {
-                    best = d;
-                    bestT = TrialChamberLocator.manual(x, z);
-                }
-            } catch (NumberFormatException e) {
-                FOElytraLog.warn("坐标列表里这一行不是合法整数：%s", s);
+                if (this.usedTargets.contains(x + "," + (z = Integer.parseInt(parts[1].trim()))) || !((d = Math.hypot(px - x, pz - z)) < best)) continue;
+                best = d;
+                bestT = TrialChamberLocator.manual(x, z);
+            }
+            catch (NumberFormatException e) {
+                FOElytraLog.warn("\u5750\u6807\u5217\u8868\u91cc\u8fd9\u4e00\u884c\u4e0d\u662f\u5408\u6cd5\u6574\u6570\uff1a%s", s);
             }
         }
         return bestT;
     }
 
-    /**
-     * 解析「世界种子」设置。
-     *
-     * <p>只认纯数字（带符号），非数字文本按原版「字符串种子 → 哈希」的规则处理（MC 对非数字种子用的是
-     * {@code String.hashCode()}）；解析不出来返回 {@code null}，由调用方给出明确原因，
-     * 而不是拿 0 当种子去算出一堆错的坐标。</p>
-     */
     private Long parseSeed() {
-        String raw = worldSeed.get();
-        if (raw == null || raw.isBlank()) return null;
+        String raw = (String)this.worldSeed.get();
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
         String s = raw.trim();
         try {
             return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            // 非数字：按原版字符串种子规则处理（就是 hashCode），并明确告诉用户我们做了什么
+        }
+        catch (NumberFormatException e) {
             int hash = s.hashCode();
-            FOElytraLog.warn("「世界种子」不是纯数字（%s）：按原版字符串种子规则当成 %d 处理（想精确请填 /seed 的数字）",
-                s, hash);
-            return (long) hash;
+            FOElytraLog.warn("「世界种子」不是纯数字（%s）：按原版字符串种子规则当成 %d 处理（想精确请填 /seed 的数字）", s, hash);
+            FOElytraLog.warn("\u300c\u4e16\u754c\u79cd\u5b50\u300d\u4e0d\u662f\u7eaf\u6570\u5b57\uff08%s\uff09\uff1a\u6309\u539f\u7248\u5b57\u7b26\u4e32\u79cd\u5b50\u89c4\u5219\u5f53\u6210 %d \u5904\u7406\uff08\u60f3\u7cbe\u786e\u8bf7\u586b /seed \u7684\u6570\u5b57\uff09", s, hash);
+            return (long)hash;
         }
     }
-
-    // ------------------------------------------------------------------ 10) 爬上地表
 
     private void climbTick() {
-        if (phaseTicks == 1) {
+        if (this.phaseTicks == 1) {
             BaritoneHook.stop();
-            surfaceYCache = Integer.MIN_VALUE;
-            say("开始爬上地表：现在 Y=%d（鞘翅在地下起不来）", mc.player.getBlockY());
-            FOElytraLog.detail("CLIMB：目标 Y ≥ %d 或「见天」即可起飞；Baritone %s",
-                takeoffMinY.get(), BaritoneHook.ready() ? "已就绪" : "不可用");
+            this.surfaceYCache = Integer.MIN_VALUE;
+            this.say("\u5f00\u59cb\u722c\u4e0a\u5730\u8868\uff1a\u73b0\u5728 Y=%d\uff08\u9798\u7fc5\u5728\u5730\u4e0b\u8d77\u4e0d\u6765\uff09", this.mc.player.getBlockY());
+            FOElytraLog.detail("CLIMB\uff1a\u76ee\u6807 Y \u2265 %d \u6216\u300c\u89c1\u5929\u300d\u5373\u53ef\u8d77\u98de\uff1bBaritone %s", this.takeoffMinY.get(), BaritoneHook.ready() ? "\u5df2\u5c31\u7eea" : "\u4e0d\u53ef\u7528");
         }
-
-        if (surfaceOk()) {
+        if (this.surfaceOk()) {
             BaritoneHook.stop();
-            say("已经能起飞了（Y=%d，见天 %s）→ 开始飞往 %d, %d",
-                mc.player.getBlockY(), skyVisible() ? "是" : "否", targetX, targetZ);
-            travelTicks = 0;
-            phase = Phase.TRAVEL;
+            this.say("\u5df2\u7ecf\u80fd\u8d77\u98de\u4e86\uff08Y=%d\uff0c\u89c1\u5929 %s\uff09\u2192 \u5f00\u59cb\u98de\u5f80 %d, %d", this.mc.player.getBlockY(), this.skyVisible() ? "\u662f" : "\u5426", this.targetX, this.targetZ);
+            this.travelTicks = 0;
+            this.phase = Phase.TRAVEL;
             return;
         }
-
         if (!BaritoneHook.ready()) {
-            fail("没有可用的 Baritone，爬不上地表（当前 Y=" + mc.player.getBlockY() + "）。"
-                + "请装 Baritone，或自己走回地面再开模块。");
+            this.fail("\u6ca1\u6709\u53ef\u7528\u7684 Baritone\uff0c\u722c\u4e0d\u4e0a\u5730\u8868\uff08\u5f53\u524d Y=" + this.mc.player.getBlockY() + "\uff09\u3002\u8bf7\u88c5 Baritone\uff0c\u6216\u81ea\u5df1\u8d70\u56de\u5730\u9762\u518d\u5f00\u6a21\u5757\u3002");
             return;
         }
-
-        if (phaseTicks == 1 || phaseTicks % REPATH_TICKS == 0) {
-            int y = surfaceYEstimate();
-            BaritoneHook.command("goto " + mc.player.getBlockX() + " " + y + " " + mc.player.getBlockZ());
-            FOElytraLog.detail("让 Baritone 往地表走：goto %d %d %d（它会自己挖/绕上去；目标 Y 取本列地表高度）",
-                mc.player.getBlockX(), y, mc.player.getBlockZ());
+        if (this.phaseTicks == 1 || this.phaseTicks % 100 == 0) {
+            int y = this.surfaceYEstimate();
+            BaritoneHook.command("goto " + this.mc.player.getBlockX() + " " + y + " " + this.mc.player.getBlockZ());
+            FOElytraLog.detail("\u8ba9 Baritone \u5f80\u5730\u8868\u8d70\uff1agoto %d %d %d\uff08\u5b83\u4f1a\u81ea\u5df1\u6316/\u7ed5\u4e0a\u53bb\uff1b\u76ee\u6807 Y \u53d6\u672c\u5217\u5730\u8868\u9ad8\u5ea6\uff09", this.mc.player.getBlockX(), y, this.mc.player.getBlockZ());
         }
-        if (phaseTicks % 200 == 0) {
-            FOElytraLog.detail("正在爬地表（%d 秒）：当前 Y=%d，见天 %s", phaseTicks / 20, mc.player.getBlockY(),
-                skyVisible() ? "是" : "否");
+        if (this.phaseTicks % 200 == 0) {
+            FOElytraLog.detail("\u6b63\u5728\u722c\u5730\u8868\uff08%d \u79d2\uff09\uff1a\u5f53\u524d Y=%d\uff0c\u89c1\u5929 %s", this.phaseTicks / 20, this.mc.player.getBlockY(), this.skyVisible() ? "\u662f" : "\u5426");
         }
-        if (phaseTicks > climbTimeoutSec.get() * 20) {
-            fail(String.format(Locale.ROOT, "爬地表超时（%d 秒还没到 Y ≥ %d / 见天），当前 Y=%d。"
-                + "请自己走回地面，或把超时调大", climbTimeoutSec.get(),
-                takeoffMinY.get(), mc.player.getBlockY()));
+        if (this.phaseTicks > (Integer)this.climbTimeoutSec.get() * 20) {
+            this.fail(String.format(Locale.ROOT, "\u722c\u5730\u8868\u8d85\u65f6\uff08%d \u79d2\u8fd8\u6ca1\u5230 Y \u2265 %d / \u89c1\u5929\uff09\uff0c\u5f53\u524d Y=%d\u3002\u8bf7\u81ea\u5df1\u8d70\u56de\u5730\u9762\uff0c\u6216\u628a\u8d85\u65f6\u8c03\u5927", this.climbTimeoutSec.get(), this.takeoffMinY.get(), this.mc.player.getBlockY()));
         }
     }
 
-    /**
-     * 「已经落定了」的宽判定（第三轮复验新问题#1）。
-     *
-     * <p>为什么不能只认 {@code isOnGround()}：站在水面上、坐船/坐矿车/骑猪、爬梯子/脚手架时它**恒为 false**，
-     * 于是试炼密室正好在海面下（飞过去落水里）这种最现实的情况会被判「等了 20 秒还没落地」+ 自动关模块。</p>
-     */
     private boolean landed() {
-        if (mc.player == null) return true;
-        return mc.player.isOnGround() || mc.player.isTouchingWater() || mc.player.hasVehicle() || mc.player.isClimbing();
+        if (this.mc.player == null) {
+            return true;
+        }
+        return this.mc.player.isOnGround() || this.mc.player.isTouchingWater() || this.mc.player.hasVehicle() || this.mc.player.isClimbing();
     }
 
-    /** 能不能起飞：见天，或者已经高于「最低起飞 Y」。 */
     private boolean surfaceOk() {
-        return skyVisible() || mc.player.getBlockY() >= takeoffMinY.get();
+        return this.skyVisible() || this.mc.player.getBlockY() >= (Integer)this.takeoffMinY.get();
     }
 
-    /** 头顶是不是空的（原版看的是天空光照等级 = 15，也就是「见天」）。 */
     private boolean skyVisible() {
         try {
-            return mc.world.isSkyVisible(mc.player.getBlockPos());
-        } catch (Throwable t) {
+            return this.mc.world.isSkyVisible(this.mc.player.getBlockPos());
+        }
+        catch (Throwable t) {
             return false;
         }
     }
 
-    /**
-     * 估一个「本列地表高度」给 Baritone 当 goto 的 Y。
-     *
-     * <p>为什么不用 Heightmap API：那要额外确认映射名与未加载区块的行为；这里直接读玩家所在这一列
-     * （一定已加载），从世界顶部往下找第一个非空气方块，简单且不会读到未加载区域。结果缓存一次就够
-     * （爬地表期间不会跑很远）。</p>
-     */
     private int surfaceYEstimate() {
-        if (surfaceYCache != Integer.MIN_VALUE) return surfaceYCache;
-        int px = mc.player.getBlockX();
-        int pz = mc.player.getBlockZ();
         int top;
+        if (this.surfaceYCache != Integer.MIN_VALUE) {
+            return this.surfaceYCache;
+        }
+        int px = this.mc.player.getBlockX();
+        int pz = this.mc.player.getBlockZ();
         try {
-            top = mc.world.getTopYInclusive();
-        } catch (Throwable t) {
+            top = this.mc.world.getTopYInclusive();
+        }
+        catch (Throwable t) {
             top = 319;
         }
-        for (int y = top; y > mc.world.getBottomY(); y--) {
-            if (!mc.world.getBlockState(new BlockPos(px, y, pz)).isAir()) {
-                surfaceYCache = Math.max(y + 1, takeoffMinY.get());
-                return surfaceYCache;
-            }
+        for (int y = top; y > this.mc.world.getBottomY(); --y) {
+            if (this.mc.world.getBlockState(new BlockPos(px, y, pz)).isAir()) continue;
+            this.surfaceYCache = Math.max(y + 1, (Integer)this.takeoffMinY.get());
+            return this.surfaceYCache;
         }
-        surfaceYCache = Math.max(mc.player.getBlockY(), takeoffMinY.get());
-        return surfaceYCache;
+        this.surfaceYCache = Math.max(this.mc.player.getBlockY(), (Integer)this.takeoffMinY.get());
+        return this.surfaceYCache;
     }
 
-    // ------------------------------------------------------------------ 11) 飞过去
-
     private void travelTick() {
-        AutoElytraFlight travel = travelModule();
-        double dNow = Math.hypot(mc.player.getX() - (targetX + 0.5), mc.player.getZ() - (targetZ + 0.5));
+        double d;
+        AutoElytraFlight travel = this.travelModule();
+        double dNow = Math.hypot(this.mc.player.getX() - ((double)this.targetX + 0.5), this.mc.player.getZ() - ((double)this.targetZ + 0.5));
         if (travel == null) {
-            if (!warnedNoTravel) {
-                warnedNoTravel = true;
-                FOElytraLog.warn("找不到「自动鞘翅飞行」模块，飞不了：请自己飞到 %d, %d 附近（%d 格内模块会自动下降）",
-                    targetX, targetZ, digArriveRadius.get());
+            if (!this.warnedNoTravel) {
+                this.warnedNoTravel = true;
+                FOElytraLog.warn("\u627e\u4e0d\u5230\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u6a21\u5757\uff0c\u98de\u4e0d\u4e86\uff1a\u8bf7\u81ea\u5df1\u98de\u5230 %d, %d \u9644\u8fd1\uff08%d \u683c\u5185\u6a21\u5757\u4f1a\u81ea\u52a8\u4e0b\u964d\uff09", this.targetX, this.targetZ, this.digArriveRadius.get());
             }
-            afterTravel(dNow, "找不到「自动鞘翅飞行」模块");
+            this.afterTravel(dNow, "\u627e\u4e0d\u5230\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u6a21\u5757");
             return;
         }
-        travelTicks++;
-        if (travelTicks == 1) {
-            BaritoneHook.stop();        // 把「爬地表」的走路目标停掉，别和鞘翅进程抢
+        ++this.travelTicks;
+        if (this.travelTicks == 1) {
+            BaritoneHook.stop();
             if (!travel.isActive()) {
-                // 记下借调前的全局日志开关：对方的 onActivate 会用自己的设置覆盖它，还回去时要能恢复
-                prevFileVerbose = FOElytraLog.fileVerbose;
-                verboseSaved = true;
+                this.prevFileVerbose = FOElytraLog.fileVerbose;
+                this.verboseSaved = true;
                 travel.toggle();
-                weEnabledTravel = true;
-                FOElytraLog.fileVerbose = prevFileVerbose;
-                say("临时打开「自动鞘翅飞行」来跑这一段（到达后按设置还回去）");
+                this.weEnabledTravel = true;
+                FOElytraLog.fileVerbose = this.prevFileVerbose;
+                this.say("\u4e34\u65f6\u6253\u5f00\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u6765\u8dd1\u8fd9\u4e00\u6bb5\uff08\u5230\u8fbe\u540e\u6309\u8bbe\u7f6e\u8fd8\u56de\u53bb\uff09", new Object[0]);
             }
-            travel.flyTo(targetX, targetZ);
+            travel.flyTo(this.targetX, this.targetZ);
         }
-
-        double d = dNow;
-        /*
-         * 「到达」必须等落地（第二轮复审查出来的 P1）：
-         * 原来只看水平距离，而 16 格截停通常发生在**滑翔中**——一进 16 格就把借来的模块关掉，
-         * 玩家带着烟花的速度继续冲过目标几十格才落地，竖井就挖到结构外面去了。
-         * 所以：水平够近**并且**（没在滑翔 或 已经落地）才算真到达。
-         */
-        if (d <= digArriveRadius.get() && (!mc.player.isGliding() || mc.player.isOnGround())) {
-            say("已到达目标上空（水平 %.0f 格，停飞阈值 %d），准备下降", d, digArriveRadius.get());
-            endTravel();
-            phase = Phase.DIG;
+        if ((d = dNow) <= (double)((Integer)this.digArriveRadius.get()).intValue() && (!this.mc.player.isGliding() || this.mc.player.isOnGround())) {
+            this.say("\u5df2\u5230\u8fbe\u76ee\u6807\u4e0a\u7a7a\uff08\u6c34\u5e73 %.0f \u683c\uff0c\u505c\u98de\u9608\u503c %d\uff09\uff0c\u51c6\u5907\u4e0b\u964d", d, this.digArriveRadius.get());
+            this.endTravel();
+            this.phase = Phase.DIG;
             return;
         }
         if (travel.travelFailed()) {
-            endTravel();
-            afterTravel(d, "跑图模块报失败：" + travel.travelFailReason());
+            this.endTravel();
+            this.afterTravel(d, "\u8dd1\u56fe\u6a21\u5757\u62a5\u5931\u8d25\uff1a" + travel.travelFailReason());
             return;
         }
-        /*
-         * 借来的模块自己把自己关了（第二轮复审查出来的 P1）：
-         * AutoElytraFlight 在「没有 Baritone / 没装鞘翅」这类情况下会在 onActivate 里直接判失败并关闭自己，
-         * 而我们紧随其后调用它的 flyTo() 仍会把它的 state 写成 PREPARE —— 它已经不 tick 了，那个 PREPARE
-         * 永远不会变成 DONE，于是 travelTerminal() 永远 false，我们会在这里干等满「飞行超时」（默认 900 秒）。
-         * 40 tick 足够让它走完 onActivate/toggle，之后 isActive() 还是 false 就说明它自己退了。
-         */
-        if (!travel.isActive() && travelTicks > 40) {
-            endTravel();
-            // 文案与事实对齐（第三轮复验新问题#2）：它在这里变 inactive 的原因最常见的是「到达后按它自己的
-            // 「任务结束关闭模块」把自己关了」（对方默认开），而不是「判失败」；真原因在 travelFailReason() 里，
-            // 而且 onDeactivate 之后 travelFailed() 永远是 false，所以必须自己去读那个字符串。
+        if (!travel.isActive() && this.travelTicks > 40) {
+            this.endTravel();
             String r = travel.travelFailReason();
-            afterTravel(d, "借来的「自动鞘翅飞行」已经不在运行（" + (r == null || r.isEmpty()
-                ? "可能是它到达后按自己的「任务结束关闭模块」关掉了，也可能是你自己关了它"
-                : "它自己报的原因：" + r) + "）");
+            this.afterTravel(d, "\u501f\u6765\u7684\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u5df2\u7ecf\u4e0d\u5728\u8fd0\u884c\uff08" + (String)(r == null || r.isEmpty() ? "\u53ef\u80fd\u662f\u5b83\u5230\u8fbe\u540e\u6309\u81ea\u5df1\u7684\u300c\u4efb\u52a1\u7ed3\u675f\u5173\u95ed\u6a21\u5757\u300d\u5173\u6389\u4e86\uff0c\u4e5f\u53ef\u80fd\u662f\u4f60\u81ea\u5df1\u5173\u4e86\u5b83" : "\u5b83\u81ea\u5df1\u62a5\u7684\u539f\u56e0\uff1a" + r) + "\uff09");
             return;
         }
-        /*
-         * ⚠️ 这里必须用 travelTerminal()，不能用 travelFinished()（第一轮审查抓出来的 P1-1）：
-         * travelFinished() 把「segmentTarget == null」也算成「这段航程结束」，
-         * 而 AutoElytraFlight 在「没穿鞘翅」时会先等「没有鞘翅时等多久」（默认 60 秒）才去定目标 ——
-         * 于是刚借调过来 3 秒就会被误判成「飞完了」，人在起飞点就开始往下挖。
-         */
-        if (travel.travelTerminal() && travelTicks > 60) {
-            endTravel();
-            afterTravel(d, "跑图模块说这一段结束了（状态 " + travel.travelStateName() + "）");
+        if (travel.travelTerminal() && this.travelTicks > 60) {
+            this.endTravel();
+            this.afterTravel(d, "\u8dd1\u56fe\u6a21\u5757\u8bf4\u8fd9\u4e00\u6bb5\u7ed3\u675f\u4e86\uff08\u72b6\u6001 " + travel.travelStateName() + "\uff09");
             return;
         }
-        if (travelTicks > travelTimeoutSec.get() * 20) {
-            endTravel();
-            afterTravel(d, "飞行超过 " + travelTimeoutSec.get() + " 秒还没到");
+        if (this.travelTicks > (Integer)this.travelTimeoutSec.get() * 20) {
+            this.endTravel();
+            this.afterTravel(d, "\u98de\u884c\u8d85\u8fc7 " + String.valueOf(this.travelTimeoutSec.get()) + " \u79d2\u8fd8\u6ca1\u5230");
             return;
         }
-        if (travelTicks % 200 == 0) {
-            FOElytraLog.detail("飞行中：距目标 %.0f 格｜跑图模块状态 %s｜滑翔 %s", d, travel.travelStateName(),
-                mc.player.isGliding() ? "是" : "否");
+        if (this.travelTicks % 200 == 0) {
+            FOElytraLog.detail("\u98de\u884c\u4e2d\uff1a\u8ddd\u76ee\u6807 %.0f \u683c\uff5c\u8dd1\u56fe\u6a21\u5757\u72b6\u6001 %s\uff5c\u6ed1\u7fd4 %s", d, travel.travelStateName(), this.mc.player.isGliding() ? "\u662f" : "\u5426");
         }
     }
 
-    /**
-     * 飞行「没成功结束」时的收口（第一轮审查抓出来的 P1-2）。
-     *
-     * <p>为什么需要它：飞行失败/超时/被打断时，如果不管「现在离目标多远」就地开挖，
-     * 常见后果是「在离结构几千米的地方往下挖 90 格 → 下去什么都没有 → 判定本密室结束 → 自动关模块」，
-     * 看起来就是「模块自己跑完收工了但其实啥也没干」。这里给一次明确失败收手，把原因说清。</p>
-     *
-     * <p>容差取 {@code max(停飞阈值, 32)}（第二轮复审查出来的 N2）：借来的模块自己到 ≤32 格就会收工，
-     * 用「到达判定距离（64）」当容差的话，17~64 格这段会绕过「必须飞到 16 格内」的本意。</p>
-     */
     private void afterTravel(double d, String why) {
-        // 容差给 40 而不是 32（第三轮复验新问题#3）：对方「到达判定半径」的默认值正好是 32，
-        // 从它判到达那一 tick 到我们读到距离之间还会有几格滑翔惯性位移；玩家把对方那个值调到 40/64 时，
-        // 32 的容差会把**成功的一次飞行**判成失败。40 留出余量，同时仍然满足「没飞到就别乱挖」的初衷。
-        double tolerance = Math.max(digArriveRadius.get(), 40);
+        double tolerance = Math.max((Integer)this.digArriveRadius.get(), 40);
         if (d > tolerance) {
-            fail(String.format(Locale.ROOT, "飞行没到目标（%s），还在 %.0f 格外，先停下不挖。"
-                + "请检查鞘翅/烟花/Baritone 后重开模块，或用「坐标列表」自己过去", why, d));
+            this.fail(String.format(Locale.ROOT, "\u98de\u884c\u6ca1\u5230\u76ee\u6807\uff08%s\uff09\uff0c\u8fd8\u5728 %.0f \u683c\u5916\uff0c\u5148\u505c\u4e0b\u4e0d\u6316\u3002\u8bf7\u68c0\u67e5\u9798\u7fc5/\u70df\u82b1/Baritone \u540e\u91cd\u5f00\u6a21\u5757\uff0c\u6216\u7528\u300c\u5750\u6807\u5217\u8868\u300d\u81ea\u5df1\u8fc7\u53bb", why, d));
             return;
         }
-        FOElytraLog.warn("%s；当前距离 %.0f 格，就地下降", why, d);
-        phase = Phase.DIG;
+        FOElytraLog.warn("%s\uff1b\u5f53\u524d\u8ddd\u79bb %.0f \u683c\uff0c\u5c31\u5730\u4e0b\u964d", why, d);
+        this.phase = Phase.DIG;
     }
 
-    /** 把借来的「自动鞘翅飞行」按设置还回去。 */
     private void endTravel() {
-        if (!weEnabledTravel) return;
-        weEnabledTravel = false;
-        // 先恢复日志开关：下面 travel == null 那条早退路径也必须恢复（第三轮复验新问题#6）
-        if (verboseSaved) FOElytraLog.fileVerbose = verboseLog.get();
-        AutoElytraFlight travel = travelModule();
-        if (travel == null) return;
+        AutoElytraFlight travel;
+        if (!this.weEnabledTravel) {
+            return;
+        }
+        this.weEnabledTravel = false;
+        if (this.verboseSaved) {
+            FOElytraLog.fileVerbose = (Boolean)this.verboseLog.get();
+        }
+        if ((travel = this.travelModule()) == null) {
+            return;
+        }
         if (!travel.isActive()) {
-            // 它自己已经收工/自己关了：别说「保持开启」那种和事实相反的话
-            say("借来的「自动鞘翅飞行」已经自己停下来了（不用再还）");
-        } else if (disableTravelOnArrive.get()) {
+            this.say("\u501f\u6765\u7684\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u5df2\u7ecf\u81ea\u5df1\u505c\u4e0b\u6765\u4e86\uff08\u4e0d\u7528\u518d\u8fd8\uff09", new Object[0]);
+        } else if (((Boolean)this.disableTravelOnArrive.get()).booleanValue()) {
             travel.toggle();
-            say("已关掉借来的「自动鞘翅飞行」（设置「到达后关掉跑图模块」）");
+            this.say("\u5df2\u5173\u6389\u501f\u6765\u7684\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\uff08\u8bbe\u7f6e\u300c\u5230\u8fbe\u540e\u5173\u6389\u8dd1\u56fe\u6a21\u5757\u300d\uff09", new Object[0]);
         } else {
-            say("「自动鞘翅飞行」保持开启（按设置不主动关掉）");
+            this.say("\u300c\u81ea\u52a8\u9798\u7fc5\u98de\u884c\u300d\u4fdd\u6301\u5f00\u542f\uff08\u6309\u8bbe\u7f6e\u4e0d\u4e3b\u52a8\u5173\u6389\uff09", new Object[0]);
         }
     }
 
     private AutoElytraFlight travelModule() {
         try {
-            return Modules.get().get(AutoElytraFlight.class);
-        } catch (Throwable t) {
+            return (AutoElytraFlight)Modules.get().get(AutoElytraFlight.class);
+        }
+        catch (Throwable t) {
             FOElytraLog.detailError("travelModule", t);
             return null;
         }
     }
 
-    // ------------------------------------------------------------------ 12) 挖竖井下降
-
     private void digTick() {
-        if (!autoDig.get()) {
-            say("「自动挖竖井下降」是关的：请自己把角色带到密室层（模块会在 %d 格内自动找库开库）",
-                searchRadius.get());
-            enterScan();
+        if (!((Boolean)this.autoDig.get()).booleanValue()) {
+            this.say("\u300c\u81ea\u52a8\u6316\u7ad6\u4e95\u4e0b\u964d\u300d\u662f\u5173\u7684\uff1a\u8bf7\u81ea\u5df1\u628a\u89d2\u8272\u5e26\u5230\u5bc6\u5ba4\u5c42\uff08\u6a21\u5757\u4f1a\u5728 %d \u683c\u5185\u81ea\u52a8\u627e\u5e93\u5f00\u5e93\uff09", this.searchRadius.get());
+            this.enterScan();
             return;
         }
-        if (phaseTicks == 1) {
+        if (this.phaseTicks == 1) {
             BaritoneHook.stop();
             BlockBreaker.reset();
-            digCount = 0;
-            digStallTicks = 0;
-            airBelowTicks = 0;
-            landingWaitTicks = 0;
-            say("开始挖竖井下降：现在 Y=%d，目标 Y=%d", mc.player.getBlockY(), digY.get());
+            this.digCount = 0;
+            this.digStallTicks = 0;
+            this.airBelowTicks = 0;
+            this.landingWaitTicks = 0;
+            this.say("\u5f00\u59cb\u6316\u7ad6\u4e95\u4e0b\u964d\uff1a\u73b0\u5728 Y=%d\uff0c\u76ee\u6807 Y=%d", this.mc.player.getBlockY(), this.digY.get());
         }
-        // 「不用挖也已经够深」要先判：否则在船上/水里的时候会先白等 20 秒才走到这里（第三轮复验新问题#1 附带项）
-        if (mc.player.getBlockY() <= digY.get()) {
-            say("已到 Y=%d（目标 %d）→ 开始找宝库", mc.player.getBlockY(), digY.get());
+        if (this.mc.player.getBlockY() <= (Integer)this.digY.get()) {
+            this.say("\u5df2\u5230 Y=%d\uff08\u76ee\u6807 %d\uff09\u2192 \u5f00\u59cb\u627e\u5b9d\u5e93", this.mc.player.getBlockY(), this.digY.get());
             BlockBreaker.cancel();
-            enterScan();
+            this.enterScan();
             return;
         }
-        /*
-         * 先等落地（第二轮复审查出来的 P1）：
-         * 「飞到 16 格内就停飞」那一刀通常是在滑翔中砍的，人还会带着速度往前冲、落下去 ——
-         * 悬空开挖既挖不准（一会儿就没方块可挖），也容易摔。所以这里先等真的站到地上再动镐子。
-         *
-         * ⚠️ 判定必须放宽（第三轮复验新问题#1）：只认 isOnGround() 的话，**水面/船/矿车/梯子/脚手架**上
-         * 永远是 false —— 试炼密室正好在海面下时，飞过去落进水里就会被判「等了 20 秒还没落地」并关掉模块。
-         * 现在「水面上、骑乘中、在攀爬」都算「已经落定了」。
-         */
-        if (mc.player.isGliding() || !landed()) {
-            if (landingWaitTicks++ > LANDING_WAIT_MAX_TICKS) {
-                fail(String.format(Locale.ROOT, "等了 %d 秒还没落地（滑翔 %s／着地 %s／在水里 %s／骑乘 %s）——"
-                    + "请自己落地或落到平台上，再开模块",
-                    LANDING_WAIT_MAX_TICKS / 20, mc.player.isGliding() ? "中" : "否",
-                    mc.player.isOnGround() ? "是" : "否", mc.player.isTouchingWater() ? "是" : "否",
-                    mc.player.hasVehicle() ? "是" : "否"));
+        if (this.mc.player.isGliding() || !this.landed()) {
+            if (this.landingWaitTicks++ > 400) {
+                this.fail(String.format(Locale.ROOT, "\u7b49\u4e86 %d \u79d2\u8fd8\u6ca1\u843d\u5730\uff08\u6ed1\u7fd4 %s\uff0f\u7740\u5730 %s\uff0f\u5728\u6c34\u91cc %s\uff0f\u9a91\u4e58 %s\uff09\u2014\u2014\u8bf7\u81ea\u5df1\u843d\u5730\u6216\u843d\u5230\u5e73\u53f0\u4e0a\uff0c\u518d\u5f00\u6a21\u5757", 20, this.mc.player.isGliding() ? "\u4e2d" : "\u5426", this.mc.player.isOnGround() ? "\u662f" : "\u5426", this.mc.player.isTouchingWater() ? "\u662f" : "\u5426", this.mc.player.hasVehicle() ? "\u662f" : "\u5426"));
                 return;
             }
-            if (landingWaitTicks % 100 == 1) {
-                say("等着落地再挖竖井（当前 Y=%d，滑翔 %s）…", mc.player.getBlockY(),
-                    mc.player.isGliding() ? "中" : "否");
+            if (this.landingWaitTicks % 100 == 1) {
+                this.say("\u7b49\u7740\u843d\u5730\u518d\u6316\u7ad6\u4e95\uff08\u5f53\u524d Y=%d\uff0c\u6ed1\u7fd4 %s\uff09\u2026", this.mc.player.getBlockY(), this.mc.player.isGliding() ? "\u4e2d" : "\u5426");
             }
             return;
         }
-        landingWaitTicks = 0;
-        if (mc.player.getHealth() <= digAbortHealth.get().floatValue()) {
-            fail(String.format(Locale.ROOT, "下降路上血量掉到 %.1f（阈值 %.1f）——停下来保命，请自己处理完再开模块",
-                mc.player.getHealth(), digAbortHealth.get()));
+        this.landingWaitTicks = 0;
+        if (this.mc.player.getHealth() <= ((Double)this.digAbortHealth.get()).floatValue()) {
+            this.fail(String.format(Locale.ROOT, "\u4e0b\u964d\u8def\u4e0a\u8840\u91cf\u6389\u5230 %.1f\uff08\u9608\u503c %.1f\uff09\u2014\u2014\u505c\u4e0b\u6765\u4fdd\u547d\uff0c\u8bf7\u81ea\u5df1\u5904\u7406\u5b8c\u518d\u5f00\u6a21\u5757", Float.valueOf(this.mc.player.getHealth()), this.digAbortHealth.get()));
             return;
         }
-        if (digCount >= maxDig.get()) {
-            fail(String.format(Locale.ROOT, "已经挖了 %d 格还没到 Y=%d（上限 %d）——把「下降到 Y」调高，或把上限调大",
-                digCount, digY.get(), maxDig.get()));
+        if (this.digCount >= (Integer)this.maxDig.get()) {
+            this.fail(String.format(Locale.ROOT, "\u5df2\u7ecf\u6316\u4e86 %d \u683c\u8fd8\u6ca1\u5230 Y=%d\uff08\u4e0a\u9650 %d\uff09\u2014\u2014\u628a\u300c\u4e0b\u964d\u5230 Y\u300d\u8c03\u9ad8\uff0c\u6216\u628a\u4e0a\u9650\u8c03\u5927", this.digCount, this.digY.get(), this.maxDig.get()));
             return;
         }
-        if (digDelayTicks > 0) {
-            digDelayTicks--;
+        if (this.digDelayTicks > 0) {
+            --this.digDelayTicks;
             return;
         }
-
-        BlockPos below = mc.player.getBlockPos().down();
-        BlockState st = mc.world.getBlockState(below);
-        // 流体：绝不往下挖（这是挖竖井唯一真会死人的情况）
+        BlockPos below = this.mc.player.getBlockPos().down();
+        BlockState st = this.mc.world.getBlockState(below);
         if (!st.getFluidState().isEmpty()) {
-            fail("脚下方块是流体（岩浆/水）——已停止下降，请自己在旁边绕开或换个位置再开模块");
+            this.fail("\u811a\u4e0b\u65b9\u5757\u662f\u6d41\u4f53\uff08\u5ca9\u6d46/\u6c34\uff09\u2014\u2014\u5df2\u505c\u6b62\u4e0b\u964d\uff0c\u8bf7\u81ea\u5df1\u5728\u65c1\u8fb9\u7ed5\u5f00\u6216\u6362\u4e2a\u4f4d\u7f6e\u518d\u5f00\u6a21\u5757");
             return;
         }
         if (st.isOf(Blocks.BEDROCK)) {
-            fail("下面是基岩，挖不下去了（当前 Y=" + mc.player.getBlockY() + "）");
+            this.fail("\u4e0b\u9762\u662f\u57fa\u5ca9\uff0c\u6316\u4e0d\u4e0b\u53bb\u4e86\uff08\u5f53\u524d Y=" + this.mc.player.getBlockY() + "\uff09");
             return;
         }
         if (st.isAir()) {
-            /*
-             * 已经在空中（罕见：站在方块边缘时自己这一列下方是空气）。
-             * 不算「挖不动」，但也不能无限等着 —— 连续 60 tick 下方还是空气就明说，别静默 idling（第三轮复验「存-1」）。
-             */
-            if (airBelowTicks++ > 60) {
-                fail("脚下不是实心方块（站到方块边缘了？）——请站到方正的位置再开模块");
+            if (this.airBelowTicks++ > 60) {
+                this.fail("\u811a\u4e0b\u4e0d\u662f\u5b9e\u5fc3\u65b9\u5757\uff08\u7ad9\u5230\u65b9\u5757\u8fb9\u7f18\u4e86\uff1f\uff09\u2014\u2014\u8bf7\u7ad9\u5230\u65b9\u6b63\u7684\u4f4d\u7f6e\u518d\u5f00\u6a21\u5757");
                 return;
             }
             return;
         }
-        airBelowTicks = 0;
-
-        /*
-         * 「挖不动」超时（第一轮审查抓出来的 P1-8）：
-         * BlockBreaker.tick 在「一个方块挖了 200 tick 还没掉」时会自己 cancel 并把内部计时清零，
-         * 然后继续返回 false —— 于是同一块硬方块（黑曜石/没镐子）会 200 tick 一轮无限循环，
-         * digCount 永远不涨，maxDig 永远触发不了，DIG 阶段就永久卡死了。
-         * 这里用「连续尝试挖同一块方块多少 tick 都没挖掉」兜住它；注意只在**真的要挖方块**时才计数
-         * （上面 air/流体/基岩三条都已经 return，所以不会把「等落地」「等下落」算成挖不动）。
-         */
-        if (digStallTicks++ > DIG_STALL_MAX_TICKS) {
-            fail(String.format(Locale.ROOT, "挖不动了：%d 秒都没挖掉脚下方块（已挖 %d 格，当前 Y=%d）。"
-                + "多半是快捷栏没镐子，或方块太硬（黑曜石/远古残骸）",
-                DIG_STALL_MAX_TICKS / 20, digCount, mc.player.getBlockY()));
+        this.airBelowTicks = 0;
+        if (this.digStallTicks++ > 400) {
+            this.fail(String.format(Locale.ROOT, "\u6316\u4e0d\u52a8\u4e86\uff1a%d \u79d2\u90fd\u6ca1\u6316\u6389\u811a\u4e0b\u65b9\u5757\uff08\u5df2\u6316 %d \u683c\uff0c\u5f53\u524d Y=%d\uff09\u3002\u591a\u534a\u662f\u5feb\u6377\u680f\u6ca1\u9550\u5b50\uff0c\u6216\u65b9\u5757\u592a\u786c\uff08\u9ed1\u66dc\u77f3/\u8fdc\u53e4\u6b8b\u9ab8\uff09", 20, this.digCount, this.mc.player.getBlockY()));
             return;
         }
-
         if (BlockBreaker.tick(below)) {
-            digCount++;
-            digStallTicks = 0;
-            digDelayTicks = 3;
-            if (digCount % 5 == 0) {
-                FOElytraLog.detail("下降中：已挖 %d 格，当前 Y=%d（目标 %d）", digCount, mc.player.getBlockY(), digY.get());
+            ++this.digCount;
+            this.digStallTicks = 0;
+            this.digDelayTicks = 3;
+            if (this.digCount % 5 == 0) {
+                FOElytraLog.detail("\u4e0b\u964d\u4e2d\uff1a\u5df2\u6316 %d \u683c\uff0c\u5f53\u524d Y=%d\uff08\u76ee\u6807 %d\uff09", this.digCount, this.mc.player.getBlockY(), this.digY.get());
             }
         }
     }
 
-    // ------------------------------------------------------------------ 收尾
-
     private void finish(String message) {
-        say("%s", message);
-        phase = Phase.DONE;
-        cleanup(false);
-        maybeAutoClose("任务结束");
+        this.say("%s", message);
+        this.phase = Phase.DONE;
+        this.cleanup(false);
+        this.maybeAutoClose("\u4efb\u52a1\u7ed3\u675f");
     }
 
     private void fail(String reason) {
-        if (phase == Phase.FAILED) return;
-        failReason = reason;
-        FOElytraLog.err("自动不祥宝库失败：%s", reason);     // 失败一律进聊天栏（这条不该被开关藏起来）
-        FOElytraLog.detail("失败诊断：阶段 %s｜位置 %d %d %d｜钥匙 %d｜食物(%s)｜已开 %d｜去过 %d 个密室",
-            phase.toString(), mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
-            keyCount(), foodCountText(), openedTotal, chambersVisited);
-        phase = Phase.FAILED;
-        cleanup(true);
+        if (this.phase == Phase.FAILED) {
+            return;
+        }
+        this.failReason = reason;
+        FOElytraLog.err("\u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93\u5931\u8d25\uff1a%s", reason);
+        FOElytraLog.detail("\u5931\u8d25\u8bca\u65ad\uff1a\u9636\u6bb5 %s\uff5c\u4f4d\u7f6e %d %d %d\uff5c\u94a5\u5319 %d\uff5c\u98df\u7269(%s)\uff5c\u5df2\u5f00 %d\uff5c\u53bb\u8fc7 %d \u4e2a\u5bc6\u5ba4", this.phase.name(), this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ(), this.keyCount(), this.foodCountText(), this.openedTotal, this.chambersVisited);
+        this.phase = Phase.FAILED;
+        this.cleanup(true);
         try {
             for (String l : FOElytraLog.snapshot(reason, 200, 8)) {
-                // 上面已经 err 过一次同一条了（第二轮审查 N13）：回显日志尾巴时跳过它，别让失败原因出现两遍
-                if (l.contains("自动不祥宝库失败：")) continue;
+                if (l.contains("\u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93\u5931\u8d25\uff1a")) continue;
                 FOElytraLog.chatRaw(l);
             }
-        } catch (Throwable t) {
+        }
+        catch (Throwable t) {
             FOElytraLog.detailError("fail snapshot", t);
         }
-        maybeAutoClose("任务失败");
+        this.maybeAutoClose("\u4efb\u52a1\u5931\u8d25");
     }
 
-    /**
-     * 需求 2：背包里没有钥匙 → 聊天栏提醒 + 自动关闭。
-     *
-     * <p>提醒写三轮（聊天栏 + 快捷键上方提示），因为这条消息决定「模块为什么自己关了」，
-     * 一闪而过等于没说。钥匙来源也一起说清楚 —— 本模块默认绕开刷怪笼，不刷钥匙。</p>
-     */
     private void noKeyStop() {
-        String msg = String.format(Locale.ROOT,
-            "背包里没有%s（现在：不祥 %d 个 / 普通 %d 个）。%s",
-            keyName(),
-            countKey(Items.OMINOUS_TRIAL_KEY),
-            countKey(Items.TRIAL_KEY),
-            alsoNormal.get() ? "两种试炼钥匙都没有，开不了任何宝库。" : "开不祥宝库必须用不祥试炼钥匙。");
-        say("%s", msg);
-        // ⚠️ 这一行**没有** varargs（参数是空的），所以百分号必须写单个 `%`：
-        // 写成 `%%` 时 FOElytraLog.fmt 的空参数分支会原样返回字符串，聊天栏就会出现字面的「30%%」。
-        say("钥匙来源：喝不祥之瓶 → 靠近试炼刷怪笼拿到「试炼之兆」→ 打死它刷出的怪，30% 概率掉不祥试炼钥匙。"
-            + "本模块默认「绕过试炼刷怪笼」，不替你刷，请自己备好。");
-        // 这一条不受「关键节点发聊天栏提示」影响：它回答的是「模块为什么自己关了」，必须留下记录
-        FOElytraLog.warn("已停止任务%s", noKeyAutoClose.get() ? "并自动关闭模块（设置「没钥匙时自动关闭」）"
-            : "（设置里关掉了「没钥匙时自动关闭」，模块保持开启）");
+        String msg = String.format(Locale.ROOT, "\u80cc\u5305\u91cc\u6ca1\u6709%s\uff08\u73b0\u5728\uff1a\u4e0d\u7965 %d \u4e2a / \u666e\u901a %d \u4e2a\uff09\u3002%s", this.keyName(), this.countKey(Items.OMINOUS_TRIAL_KEY), this.countKey(Items.TRIAL_KEY), (Boolean)this.alsoNormal.get() != false ? "\u4e24\u79cd\u8bd5\u70bc\u94a5\u5319\u90fd\u6ca1\u6709\uff0c\u5f00\u4e0d\u4e86\u4efb\u4f55\u5b9d\u5e93\u3002" : "\u5f00\u4e0d\u7965\u5b9d\u5e93\u5fc5\u987b\u7528\u4e0d\u7965\u8bd5\u70bc\u94a5\u5319\u3002");
+        this.say("%s", msg);
+        this.say("\u94a5\u5319\u6765\u6e90\uff1a\u559d\u4e0d\u7965\u4e4b\u74f6 \u2192 \u9760\u8fd1\u8bd5\u70bc\u5237\u602a\u7b3c\u62ff\u5230\u300c\u8bd5\u70bc\u4e4b\u5146\u300d\u2192 \u6253\u6b7b\u5b83\u5237\u51fa\u7684\u602a\uff0c30% \u6982\u7387\u6389\u4e0d\u7965\u8bd5\u70bc\u94a5\u5319\u3002\u672c\u6a21\u5757\u9ed8\u8ba4\u300c\u7ed5\u8fc7\u8bd5\u70bc\u5237\u602a\u7b3c\u300d\uff0c\u4e0d\u66ff\u4f60\u5237\uff0c\u8bf7\u81ea\u5df1\u5907\u597d\u3002", new Object[0]);
+        FOElytraLog.warn("\u5df2\u505c\u6b62\u4efb\u52a1%s", (Boolean)this.noKeyAutoClose.get() != false ? "\u5e76\u81ea\u52a8\u5173\u95ed\u6a21\u5757\uff08\u8bbe\u7f6e\u300c\u6ca1\u94a5\u5319\u65f6\u81ea\u52a8\u5173\u95ed\u300d\uff09" : "\uff08\u8bbe\u7f6e\u91cc\u5173\u6389\u4e86\u300c\u6ca1\u94a5\u5319\u65f6\u81ea\u52a8\u5173\u95ed\u300d\uff0c\u6a21\u5757\u4fdd\u6301\u5f00\u542f\uff09");
         try {
-            // 快捷键上方那一条不走聊天栏，所以不受「关键节点发聊天栏提示」影响：
-            // 这条消息决定「模块为什么自己关了」，必须让人一眼看见。
-            mc.inGameHud.setOverlayMessage(Text.of("[自动不祥宝库] 没有" + keyName() + "，任务停止"), false);
-        } catch (Throwable t) {
+            this.mc.inGameHud.setOverlayMessage(Text.of((String)("[\u81ea\u52a8\u4e0d\u7965\u5b9d\u5e93] \u6ca1\u6709" + this.keyName() + "\uff0c\u4efb\u52a1\u505c\u6b62")), false);
+        }
+        catch (Throwable t) {
             FOElytraLog.detailError("overlayMessage", t);
         }
-        phase = Phase.FAILED;
-        failReason = "没有" + keyName();
-        cleanup(true);
-        if (noKeyAutoClose.get() && isActive()) {
-            FOElytraLog.detail("按设置「没钥匙时自动关闭」关闭模块");
-            toggle();
+        this.phase = Phase.FAILED;
+        this.failReason = "\u6ca1\u6709" + this.keyName();
+        this.cleanup(true);
+        if (((Boolean)this.noKeyAutoClose.get()).booleanValue() && this.isActive()) {
+            FOElytraLog.detail("\u6309\u8bbe\u7f6e\u300c\u6ca1\u94a5\u5319\u65f6\u81ea\u52a8\u5173\u95ed\u300d\u5173\u95ed\u6a21\u5757", new Object[0]);
+            this.toggle();
         }
     }
 
     private void maybeAutoClose(String why) {
-        if (!isActive()) return;
-        if (autoClose.get()) {
-            say("按设置「任务结束后自动关闭」关闭模块（%s；可在设置里改）", why);
-            toggle();
+        if (!this.isActive()) {
+            return;
+        }
+        if (((Boolean)this.autoClose.get()).booleanValue()) {
+            this.say("\u6309\u8bbe\u7f6e\u300c\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed\u300d\u5173\u95ed\u6a21\u5757\uff08%s\uff1b\u53ef\u5728\u8bbe\u7f6e\u91cc\u6539\uff09", why);
+            this.toggle();
         } else {
-            say("「任务结束后自动关闭」是关的：模块保持开启，等你自己决定（%s）", why);
+            this.say("\u300c\u4efb\u52a1\u7ed3\u675f\u540e\u81ea\u52a8\u5173\u95ed\u300d\u662f\u5173\u7684\uff1a\u6a21\u5757\u4fdd\u6301\u5f00\u542f\uff0c\u7b49\u4f60\u81ea\u5df1\u51b3\u5b9a\uff08%s\uff09", why);
         }
     }
 
-    /** 收尾：把借来的东西全部还回去，绝不留「插件还按着键 / Baritone 还在走」的状态。 */
     private void cleanup(boolean aborting) {
         BlockBreaker.cancel();
-        if (vaultOpener != null) {
-            if (vaultOpener.status() == TaskStatus.RUNNING) vaultOpener.abort(aborting ? "任务中止" : "任务结束");
-            vaultOpener = null;
+        if (this.vaultOpener != null) {
+            if (this.vaultOpener.status() == TaskStatus.RUNNING) {
+                this.vaultOpener.abort(aborting ? "\u4efb\u52a1\u4e2d\u6b62" : "\u4efb\u52a1\u7ed3\u675f");
+            }
+            this.vaultOpener = null;
         }
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
         BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        endTravel();
-        candidates.clear();
-        pendingCandidates.clear();
-        pendingKeys.clear();
-        scanning = false;
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.endTravel();
+        this.candidates.clear();
+        this.pendingCandidates.clear();
+        this.pendingKeys.clear();
+        this.scanning = false;
     }
 
-    // ------------------------------------------------------------------ 工具
-
     private int keyCount() {
-        int n = countKey(Items.OMINOUS_TRIAL_KEY);
-        if (alsoNormal.get()) n += countKey(Items.TRIAL_KEY);
+        int n = this.countKey(Items.OMINOUS_TRIAL_KEY);
+        if (((Boolean)this.alsoNormal.get()).booleanValue()) {
+            n += this.countKey(Items.TRIAL_KEY);
+        }
         return n;
     }
 
     private boolean hasAnyKey() {
-        return keyCount() > 0;
+        return this.keyCount() > 0;
     }
 
     private String keyName() {
-        return alsoNormal.get() ? "试炼钥匙（普通/不祥都算）" : "不祥试炼钥匙";
+        return (Boolean)this.alsoNormal.get() != false ? "\u8bd5\u70bc\u94a5\u5319\uff08\u666e\u901a/\u4e0d\u7965\u90fd\u7b97\uff09" : "\u4e0d\u7965\u8bd5\u70bc\u94a5\u5319";
     }
 
     private String foodName() {
-        List<Item> list = foodItems.get();
-        if (list == null || list.isEmpty()) return "食物（清单为空）";
+        List<Item> list = this.foodItems.get();
+        if (list == null || list.isEmpty()) {
+            return "\u98df\u7269\uff08\u6e05\u5355\u4e3a\u7a7a\uff09";
+        }
         StringBuilder sb = new StringBuilder();
         for (Item it : list) {
             if (it == null) continue;
-            if (sb.length() > 0) sb.append("/");
+            if (sb.length() > 0) {
+                sb.append("/");
+            }
             sb.append(it.getName().getString());
         }
-        return sb.length() == 0 ? "食物（清单为空）" : sb.toString();
+        return sb.length() == 0 ? "\u98df\u7269\uff08\u6e05\u5355\u4e3a\u7a7a\uff09" : sb.toString();
     }
 
-    /**
-     * 食物数量的可读文本。
-     *
-     * <p>为什么要有它（第二轮审查 N5）：{@code countFood()} 在「清单为空」时返回
-     * {@code Integer.MAX_VALUE} 表示「不检查」，如果直接拿去 {@code %d}，
-     * 聊天栏和日志就会出现「食物（清单为空） 2147483647 个」这种东西 —— 用户会以为模块坏了。</p>
-     */
     private String foodCountText() {
-        List<Item> list = foodItems.get();
-        if (list == null || list.isEmpty()) return foodName() + "（不检查）";
-        return foodName() + " " + countFood() + " 个";
+        List<Item> list = this.foodItems.get();
+        if (list == null || list.isEmpty()) {
+            return this.foodName() + "\uff08\u4e0d\u68c0\u67e5\uff09";
+        }
+        return this.foodName() + " " + this.countFood() + " \u4e2a";
     }
 
     private int countFood() {
-        if (mc.player == null) return 0;
-        List<Item> list = foodItems.get();
-        if (list == null || list.isEmpty()) return Integer.MAX_VALUE;   // 没配就算「够用」，不要误停
+        if (this.mc.player == null) {
+            return 0;
+        }
+        List<Item> list = this.foodItems.get();
+        if (list == null || list.isEmpty()) {
+            return Integer.MAX_VALUE;
+        }
         int n = 0;
         for (Item it : list) {
             if (it == null) continue;
-            n += ItemHelper.countInInventory(mc.player, it);
+            n += ItemHelper.countInInventory((PlayerEntity)this.mc.player, it);
         }
         return n;
     }
 
     private String describeLoot() {
+        String ench;
         StringBuilder sb = new StringBuilder();
-        List<Item> items = targetItems.get();
+        List<Item> items = this.targetItems.get();
         if (items != null) {
             for (Item it : items) {
                 if (it == null) continue;
-                if (sb.length() > 0) sb.append("、");
+                if (sb.length() > 0) {
+                    sb.append("\u3001");
+                }
                 sb.append(it.getName().getString());
             }
         }
-        String ench = targetEnchants.get();
-        if (ench != null && !ench.isBlank()) {
-            if (sb.length() > 0) sb.append("、");
-            sb.append("附魔书[").append(ench.trim()).append("]");
+        if ((ench = (String)this.targetEnchants.get()) != null && !ench.isBlank()) {
+            if (sb.length() > 0) {
+                sb.append("\u3001");
+            }
+            sb.append("\u9644\u9b54\u4e66[").append(ench.trim()).append("]");
         }
-        return sb.length() == 0 ? "（空！不会判命中）" : sb.toString();
+        return sb.length() == 0 ? "\uff08\u7a7a\uff01\u4e0d\u4f1a\u5224\u547d\u4e2d\uff09" : sb.toString();
     }
 
-    /** 物品清单的空值兜底（设置被清空时 List.of()，别让 null 传进状态机）。 */
     private static List<Item> safeItems(List<Item> in) {
         return in == null ? List.of() : in;
     }
 
-    /** 把「附魔 id」那串文本解析成 id 列表（解析不了的跳过并留痕，绝不抛）。 */
     private List<Identifier> parseIds(String raw) {
-        if (raw == null || raw.isBlank()) return List.of();
-        List<Identifier> out = new ArrayList<>();
-        for (String part : raw.split("[,，]")) {
-            String s = part.trim();
-            if (s.isEmpty()) continue;
-            if (!s.contains(":")) s = "minecraft:" + s;      // 允许只写 wind_burst
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        ArrayList<Identifier> out = new ArrayList<Identifier>();
+        for (String part : raw.split("[,\uff0c]")) {
+            Object s = part.trim();
+            if (((String)s).isEmpty()) continue;
+            if (!((String)s).contains(":")) {
+                s = "minecraft:" + (String)s;
+            }
             try {
-                Identifier id = Identifier.of(s);
-                if (!out.contains(id)) out.add(id);
-            } catch (Throwable t) {
-                FOElytraLog.warn("「目标魔咒」里的这个 id 看不懂，已跳过：%s", s);
+                Identifier id = Identifier.of((String)s);
+                if (out.contains(id)) continue;
+                out.add(id);
+            }
+            catch (Throwable t) {
+                FOElytraLog.warn("\u300c\u76ee\u6807\u9b54\u5492\u300d\u91cc\u7684\u8fd9\u4e2a id \u770b\u4e0d\u61c2\uff0c\u5df2\u8df3\u8fc7\uff1a%s", s);
             }
         }
         return out;
     }
 
-    /**
-     * 「关键节点说一句」的统一出口。
-     *
-     * <p>为什么需要它：{@code FOElytraLog.info/warn/err} 是<b>既进聊天栏、又进文件</b>的
-     * （见 {@link FOElytraLog} 的注释），所以「用 log 级别控制聊天栏」是控制不了的 —— 上一版就是这么错的：
-     * 「关键节点发聊天栏提示」这个开关形同虚设，开关掉了一样刷屏。
-     * 这里显式分流：开着就 {@code info}（聊天栏 + 文件），关掉就 {@code detail}（只进文件）。</p>
-     */
-    private void say(String fmt, Object... args) {
-        if (talkInChat.get()) {
+    private void say(String fmt, Object ... args) {
+        if (((Boolean)this.talkInChat.get()).booleanValue()) {
             FOElytraLog.info(fmt, args);
         } else {
             FOElytraLog.detail(fmt, args);
         }
     }
 
-    /** 数物品时统一判空（onActivate 早期 mc.player 理论上是有的，但别赌）。 */
     private int countKey(Item item) {
-        return mc.player == null ? 0 : ItemHelper.countInInventory(mc.player, item);
+        return this.mc.player == null ? 0 : ItemHelper.countInInventory((PlayerEntity)this.mc.player, item);
     }
 
     private static String safe(String s) {
         return s == null ? "" : s;
     }
 
-    /** HUD/日志用的失败原因。 */
     public String failReason() {
-        return failReason;
+        return this.failReason;
+    }
+
+    public static enum DisplayMode {
+        OFF("\u5173\u95ed"),
+        LOG("\u4ec5\u8bb0\u5f55"),
+        REQUIRE("\u5fc5\u987b\u6253\u5f00");
+
+
+        private final String label;
+
+        DisplayMode(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    public static enum LocateMode {
+        AUTO("\u81ea\u52a8"),
+        SEED("\u79cd\u5b50\u5b9a\u4f4d"),
+        COORD_LIST("\u5750\u6807\u6e05\u5355"),
+        MAP("\u5730\u56fe\u6807\u8bb0"),
+        INTEGRATED_SEARCH("\u6574\u5408\u641c\u7d22");
+
+
+        private final String label;
+
+        LocateMode(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    public static enum Phase {
+        IDLE("\u7a7a\u95f2"),
+        PREPARE("\u51c6\u5907"),
+        SCAN("\u626b\u63cf"),
+        FILTER("\u7b5b\u9009"),
+        APPROACH("\u63a5\u8fd1"),
+        LOOK("\u89c2\u5bdf"),
+        OPEN("\u6253\u5f00"),
+        POST_OPEN("\u5f00\u7bb1\u540e"),
+        NO_VAULT("\u672a\u627e\u5230\u5b9d\u5e93"),
+        CLIMB("\u6500\u722c"),
+        TRAVEL("\u98de\u884c"),
+        DIG("\u6316\u6398"),
+        DONE("\u5b8c\u6210"),
+        FAILED("\u5931\u8d25");
+
+
+        private final String label;
+
+        Phase(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    private static enum LocateResult {
+        FOUND,
+        FAILED,
+        WAITING;
+
     }
 }
+

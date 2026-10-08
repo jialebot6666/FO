@@ -1,556 +1,598 @@
 package com.fo.addon.elytra.core;
-import java.util.HashSet;
-import java.util.Set;
+
+import com.fo.addon.elytra.core.FOElytraLog;
+import com.fo.addon.elytra.core.InvHelper;
+import com.fo.addon.elytra.core.PlayerAction;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.fluid.Fluid;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.fluid.Fluids;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.potion.Potions;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import net.minecraft.util.math.Position;
+import net.minecraft.world.BlockView;
+
 public final class LavaEscape {
-    public enum Result {
-        IDLE("空闲"),
-        ESCAPING("脱离中"),
-        FAILED("失败");
-
-        public final String label;
-
-        Result(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString，必须覆写否则显示英文枚举名） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
     private static final int FIRE_TRIGGER = 20;
     private static final int NOT_GLIDING_TRIGGER = 5;
     private static final int ESCAPE_COOLDOWN = 45;
-    private static final int CEILING_CHECK_BLOCKS = 4;
-    private static final float HORIZONTAL_PITCH_LIMIT = -35.0f;
-    private static final float HORIZONTAL_PITCH_MAX = 20.0f;
-    private static final int DIRECTION_SAMPLES = 16;
-    private static final int CLEARANCE_STEPS = 6;
-    private static final int HORIZONTAL_REFIRE_TICKS = 20;
-    private static final int HORIZONTAL_REFIRE_MAX = 3;
-    private static final float FAILED_RESTORE_PITCH = 0.0f;
-    private final int fireTrigger;
-    private final int notGlidingTrigger;
-    private final int cooldownTicks;
-    private final int maxRetries;
-    private final boolean ignoreGlidingFire;
-    private final double liftPitch;
+    private static final int RETRY_TICKS = 8;
+    private static final int JUMP_FIRST_TICKS = 4;
+    private static final int JUMP_GAP_TICKS = 1;
+    private static final int JUMP_SECOND_TICKS = 3;
+    private static final float LOOK_UP_PITCH = -90.0f;
+    private static final int FALLBACK_DIRECTION_SAMPLES = 16;
+    private static final int FALLBACK_CLEARANCE_STEPS = 6;
+    private static final int FALLBACK_DIRECTION_REFRESH = 10;
+    private static final int CEILING_SCAN = 5;
+    private static final int OPEN_SCAN_RADIUS = 14;
+    private static final int OPEN_SCAN_UP = 6;
+    private static final int RELOCATE_MAX_TICKS = 200;
+    private static final int ALIGN_MAX_TICKS = 60;
+    private static final double RELOCATE_ARRIVE = 1.6;
     private final boolean useFirework;
     private final boolean swimToSafety;
     private final int searchRadius;
     private final boolean drinkFireRes;
+    private final boolean ignoreGlidingFire;
+    private final float lookPitch;
+    private BlockPos openTarget;
+    private int relocateTicks;
+    private int relocateFireCooldown;
+    private boolean relocateGaveUp;
+    private int alignTicks;
     private int inFireTick;
-    private int retries;
+    private int retryCooldown;
     private int jumpPhase = -1;
     private int phaseTicks;
-    private boolean announced;
-    private boolean glidingBurnHinted;
+    private boolean pendingFirework;
+    private boolean fireworkMissing;
     private boolean loggedMissingFirework;
-    private boolean loggedNoDirection;
+    private boolean fallbackHorizontal;
+    private int fallbackTargetRefresh;
+    private BlockPos fallbackTarget;
     private String lastReason = "";
-    private boolean justFinished;
-    private boolean viewRestoreSignaled;
     private boolean failedNoFirework;
-    private boolean horizontalMode;
-    private int horizontalRefires;
-    private int refireCooldown;
-   private BlockPos exitTarget;
-    private int targetRefresh;
-    private int noExitWarned;
     private int drinkLeft;
     private double triggerX;
     private double triggerY;
     private double triggerZ;
+    private float triggerPitch;
     private boolean triggerPosValid;
-    public LavaEscape(int fireTrigger, int notGlidingTrigger, boolean ignoreGlidingFire, int cooldownTicks,
-                      int maxRetries, double liftPitch, boolean useFirework,
-                      boolean swimToSafety, int searchRadius, boolean drinkFireRes) {
-        this.fireTrigger = Math.max(0, fireTrigger);
-        this.notGlidingTrigger = Math.max(0, notGlidingTrigger);
-        this.ignoreGlidingFire = ignoreGlidingFire;
-        this.cooldownTicks = Math.max(5, cooldownTicks);
-        this.maxRetries = Math.max(1, maxRetries);
-        this.liftPitch = liftPitch;
+
+    public LavaEscape(boolean useFirework, boolean swimToSafety, int searchRadius, boolean drinkFireRes, boolean ignoreGlidingFire, float lookPitch) {
         this.useFirework = useFirework;
         this.swimToSafety = swimToSafety;
         this.searchRadius = Math.max(3, Math.min(24, searchRadius));
         this.drinkFireRes = drinkFireRes;
+        this.ignoreGlidingFire = ignoreGlidingFire;
+        this.lookPitch = Math.max(-90.0f, Math.min(0.0f, lookPitch));
     }
+
     public boolean isEscaping() {
-        return inFireTick < 0;
+        return this.inFireTick < 0;
     }
-    public int retries() {
-        return retries;
-    }
+
     public String lastReason() {
-        return lastReason;
+        return this.lastReason;
     }
+
     public boolean failedNoFirework() {
-        return failedNoFirework;
+        return this.failedNoFirework;
     }
-    public boolean consumeJustFinished() {
-        boolean v = justFinished;
-        justFinished = false;
-        return v;
-    }
+
     public void reset() {
-        releaseKeys();
-        inFireTick = 0;
-        retries = 0;
-        jumpPhase = -1;
-        phaseTicks = 0;
-        announced = false;
-        glidingBurnHinted = false;
-        loggedMissingFirework = false;
-        loggedNoDirection = false;
-        lastReason = "";
-        justFinished = false;
-        viewRestoreSignaled = false;
-        failedNoFirework = false;
-        horizontalMode = false;
-        horizontalRefires = 0;
-        refireCooldown = 0;
-       exitTarget = null;
-        targetRefresh = 0;
-        noExitWarned = 0;
-        drinkLeft = 0;
-        triggerPosValid = false;
-    }
-    public void release(MinecraftClient mc) {
-        reset();
-    }
-    private void releaseKeys() {
         PlayerAction.pressJump(false);
-        PlayerAction.pressForward(false);
         PlayerAction.pressUse(false);
+        PlayerAction.pressForward(false);
+        this.inFireTick = 0;
+        this.jumpPhase = -1;
+        this.phaseTicks = 0;
+        this.pendingFirework = false;
+        this.fireworkMissing = false;
+        this.loggedMissingFirework = false;
+        this.fallbackHorizontal = false;
+        this.fallbackTarget = null;
+        this.fallbackTargetRefresh = 0;
+        this.lastReason = "";
+        this.failedNoFirework = false;
+        this.drinkLeft = 0;
+        this.retryCooldown = 0;
+        this.triggerPosValid = false;
+        this.openTarget = null;
+        this.relocateTicks = 0;
+        this.relocateFireCooldown = 0;
+        this.relocateGaveUp = false;
+        this.alignTicks = 0;
+        PlayerAction.pressForward(false);
     }
+
+    private void relocateTick(MinecraftClient mc) {
+        double dx = (double)this.openTarget.getX() + 0.5 - mc.player.getX();
+        double dz = (double)this.openTarget.getZ() + 0.5 - mc.player.getZ();
+        double dist = Math.hypot(dx, dz);
+        if (this.relocateTicks == 0) {
+            FOElytraLog.warn("\u5ca9\u6d46\u81ea\u6551\uff1a\u5934\u9876\u5c01\u6b7b\uff0c\u5148\u7528\u9798\u7fc5\u5728\u5ca9\u6d46\u91cc\u6a2a\u7740\u51b2\u5230\u6700\u8fd1\u7684\u5f00\u53e3\u5ca9\u6d46\u67f1 %d %d %d\uff08\u6c34\u5e73 %.0f \u683c\uff09\uff0c\u5230\u4e86\u518d\u5f80\u4e0a\u51b2", this.openTarget.getX(), this.openTarget.getY(), this.openTarget.getZ(), dist);
+        }
+        ++this.relocateTicks;
+        if (dist <= 1.6) {
+            PlayerAction.pressForward(false);
+            this.openTarget = null;
+            this.relocateTicks = 0;
+            this.relocateFireCooldown = 0;
+            FOElytraLog.info("\u5ca9\u6d46\u81ea\u6551\uff1a\u5df2\u7ecf\u5230\u5f00\u53e3\u5904\u4e86\uff0c\u6539\u6210\u62ac\u5934\u5f80\u4e0a\u51b2", new Object[0]);
+            return;
+        }
+        float yaw = (float)Math.toDegrees(Math.atan2(-dx, dz));
+        mc.player.setYaw(yaw);
+        mc.player.setPitch(0.0f);
+        PlayerAction.pressForward(true);
+        PlayerAction.pressJump(true);
+        if (this.relocateTicks >= 200) {
+            PlayerAction.pressForward(false);
+            FOElytraLog.warn("\u5ca9\u6d46\u81ea\u6551\uff1a\u6a2a\u7740\u51b2\u4e86 %.1f \u79d2\u8fd8\u6ca1\u5230\u5f00\u53e3\u5904\uff08\u6c34\u5e73\u8fd8\u5269 %.0f \u683c\uff09\uff0c\u653e\u5f03\u6a2a\u79fb\uff0c\u6309\u539f\u65f6\u5e8f\u5f80\u4e0a\u51b2", 10.0, dist);
+            this.openTarget = null;
+            return;
+        }
+        if (this.useFirework && --this.relocateFireCooldown <= 0) {
+            this.relocateFireCooldown = 8;
+            this.shootFirework(mc, "\u5ca9\u6d46\u81ea\u6551\uff1a\u671d\u5f00\u53e3\u5904\u8865\u5c04\u70df\u82b1");
+        }
+    }
+
+    private boolean shootFirework(MinecraftClient mc, String why) {
+        for (int i = 7; i >= 0; --i) {
+            if (!mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) continue;
+            mc.player.getInventory().setSelectedSlot(i);
+            if (mc.getNetworkHandler() != null) {
+                try {
+                    mc.getNetworkHandler().sendPacket((Packet)new UpdateSelectedSlotC2SPacket(i));
+                }
+                catch (Throwable throwable) {
+                    // empty catch block
+                }
+            }
+            InvHelper.useItem(Hand.MAIN_HAND);
+            FOElytraLog.info("%s\uff08\u5feb\u6377\u680f\u7b2c %d \u683c\uff09", why, i + 1);
+            return true;
+        }
+        return false;
+    }
+
+    private BlockPos findOpenLavaColumn(MinecraftClient mc) {
+        int px = mc.player.getBlockX();
+        int py = mc.player.getBlockY();
+        int pz = mc.player.getBlockZ();
+        for (int r = 1; r <= 14; ++r) {
+            BlockPos best = null;
+            double bestDist = Double.MAX_VALUE;
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    double d;
+                    BlockPos spot;
+                    int z;
+                    int x;
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r || !mc.world.isChunkLoaded((x = px + dx) >> 4, (z = pz + dz) >> 4) || (spot = this.openColumnAt(mc, x, z, py)) == null || !this.lavaPathClear(mc, px, py, pz, x, z) || !((d = Math.hypot(x - px, z - pz)) < bestDist)) continue;
+                    bestDist = d;
+                    best = spot;
+                }
+            }
+            if (best == null) continue;
+            return best;
+        }
+        return null;
+    }
+
+    private BlockPos openColumnAt(MinecraftClient mc, int x, int z, int py) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            BlockPos p = new BlockPos(x, py + dy, z);
+            BlockState st = mc.world.getBlockState(p);
+            if (!st.getFluidState().isOf((Fluid)Fluids.LAVA)) continue;
+            boolean open = true;
+            for (int i = 1; i <= 6; ++i) {
+                BlockState up = mc.world.getBlockState(p.up(i));
+                if (up.isAir() || !up.getFluidState().isEmpty()) continue;
+                open = false;
+                break;
+            }
+            if (!open) continue;
+            return p;
+        }
+        return null;
+    }
+
+    private boolean lavaPathClear(MinecraftClient mc, int px, int py, int pz, int x, int z) {
+        int steps = (int)Math.ceil(Math.hypot(x - px, z - pz));
+        for (int i = 1; i <= steps; ++i) {
+            double t = (double)i / (double)steps;
+            int ix = (int)Math.round((double)px + (double)(x - px) * t);
+            int iz = (int)Math.round((double)pz + (double)(z - pz) * t);
+            for (int dy = -1; dy <= 1; ++dy) {
+                BlockState st = mc.world.getBlockState(new BlockPos(ix, py + dy, iz));
+                if (st.isAir() || !st.getFluidState().isEmpty()) continue;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private BlockPos solidBlockAbove(MinecraftClient mc, int maxUp) {
+        BlockPos base = BlockPos.ofFloored((Position)mc.player.getEyePos());
+        for (int i = 0; i <= maxUp; ++i) {
+            BlockPos p = base.up(i);
+            BlockState st = mc.world.getBlockState(p);
+            if (st.isAir() || !st.getFluidState().isEmpty()) continue;
+            return p;
+        }
+        return null;
+    }
+
+    public void release(MinecraftClient mc) {
+        this.reset();
+    }
+
     public Result tick(boolean enabled) {
         MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player == null || mc.world == null) return Result.IDLE;
+        if (mc.player == null || mc.world == null) {
+            return Result.IDLE;
+        }
         if (!enabled) {
-            reset();
+            this.reset();
             return Result.IDLE;
         }
         boolean inLava = mc.player.isInLava();
-        boolean onFire = mc.player.isOnFire();
-        boolean gliding = mc.player.isGliding();
-        if (inLava && gliding && ignoreGlidingFire) {
-            if (!glidingBurnHinted) {
-                glidingBurnHinted = true;
-                FOElytraLog.debug("滑翔中泡在岩浆里，但按设置「滑翔时忽略」不打断，继续飞");
+        if (this.inFireTick < 0 && inLava) {
+            BlockPos above = this.solidBlockAbove(mc, 5);
+            if (above != null) {
+                if (this.openTarget == null && !this.relocateGaveUp && this.relocateTicks == 0) {
+                    this.openTarget = this.findOpenLavaColumn(mc);
+                    if (this.openTarget == null) {
+                        this.relocateGaveUp = true;
+                        FOElytraLog.warn("\u5ca9\u6d46\u81ea\u6551\uff1a\u5934\u9876\u88ab %d %d %d \u5c01\u6b7b\uff0c%d \u683c\u5185\u4e5f\u6ca1\u6709\u5f00\u53e3\u7684\u5ca9\u6d46\u67f1\uff08\u4e0d\u6316\u5934\u9876\uff09\u2192 \u53ea\u80fd\u6309\u539f\u65f6\u5e8f\u5f80\u4e0a\u51b2\uff0c\u5927\u6982\u7387\u51fa\u4e0d\u53bb", above.getX(), above.getY(), above.getZ(), 14);
+                    }
+                }
+                if (this.openTarget != null && this.relocateTicks < 200) {
+                    this.relocateTick(mc);
+                    return Result.ESCAPING;
+                }
+            } else if (this.openTarget != null) {
+                this.openTarget = null;
+                PlayerAction.pressForward(false);
+                FOElytraLog.info("\u5ca9\u6d46\u81ea\u6551\uff1a\u5934\u9876\u5df2\u7ecf\u901a\u4e86\uff0c\u7ee7\u7eed\u62ac\u5934\u51b2\u51fa\u53bb", new Object[0]);
             }
-            if (jumpPhase >= 0) stepJumpSequence(mc);
-            return Result.IDLE;
         }
-        glidingBurnHinted = false;
-        if (inFireTick >= 0) {
-            inFireTick = inLava ? inFireTick + 1 : 0;
-        } else {
-            inFireTick++;
-        }
-        if (inFireTick == -1) {
-            inFireTick = 0;
-            if (inLava) return escapeFailed(mc);
-            if (onFire) {
-                FOElytraLog.debug("已离开岩浆（身上还有火：原版烫一下会着火 8 秒）");
-            }
-            if (retries > 0 || announced) announceEscaped();
-            signalViewRestore();
-            return Result.IDLE;
-        }
-        if (jumpPhase >= 0) stepJumpSequence(mc);
-        if (inFireTick > fireTrigger || (inFireTick > notGlidingTrigger && !gliding)) {
-            int lavaTicks = inFireTick;
-            boolean blocked = ceilingBlocked(mc);
-            inFireTick = -cooldownTicks;
-            FOElytraLog.detail("触发岩浆自救：岩浆内 %s｜着火 %s｜滑翔 %s｜连续在岩浆里 %d tick"
-                    + "（滑翔阈值 %d，非滑翔阈值 %d）｜头顶被挡 %s｜位置 %d %d %d",
-                inLava ? "是" : "否", onFire ? "是" : "否", gliding ? "是" : "否", lavaTicks,
-                fireTrigger, notGlidingTrigger, blocked ? "是" : "否",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ());
-            return trigger(mc, inLava, onFire, gliding, blocked);
-        }
-        if (inFireTick < 0) {
-            if (drinkFireRes && !mc.player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) startDrink(mc);
-            if (drinkLeft > 0) drinkTick(mc);
-            if (drinkLeft <= 0 && (inLava || onFire) && (ceilingBlocked(mc) || swimToSafety)) {
-                driveHorizontal(mc, inLava, onFire);
-            } else if (inLava || onFire) {
-                boolean wasHorizontal = horizontalMode;
-                stopHorizontal();
-                if (wasHorizontal) mc.player.setPitch((float) liftPitch);
+        if (this.inFireTick < 0 && inLava && this.solidBlockAbove(mc, 5) == null) {
+            if (this.alignTicks >= 60) {
+                if (this.alignTicks == 60) {
+                    ++this.alignTicks;
+                    PlayerAction.pressForward(false);
+                    FOElytraLog.warn("\u5ca9\u6d46\u81ea\u6551\uff1a\u5bf9\u51c6\u4e95\u53e3\u4e2d\u5fc3\u7528\u4e86 %.0f \u79d2\u8fd8\u6ca1\u5230\u4f4d\uff08\u811a\u4e0b\u6253\u6ed1\uff1f\uff09\u2192 \u4e0d\u6309\u524d\u8fdb\u952e\u4e86\uff0c\u76f4\u63a5\u62ac\u5934\u51b2", 3.0);
+                }
             } else {
-                stopHorizontal();
-                if (!viewRestoreSignaled) mc.player.setPitch(FAILED_RESTORE_PITCH);
-                signalViewRestore();
+                double cx = Math.floor(mc.player.getX()) + 0.5;
+                double cz = Math.floor(mc.player.getZ()) + 0.5;
+                double off = Math.hypot(mc.player.getX() - cx, mc.player.getZ() - cz);
+                if (off > 0.3) {
+                    if (this.alignTicks == 0) {
+                        FOElytraLog.detail("\u5ca9\u6d46\u81ea\u6551\uff1a\u5934\u9876\u662f\u7ad6\u76f4\u5f00\u53e3\uff0c\u5148\u5bf9\u51c6\u8fd9\u4e00\u683c\u7684\u4e2d\u5fc3\u518d\u5f80\u4e0a\u51b2\uff08\u504f %.2f \u683c\uff09", off);
+                    }
+                    float yaw = (float)Math.toDegrees(Math.atan2(-(cx - mc.player.getX()), cz - mc.player.getZ()));
+                    mc.player.setYaw(yaw);
+                    mc.player.setPitch(0.0f);
+                    PlayerAction.pressForward(true);
+                    ++this.alignTicks;
+                    return Result.ESCAPING;
+                }
+                if (this.alignTicks > 0) {
+                    PlayerAction.pressForward(false);
+                    this.alignTicks = 0;
+                }
+            }
+        }
+        this.inFireTick = this.inFireTick >= 0 ? (inLava ? this.inFireTick + 1 : 0) : ++this.inFireTick;
+        if (this.inFireTick == -1) {
+            this.inFireTick = 0;
+            PlayerAction.pressJump(false);
+            PlayerAction.pressForward(false);
+            this.jumpPhase = -1;
+            this.pendingFirework = false;
+            this.fallbackHorizontal = false;
+            if (inLava) {
+                return this.escapeFailed(mc, "\u51b7\u5374\u8d70\u5b8c\u8fd8\u5728\u5ca9\u6d46\u91cc\uff08\u81ea\u6551\u6ca1\u6210\u529f\uff09");
+            }
+            mc.player.setPitch(this.triggerPitch);
+            FOElytraLog.info("\u9003\u79bb\u5ca9\u6d46\u6210\u529f\uff1a\u5df2\u7ecf\u4e0d\u5728\u5ca9\u6d46\u91cc\u4e86\uff08%s\uff09", this.posText(mc));
+            return Result.IDLE;
+        }
+        if (this.inFireTick < 0 && !inLava) {
+            this.inFireTick = -1;
+        }
+        if (this.inFireTick >= 0 && this.ignoreGlidingFire && mc.player.isGliding()) {
+            if (this.inFireTick == 21) {
+                FOElytraLog.warn("\u8bbe\u7f6e\u5f00\u4e86\u300c\u6ed1\u7fd4\u65f6\u5ffd\u7565\u5ca9\u6d46\u300d\uff1a\u6ed1\u7fd4\u4e2d\u4e0d\u89e6\u53d1\u81ea\u6551\uff08\u5371\u9669\u8bbe\u7f6e\uff0c\u5efa\u8bae\u5173\u6389\uff09", new Object[0]);
+            }
+            return Result.IDLE;
+        }
+        if (this.inFireTick > 20 || this.inFireTick > 5 && !mc.player.isGliding()) {
+            this.inFireTick = -45;
+            this.triggerX = mc.player.getX();
+            this.triggerY = mc.player.getY();
+            this.triggerZ = mc.player.getZ();
+            this.triggerPitch = mc.player.getPitch();
+            this.triggerPosValid = true;
+            this.fireworkMissing = false;
+            this.pendingFirework = true;
+            this.retryCooldown = 8;
+            this.fallbackHorizontal = false;
+            this.fallbackTarget = null;
+            this.fallbackTargetRefresh = 0;
+            if (mc.player.isOnGround()) {
+                this.jumpPhase = 0;
+                this.phaseTicks = 4;
+            } else {
+                this.jumpPhase = 2;
+                this.phaseTicks = 3;
+            }
+            PlayerAction.pressJump(true);
+            return Result.ESCAPING;
+        }
+        if (this.inFireTick < 0) {
+            if (this.pendingFirework) {
+                this.stepJumpSequence(mc);
+                if (this.pendingFirework) {
+                    return Result.ESCAPING;
+                }
+                if (this.fireworkMissing) {
+                    return this.escapeFailed(mc, "\u627e\u4e0d\u5230\u70df\u82b1\uff08\u5feb\u6377\u680f 0~7 \u65e2\u6ca1\u6709\u7a7a\u69fd\u4e5f\u6ca1\u6709\u70df\u82b1\uff09");
+                }
+            }
+            if (--this.retryCooldown <= 0) {
+                this.retryCooldown = 8;
+                if (mc.player.isGliding() && mc.player.isInLava()) {
+                    mc.player.setPitch(this.lookPitch);
+                    int slot2 = -1;
+                    for (int i = 0; i < 8; ++i) {
+                        if (!mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) continue;
+                        slot2 = i;
+                    }
+                    if (slot2 >= 0) {
+                        mc.player.getInventory().setSelectedSlot(slot2);
+                        if (mc.getNetworkHandler() != null) {
+                            try {
+                                mc.getNetworkHandler().sendPacket((Packet)new UpdateSelectedSlotC2SPacket(slot2));
+                            }
+                            catch (Throwable throwable) {
+                                // empty catch block
+                            }
+                        }
+                        InvHelper.useItem(Hand.MAIN_HAND);
+                        FOElytraLog.info("\u81ea\u6551\u7a97\u53e3\u5185\u5c55\u7fc5\u6210\u529f\uff0c\u7acb\u523b\u8865\u5c04\u70df\u82b1\uff08\u5feb\u6377\u680f\u7b2c %d \u683c\uff09", slot2 + 1);
+                    }
+                } else {
+                    if (mc.player.isOnGround()) {
+                        this.jumpPhase = 0;
+                        this.phaseTicks = 4;
+                    } else {
+                        this.jumpPhase = 2;
+                        this.phaseTicks = 3;
+                    }
+                    this.pendingFirework = true;
+                    PlayerAction.pressJump(true);
+                }
+                return Result.ESCAPING;
+            }
+            if (this.drinkFireRes) {
+                if (this.drinkLeft > 0) {
+                    this.drinkTick(mc);
+                } else if (!mc.player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+                    this.startDrink(mc);
+                }
+            }
+            if (this.swimToSafety) {
+                this.fallbackSwimTick(mc, inLava);
             }
             return Result.ESCAPING;
         }
         return Result.IDLE;
     }
-    private void announceEscaped() {
-        retries = 0;
-        announced = false;
-        justFinished = true;
-        FOElytraLog.tip("已脱离岩浆，恢复正常跑图");
-    }
-    private void signalViewRestore() {
-        if (viewRestoreSignaled) return;
-        viewRestoreSignaled = true;
-        justFinished = true;
-    }
-    private Result trigger(MinecraftClient mc, boolean inLava, boolean onFire, boolean gliding, boolean blockedAbove) {
-        jumpPhase = (mc.player.isOnGround() ? 0 : 2);
-        phaseTicks = (jumpPhase == 0) ? 4 : 3;
-        PlayerAction.pressJump(true);
-        FOElytraLog.warn("位于岩浆中，已鞘翅打开");
-        triggerPosValid = true;
-        triggerX = mc.player.getX();
-        triggerY = mc.player.getY();
-        triggerZ = mc.player.getZ();
-        horizontalRefires = 0;
-        refireCooldown = HORIZONTAL_REFIRE_TICKS;
-        loggedNoDirection = false;
-        viewRestoreSignaled = false;
-        if (blockedAbove || swimToSafety) {
-            FOElytraLog.warn("头顶%s：不再笔直上冲（笔直朝上会顶着天花板烧），改朝可飞方向水平脱离"
-                    + "（抬头角收到 %.0f° 以内 + 前进 + 流体内按住跳）",
-                blockedAbove ? "被方块挡住" : "空着但设置了「兜底：游向安全点」", HORIZONTAL_PITCH_LIMIT);
-            driveHorizontal(mc, inLava, onFire);
-        } else {
-            mc.player.setPitch((float) liftPitch);
-        }
-        if (useFirework) {
-            Result r = useFireworkForEscape(mc, true);
-            if (r != Result.ESCAPING) return r;
-        }
-        if (!announced) {
-            announced = true;
-            lastReason = gliding ? "滑翔中泡在岩浆里" : "没在滑翔且泡在岩浆里";
-        }
-        return Result.ESCAPING;
-    }
-    private Result useFireworkForEscape(MinecraftClient mc, boolean firstShot) {
-        int slot = findFireworkSlot(mc);
-        if (slot < 0) {
-            FOElytraLog.err("找不到烟花（快捷栏 1~8 格全被占满）");
-            lastReason = "找不到烟花（快捷栏 1~8 全被占满）";
-            failedNoFirework = true;
-            releaseKeys();
-            return Result.FAILED;
-        }
-        boolean realFirework = mc.player.getInventory().getStack(slot).isOf(Items.FIREWORK_ROCKET);
-        selectAndUse(mc, slot);
-        if (realFirework) {
-            if (firstShot) {
-                FOElytraLog.info("已使用烟花！（快捷栏第 %d 格）", slot + 1);
-            } else {
-                FOElytraLog.detail("水平脱离：补射一发烟花（快捷栏第 %d 格，第 %d/%d 发）",
-                    slot + 1, horizontalRefires, HORIZONTAL_REFIRE_MAX);
+
+    private void stepJumpSequence(MinecraftClient mc) {
+        switch (this.jumpPhase) {
+            case 0: {
+                PlayerAction.pressJump(true);
+                if (--this.phaseTicks > 0) break;
+                this.jumpPhase = 1;
+                this.phaseTicks = 1;
+                break;
             }
-            return Result.ESCAPING;
+            case 1: {
+                PlayerAction.pressJump(false);
+                if (--this.phaseTicks > 0) break;
+                this.jumpPhase = 2;
+                this.phaseTicks = 3;
+                break;
+            }
+            case 2: {
+                PlayerAction.pressJump(true);
+                if (--this.phaseTicks > 0) break;
+                this.jumpPhase = 3;
+                this.phaseTicks = 1;
+                break;
+            }
+            case 3: {
+                PlayerAction.pressJump(false);
+                this.jumpPhase = -1;
+                this.finishTriggerActions(mc);
+                break;
+            }
+            default: {
+                this.jumpPhase = -1;
+            }
         }
-        if (!loggedMissingFirework) {
-            loggedMissingFirework = true;
-            String extra = hasFirework(mc.player)
-                ? "（背包里有烟花，但不在快捷栏 1~9 格；按原有槽位逻辑选了第 " + (slot + 1) + " 格）"
-                : "（整个快捷栏都没有烟花，「放烟花上升」这次没有推力）";
-            FOElytraLog.warn("注意：选中的第 %d 格不是烟花，右键没有产生推力%s", slot + 1, extra);
-        }
-        return Result.ESCAPING;
     }
-    private static boolean hasFirework(PlayerEntity player) {
-        for (int i = 0; i < 9; i++) {
-            if (player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) return true;
-        }
-        return false;
-    }
-    private int findFireworkSlot(MinecraftClient mc) {
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) return i;
+
+    private void finishTriggerActions(MinecraftClient mc) {
+        int i;
+        this.pendingFirework = false;
+        FOElytraLog.warn("\u4f4d\u4e8e\u5ca9\u6d46\u4e2d\uff0c\u5df2\u9798\u7fc5\u6253\u5f00", new Object[0]);
+        mc.player.setPitch(this.lookPitch);
+        if (!this.useFirework) {
+            return;
         }
         int slot = -1;
-        for (int i = 0; i < 8; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isEmpty() || s.isOf(Items.FIREWORK_ROCKET)) slot = i;
+        for (i = 0; i < 8; ++i) {
+            if (!mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) continue;
+            slot = i;
         }
-        return slot;
-    }
-    private void selectAndUse(MinecraftClient mc, int slot) {
+        if (slot < 0) {
+            for (i = 0; i < 8; ++i) {
+                if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+                slot = i;
+            }
+        }
+        if (slot < 0) {
+            this.fireworkMissing = true;
+            this.failedNoFirework = true;
+            FOElytraLog.err("\u627e\u4e0d\u5230\u70df\u82b1\uff1a\u5feb\u6377\u680f 0~7 \u65e2\u6ca1\u6709\u7a7a\u69fd\u4e5f\u6ca1\u6709\u70df\u82b1\u683c\uff0c\u653e\u4e0d\u51fa\u70df\u82b1", new Object[0]);
+            return;
+        }
+        boolean realFirework = mc.player.getInventory().getStack(slot).isOf(Items.FIREWORK_ROCKET);
         mc.player.getInventory().setSelectedSlot(slot);
         if (mc.getNetworkHandler() != null) {
             try {
-                mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(slot));
-            } catch (Throwable ignored) {
+                mc.getNetworkHandler().sendPacket((Packet)new UpdateSelectedSlotC2SPacket(slot));
+            }
+            catch (Throwable throwable) {
+                // empty catch block
             }
         }
         InvHelper.useItem(Hand.MAIN_HAND);
-    }
-    private void refireFirework(MinecraftClient mc) {
-        int slot = -1;
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) {
-                slot = i;
-                break;
-            }
+        if (realFirework) {
+            FOElytraLog.info("\u5df2\u4f7f\u7528\u70df\u82b1\uff01\uff08\u5feb\u6377\u680f\u7b2c %d \u683c\uff09", slot + 1);
+        } else if (!this.loggedMissingFirework) {
+            this.loggedMissingFirework = true;
+            FOElytraLog.warn("\u6ce8\u610f\uff1a\u5feb\u6377\u680f 0~7 \u91cc\u9009\u4e2d\u7684\u662f\u7b2c %d \u683c\u7a7a\u69fd\uff08\u69fd\u91cc\u6ca1\u70df\u82b1\uff09\uff0c\u8fd9\u4e00\u4e0b\u53f3\u952e\u6ca1\u6709\u63a8\u529b", slot + 1);
         }
-        if (slot < 0) return;
-        selectAndUse(mc, slot);
-        FOElytraLog.detail("水平脱离：补射一发烟花（快捷栏第 %d 格，第 %d/%d 发）",
-            slot + 1, horizontalRefires, HORIZONTAL_REFIRE_MAX);
     }
-    private Result escapeFailed(MinecraftClient mc) {
-        retries++;
-        releaseKeys();
-        stopHorizontal();
-        signalViewRestore();
-        String progress = triggerPosValid
-            ? String.format("位移 水平 %.1f 格 / 垂直 %+.1f 格",
-                Math.hypot(mc.player.getX() - triggerX, mc.player.getZ() - triggerZ), mc.player.getY() - triggerY)
-            : "位移（无触发点快照）";
-        if (retries < maxRetries) {
-            FOElytraLog.warn("逃离岩浆失败！（第 %d/%d 次，%s）仍然在岩浆里，继续下一次自救",
-                retries, maxRetries, lastReason.isEmpty() ? "原因未知" : lastReason);
-            FOElytraLog.detail("逃离岩浆尝试结束：%s｜在岩浆 %s｜位置 %d %d %d｜头顶被挡 %s",
-                progress, mc.player.isInLava() ? "是" : "否",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
-                ceilingBlocked(mc) ? "是" : "否");
-            return Result.IDLE;
-        }
-        FOElytraLog.err("逃离岩浆失败！连续 %d 次自救都没能脱险（%s）"
-                + "（在这一点上是直接结束任务的；是否登出由模块的「安全 → 失败自动登出」决定，"
-                + "本类从不登出）",
-            retries, lastReason.isEmpty() ? "原因未知" : lastReason);
-        FOElytraLog.detail("逃离岩浆最终失败：%s｜在岩浆 %s｜位置 %d %d %d｜烟花 %d 发",
-            progress, mc.player.isInLava() ? "是" : "否",
-            mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(), countFireworks(mc.player));
-        if (mc.player != null) mc.player.setPitch(FAILED_RESTORE_PITCH);
-        lastReason = lastReason.isEmpty() ? "连续自救都没能脱离岩浆" : lastReason;
+
+    private Result escapeFailed(MinecraftClient mc, String why) {
+        this.lastReason = why;
+        FOElytraLog.err("\u9003\u79bb\u5ca9\u6d46\u5931\u8d25\uff1a%s\uff08%s\uff09", why, this.posText(mc));
+        this.failedNoFirework = this.failedNoFirework || LavaEscape.countFireworks((PlayerEntity)mc.player) <= 0;
+        PlayerAction.pressJump(false);
+        PlayerAction.pressForward(false);
+        PlayerAction.pressUse(false);
+        this.jumpPhase = -1;
+        this.pendingFirework = false;
+        this.fallbackHorizontal = false;
+        this.inFireTick = 0;
         return Result.FAILED;
     }
-    private static int countFireworks(PlayerEntity player) {
-        int n = 0;
-        for (int i = 0; i < 36; i++) {
-            ItemStack s = player.getInventory().getStack(i);
-            if (s.isOf(Items.FIREWORK_ROCKET)) n += s.getCount();
+
+    private String posText(MinecraftClient mc) {
+        if (mc.player == null) {
+            return "\u4f4d\u7f6e\u672a\u77e5";
         }
-        return n;
-    }
-    private void stepJumpSequence(MinecraftClient mc) {
-        switch (jumpPhase) {
-            case 0 -> {
-                PlayerAction.pressJump(true);
-                if (--phaseTicks <= 0) { jumpPhase = 1; phaseTicks = 1; }
-            }
-            case 1 -> {
-                PlayerAction.pressJump(false);
-                if (--phaseTicks <= 0) { jumpPhase = 2; phaseTicks = 3; }
-            }
-            case 2 -> {
-                PlayerAction.pressJump(true);
-                if (--phaseTicks <= 0) { jumpPhase = 3; phaseTicks = 1; }
-            }
-            default -> {
-                PlayerAction.pressJump(false);
-                jumpPhase = -1;
-            }
+        if (!this.triggerPosValid) {
+            return String.format("\u4f4d\u7f6e %d %d %d", mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ());
         }
+        return String.format("\u4ece %d %d %d \u5230 %d %d %d", (int)this.triggerX, (int)this.triggerY, (int)this.triggerZ, mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ());
     }
-    private boolean ceilingBlocked(MinecraftClient mc) {
-        World world = mc.world;
-        if (world == null || mc.player == null) return false;
-        PlayerEntity p = mc.player;
-        double headY = p.getY() + p.getHeight();
-        int aboveY = (int) Math.floor(headY) + 1;
-        int baseX = (int) Math.floor(p.getX());
-        int baseZ = (int) Math.floor(p.getZ());
-        double offX = p.getX() - baseX;
-        double offZ = p.getZ() - baseZ;
-        Set<BlockPos> columns = new HashSet<>();
-        columns.add(new BlockPos(baseX, aboveY, baseZ));
-        if (offX > 0.7) columns.add(new BlockPos(baseX + 1, aboveY, baseZ));
-        else if (offX < 0.3) columns.add(new BlockPos(baseX - 1, aboveY, baseZ));
-        if (offZ > 0.7) columns.add(new BlockPos(baseX, aboveY, baseZ + 1));
-        else if (offZ < 0.3) columns.add(new BlockPos(baseX, aboveY, baseZ - 1));
-        if (offX > 0.7 && offZ > 0.7) columns.add(new BlockPos(baseX + 1, aboveY, baseZ + 1));
-        else if (offX > 0.7 && offZ < 0.3) columns.add(new BlockPos(baseX + 1, aboveY, baseZ - 1));
-        else if (offX < 0.3 && offZ > 0.7) columns.add(new BlockPos(baseX - 1, aboveY, baseZ + 1));
-        else if (offX < 0.3 && offZ < 0.3) columns.add(new BlockPos(baseX - 1, aboveY, baseZ - 1));
-        for (BlockPos c : columns) {
-            for (int i = 0; i < CEILING_CHECK_BLOCKS; i++) {
-                BlockPos q = c.up(i);
-                if (!world.isChunkLoaded(q.getX() >> 4, q.getZ() >> 4)) continue;
-                if (solid(world, q)) return true;
-            }
+
+    private void fallbackSwimTick(MinecraftClient mc, boolean inLava) {
+        float yaw;
+        if (!this.fallbackHorizontal) {
+            this.fallbackHorizontal = true;
+            FOElytraLog.detail("\u515c\u5e95\uff1a\u6e38\u5411\u5b89\u5168\u70b9\uff08\u989d\u5916\u529f\u80fd\uff0c\u9ed8\u8ba4\u5173\uff09\u5df2\u6253\u5f00\uff0c\u671d\u6700\u8fd1\u7684\u5b89\u5168\u70b9\u6e38\u8fc7\u53bb", new Object[0]);
         }
-        return false;
-    }
-    private void driveHorizontal(MinecraftClient mc, boolean inLava, boolean onFire) {
-        if (!horizontalMode) {
-            horizontalMode = true;
-            FOElytraLog.detail("岩浆自救：进入水平脱离模式（不再只往上冲）");
+        if (this.fallbackTarget == null || --this.fallbackTargetRefresh <= 0 || !this.isSafe(mc, this.fallbackTarget)) {
+            this.fallbackTarget = this.findSafeSpot(mc, this.searchRadius);
+            this.fallbackTargetRefresh = 10;
         }
         boolean haveTarget = false;
-        double dx = 0;
-        double dz = 0;
-        double dy = 0;
-        String how = "";
-        if (swimToSafety) {
-            if (exitTarget == null || --targetRefresh <= 0 || !isSafe(mc.world, exitTarget)) {
-                exitTarget = findExit(mc, searchRadius);
-                targetRefresh = 20;
-            }
-            if (exitTarget != null) {
-                dx = exitTarget.getX() + 0.5 - mc.player.getX();
-                dz = exitTarget.getZ() + 0.5 - mc.player.getZ();
-                dy = exitTarget.getY() - mc.player.getY();
-                haveTarget = true;
-                how = "安全点 " + exitTarget.toShortString();
-            } else if (noExitWarned++ == 0) {
-                FOElytraLog.warn("岩浆自救：半径 %d 格内没有落脚点（可把「兜底：安全点搜索半径」调大），改用「能飞出去的方向」",
-                    searchRadius);
-            }
+        double dx = 0.0;
+        double dz = 0.0;
+        double dy = 0.0;
+        if (this.fallbackTarget != null) {
+            dx = (double)this.fallbackTarget.getX() + 0.5 - mc.player.getX();
+            dz = (double)this.fallbackTarget.getZ() + 0.5 - mc.player.getZ();
+            dy = (double)this.fallbackTarget.getY() - mc.player.getY();
+            haveTarget = true;
+        }
+        if (!haveTarget && !Float.isNaN(yaw = this.pickFreeYaw(mc))) {
+            double rad = Math.toRadians(yaw);
+            dx = -Math.sin(rad);
+            dz = Math.cos(rad);
+            dy = 0.0;
+            haveTarget = true;
         }
         if (!haveTarget) {
-            float yaw = pickFreeYaw(mc);
-            if (!Float.isNaN(yaw)) {
-                double rad = Math.toRadians(yaw);
-                dx = -Math.sin(rad);
-                dz = Math.cos(rad);
-                dy = 0.0;
-                haveTarget = true;
-                how = String.format("可飞方向 yaw %.0f°", yaw);
-            }
-        }
-        if (!haveTarget) {
-            if (!loggedNoDirection) {
-                loggedNoDirection = true;
-                FOElytraLog.warn("岩浆自救：16 个水平方向全都飞不出去（四周都被堵死）→ 退回默认抬头姿态");
-            }
-            stopHorizontal();
-            mc.player.setPitch((float) liftPitch);
+            PlayerAction.pressForward(false);
             return;
         }
         double flat = Math.max(0.001, Math.hypot(dx, dz));
-        float yaw = (float) ((Math.toDegrees(Math.atan2(-dx, dz)) + 360.0) % 360.0);
-        float pitch = (float) Math.max(HORIZONTAL_PITCH_LIMIT,
-            Math.min(HORIZONTAL_PITCH_MAX, -Math.toDegrees(Math.atan2(dy, flat))));
-        mc.player.setYaw(yaw);
+        float yaw2 = (float)((Math.toDegrees(Math.atan2(-dx, dz)) + 360.0) % 360.0);
+        float pitch = (float)Math.max(-35.0, Math.min(20.0, -Math.toDegrees(Math.atan2(dy, flat))));
+        mc.player.setYaw(yaw2);
         mc.player.setPitch(pitch);
-        if (jumpPhase < 0) {
-            PlayerAction.pressForward(true);
-            if (inLava) PlayerAction.pressJump(true);
-        }
-        if (useFirework && mc.player.isGliding() && (inLava || onFire) && jumpPhase < 0) {
-            if (--refireCooldown <= 0) {
-                refireCooldown = HORIZONTAL_REFIRE_TICKS;
-                if (horizontalRefires < HORIZONTAL_REFIRE_MAX) {
-                    horizontalRefires++;
-                    refireFirework(mc);
-                }
-            }
+        PlayerAction.pressForward(true);
+        if (inLava) {
+            PlayerAction.pressJump(true);
         }
     }
-    private void stopHorizontal() {
-        if (horizontalMode) {
-            horizontalMode = false;
-            PlayerAction.pressForward(false);
-            FOElytraLog.detail("岩浆自救：退出水平脱离模式（恢复默认抬头姿态）");
-        }
-    }
+
     private float pickFreeYaw(MinecraftClient mc) {
-        World world = mc.world;
-        if (world == null || mc.player == null) return Float.NaN;
+        if (mc.world == null || mc.player == null) {
+            return Float.NaN;
+        }
         BlockPos origin = mc.player.getBlockPos();
         float currentYaw = mc.player.getYaw();
         float bestYaw = Float.NaN;
         double bestScore = Double.NEGATIVE_INFINITY;
-        for (int k = 0; k < DIRECTION_SAMPLES; k++) {
-            float yaw = k * (360.0f / DIRECTION_SAMPLES);
+        for (int k = 0; k < 16; ++k) {
+            double angleDiff;
+            double score;
+            BlockPos feet;
+            int bz;
+            int bx;
+            float yaw = (float)k * 22.5f;
             double rad = Math.toRadians(yaw);
             double stepX = -Math.sin(rad);
             double stepZ = Math.cos(rad);
             int free = 0;
-            int lavaSteps = 0;
-            for (int s = 1; s <= CLEARANCE_STEPS; s++) {
-                int bx = (int) Math.floor(mc.player.getX() + stepX * s);
-                int bz = (int) Math.floor(mc.player.getZ() + stepZ * s);
-                if (!world.isChunkLoaded(bx >> 4, bz >> 4)) break;
-                BlockPos feet = new BlockPos(bx, origin.getY(), bz);
-                BlockPos head = feet.up();
-                if (solid(world, feet) || solid(world, head)) break;
-                free++;
-                if (isLava(world, feet)) lavaSteps++;
+            for (int s = 1; s <= 6 && mc.world.isChunkLoaded((bx = (int)Math.floor(mc.player.getX() + stepX * (double)s)) >> 4, (bz = (int)Math.floor(mc.player.getZ() + stepZ * (double)s)) >> 4) && !this.solid(mc, feet = new BlockPos(bx, origin.getY(), bz)) && !this.solid(mc, feet.up()); ++s) {
+                ++free;
             }
-            if (free <= 0) continue;
-            double angleDiff = Math.abs(((yaw - currentYaw + 540.0f) % 360.0f) - 180.0f);
-            double score = free * 2.0 - lavaSteps * 1.0 - angleDiff * 0.02;
-            if (score > bestScore) {
-                bestScore = score;
-                bestYaw = yaw;
-            }
+            if (free <= 0 || !((score = (double)free * 2.0 - (angleDiff = (double)Math.abs((yaw - currentYaw + 540.0f) % 360.0f - 180.0f)) * 0.02) > bestScore)) continue;
+            bestScore = score;
+            bestYaw = yaw;
         }
         return bestYaw;
     }
-    private boolean startDrink(MinecraftClient mc) {
-        int slot = -1;
-        for (int i = 0; i < 9; i++) {
-            if (isFireResPotion(mc.player.getInventory().getStack(i))) {
-                slot = i;
-                break;
-            }
+
+    private BlockPos findSafeSpot(MinecraftClient mc, int radius) {
+        if (mc.world == null || mc.player == null) {
+            return null;
         }
-        if (slot < 0) return false;
-        mc.player.getInventory().setSelectedSlot(slot);
-        drinkLeft = 45;
-        PlayerAction.pressUse(true);
-        FOElytraLog.warn("岩浆自救：先喝抗火药水（快捷栏第 %d 格）", slot + 1);
-        return true;
-    }
-    private void drinkTick(MinecraftClient mc) {
-        drinkLeft--;
-        PlayerAction.pressUse(drinkLeft > 0);
-        if (drinkLeft <= 0 && mc.player != null && !mc.player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
-            FOElytraLog.warn("抗火药水没喝上（可能被别的模块抢了右键）");
-        }
-    }
-    private static boolean isFireResPotion(ItemStack s) {
-        if (s == null || s.isEmpty()) return false;
-        if (!s.isOf(Items.POTION) && !s.isOf(Items.SPLASH_POTION) && !s.isOf(Items.LINGERING_POTION)) {
-            return false;
-        }
-        PotionContentsComponent contents = s.get(DataComponentTypes.POTION_CONTENTS);
-        return contents != null
-            && (contents.matches(Potions.FIRE_RESISTANCE) || contents.matches(Potions.LONG_FIRE_RESISTANCE));
-    }
-    private BlockPos findExit(MinecraftClient mc, int radius) {
-        World world = mc.world;
         BlockPos origin = mc.player.getBlockPos();
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
-        for (int dy = -3; dy <= 4; dy++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    if (dx == 0 && dz == 0 && dy <= 0) continue;
-                    double score = dx * dx + dz * dz + dy * dy * 6.0;
-                    if (score >= bestScore) continue;
-                    BlockPos q = origin.add(dx, dy, dz);
-                    if (!isSafe(world, q)) continue;
+        for (int dy = -2; dy <= 3; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                for (int dz = -radius; dz <= radius; ++dz) {
+                    BlockPos q;
+                    double score;
+                    if (dx == 0 && dz == 0 && dy <= 0 || (score = (double)(dx * dx + dz * dz) + (double)(dy * dy) * 6.0) >= bestScore || !this.isSafe(mc, q = origin.add(dx, dy, dz))) continue;
                     bestScore = score;
                     best = q;
                 }
@@ -558,27 +600,102 @@ public final class LavaEscape {
         }
         return best;
     }
-    private boolean isSafe(World world, BlockPos pos) {
-        if (world == null || pos == null) return false;
-        if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) return false;
-        if (isLava(world, pos) || isLava(world, pos.up())) return false;
-        if (solid(world, pos) || solid(world, pos.up())) return false;
-        return solid(world, pos.down()) && !isLava(world, pos.down());
+
+    private boolean isSafe(MinecraftClient mc, BlockPos pos) {
+        if (mc.world == null || pos == null) {
+            return false;
+        }
+        if (!mc.world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
+            return false;
+        }
+        if (this.isLava(mc, pos) || this.isLava(mc, pos.up())) {
+            return false;
+        }
+        if (this.solid(mc, pos) || this.solid(mc, pos.up())) {
+            return false;
+        }
+        return this.solid(mc, pos.down()) && !this.isLava(mc, pos.down());
     }
-    private static boolean isLava(World world, BlockPos pos) {
-        FluidState fluid = world.getFluidState(pos);
+
+    private boolean isLava(MinecraftClient mc, BlockPos pos) {
+        FluidState fluid = mc.world.getFluidState(pos);
         return fluid.getFluid() == Fluids.LAVA || fluid.getFluid() == Fluids.FLOWING_LAVA;
     }
-    private static boolean solid(World world, BlockPos pos) {
-        return !world.getBlockState(pos).getCollisionShape(world, pos).isEmpty();
+
+    private boolean solid(MinecraftClient mc, BlockPos pos) {
+        return !mc.world.getBlockState(pos).getCollisionShape((BlockView)mc.world, pos).isEmpty();
     }
+
+    private boolean startDrink(MinecraftClient mc) {
+        int slot = -1;
+        for (int i = 0; i < 9; ++i) {
+            if (!LavaEscape.isFireResPotion(mc.player.getInventory().getStack(i))) continue;
+            slot = i;
+            break;
+        }
+        if (slot < 0) {
+            return false;
+        }
+        mc.player.getInventory().setSelectedSlot(slot);
+        this.drinkLeft = 45;
+        PlayerAction.pressUse(true);
+        FOElytraLog.warn("\u515c\u5e95\uff1a\u559d\u6297\u706b\u836f\u6c34\uff08\u989d\u5916\u529f\u80fd\uff09\uff1a\u5feb\u6377\u680f\u7b2c %d \u683c\u5148\u559d\u6389", slot + 1);
+        return true;
+    }
+
+    private void drinkTick(MinecraftClient mc) {
+        --this.drinkLeft;
+        PlayerAction.pressUse(this.drinkLeft > 0);
+        if (this.drinkLeft <= 0 && mc.player != null && !mc.player.hasStatusEffect(StatusEffects.FIRE_RESISTANCE)) {
+            FOElytraLog.warn("\u6297\u706b\u836f\u6c34\u6ca1\u559d\u4e0a\uff08\u53ef\u80fd\u88ab\u522b\u7684\u6a21\u5757\u62a2\u4e86\u53f3\u952e\uff09", new Object[0]);
+        }
+    }
+
+    private static boolean isFireResPotion(ItemStack s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        if (!(s.isOf(Items.POTION) || s.isOf(Items.SPLASH_POTION) || s.isOf(Items.LINGERING_POTION))) {
+            return false;
+        }
+        PotionContentsComponent contents = (PotionContentsComponent)s.get(DataComponentTypes.POTION_CONTENTS);
+        return contents != null && (contents.matches(Potions.FIRE_RESISTANCE) || contents.matches(Potions.LONG_FIRE_RESISTANCE));
+    }
+
+    private static int countFireworks(PlayerEntity player) {
+        int n = 0;
+        for (int i = 0; i < 36; ++i) {
+            ItemStack s = player.getInventory().getStack(i);
+            if (!s.isOf(Items.FIREWORK_ROCKET)) continue;
+            n += s.getCount();
+        }
+        return n;
+    }
+
     public static int fireTrigger() {
-        return FIRE_TRIGGER;
+        return 20;
     }
+
     public static int notGlidingTrigger() {
-        return NOT_GLIDING_TRIGGER;
+        return 5;
     }
+
     public static int escapeCooldown() {
-        return ESCAPE_COOLDOWN;
+        return 45;
+    }
+
+    public static enum Result {
+        IDLE("\u7a7a\u95f2"),
+        ESCAPING("\u9003\u79bb\u4e2d"),
+        FAILED("\u5931\u8d25");
+
+
+        private final String label;
+
+        Result(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
     }
 }
+

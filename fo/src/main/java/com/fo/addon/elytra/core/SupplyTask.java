@@ -1,82 +1,82 @@
 package com.fo.addon.elytra.core;
+
+import com.fo.addon.elytra.core.BaritoneHook;
+import com.fo.addon.elytra.core.BlockBreaker;
+import com.fo.addon.elytra.core.FOElytraLog;
+import com.fo.addon.elytra.core.InvHelper;
+import com.fo.addon.elytra.core.ItemHelper;
+import com.fo.addon.elytra.core.Needs;
+import com.fo.addon.elytra.core.PlayerAction;
+import com.fo.addon.elytra.core.SettingHelper;
+import com.fo.addon.elytra.core.ShulkerScanner;
+import com.fo.addon.elytra.core.SupplyOptions;
+import com.fo.addon.elytra.core.TaskStatus;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
-import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import net.minecraft.screen.ScreenHandler;
-import net.minecraft.screen.slot.SlotActionType;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.Block;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
 import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
+import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.entity.player.PlayerInventory;
+import net.minecraft.entity.projectile.FireballEntity;
+import net.minecraft.fluid.FluidState;
+import net.minecraft.fluid.Fluids;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.Slot;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.util.Hand;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.Vec3i;
+
 public final class SupplyTask {
     private static final int WALK_MAX_TICKS = 40;
     private static final int SCREEN_WAIT_TICKS = 40;
     private static final int SCREEN_HOLD_MAX_TICKS = 600;
-    private static final int VERIFY_WAIT_TICKS = 10;
+    private static final int VERIFY_WAIT_TICKS = 30;
     private static final int MOVE_GUARD = 240;
     private static final int OPEN_RETRY = 3;
     private static final int PLACE_RETRY = 3;
     private static final int PLACE_CANDIDATE_ROUNDS = 2;
-    private static final int SHULKER_MAX_PICKS_PER_BOX = 2;
+    private static final int SWAP_RECHECK_MAX = 6;
     private static final int PLACE_RETRY_WAIT_TICKS = 10;
     private static final int SHULKER_BLOCK_WAIT_TICKS = 60;
     private static final int PLACE_POLL_LOG_INTERVAL = 20;
-    private static final int SWAP_RECHECK_MAX = 6;
-    public enum State {
-        IDLE("空闲"),
-        WALK_CENTER("走到中心"),
-        SORT_INV("整理背包"),
-        EVALUATE("清点需求"),
-        PUT_OUT_FIRE("灭火"),
-        PLACE_EC("放末影箱"),
-        OPEN_EC("开末影箱"),
-        WAIT_EC("等末影箱界面"),
-        SCAN("扫描存储"),
-        TAKE_SHULKER("拿潜影盒"),
-        VERIFY_TAKE("确认拿到"),
-        PLACE_SH("放潜影盒"),
-        OPEN_SH("开潜影盒"),
-        WAIT_SH("等潜影盒界面"),
-        MOVE_ITEMS("搬运物资"),
-        CLOSE_SH("关潜影盒"),
-        BREAK_SH("挖潜影盒"),
-        WAIT_BREAK_SH("等挖完潜影盒"),
-        REOPEN_EC("重开末影箱"),
-        WAIT_EC_RETURN("等末影箱界面（放回）"),
-        RETURN_SH("放回潜影盒"),
-        CLOSE_EC("关末影箱"),
-        NEXT_SH("下一个潜影盒"),
-        BREAK_EC("收末影箱"),
-        WAIT_BREAK_EC("等收完末影箱"),
-        DONE("完成"),
-        FAILED("失败");
-
-        public final String label;
-
-        State(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString，必须覆写否则显示英文枚举名） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
+    private static final int SHULKER_RESCUE_RADIUS = 8;
+    private static final int SHULKER_RESCUE_INTERVAL = 10;
+    private static final int SHULKER_RESCUE_LOG_INTERVAL = 40;
+    private static final int SHULKER_BREAK_WAIT_TICKS = 300;
+    private static final int SHULKER_PROGRESS_GRACE_TICKS = 200;
+    private static final int SHULKER_BREAK_HARD_TICKS = 900;
+    private static final int MINE_STALL_TICKS = 60;
+    private static final int WALK_CENTER_MAX_TICKS = 40;
+    private static final int MINE_RETRY_MAX = 3;
+    private static final int MINE_PROGRESS_LOG_TICKS = 100;
+    private static final int MINE_MAX_WAIT_TICKS = 400;
+    private static final int EC_PICKUP_WAIT_TICKS = 200;
+    private static final int RECOVER_MAX_TICKS = 400;
+    private static final int TAKE_ROUND_MAX = 3;
+    private static final int RECOVER_PICKUP_TICKS = 200;
+    private static final int PLACE_FLUID_DEPTH = 2;
     private final SupplyOptions opts;
     private State state = State.IDLE;
     private TaskStatus status = TaskStatus.IDLE;
@@ -95,56 +95,42 @@ public final class SupplyTask {
     private BlockPos shulkerPos;
     private String shulkerTitle = "";
     private List<ShulkerScanner.Entry> scanned = List.of();
-    private record PlanItem(int rawSlot, int fireworkStacks, int second, boolean xpMode, String title) {}
-    private final List<PlanItem> plan = new ArrayList<>();
-    private final Set<Integer> storeTried = new LinkedHashSet<>();
+    private final List<PlanItem> plan = new ArrayList<PlanItem>();
+    private final Set<Integer> storeTried = new LinkedHashSet<Integer>();
+    private final Set<Integer> planOpened = new LinkedHashSet<Integer>();
     private int planIndex;
-    private final Set<Item> exhausted = new LinkedHashSet<>();
+    private final Set<Item> exhausted = new LinkedHashSet<Item>();
     private boolean foodExhausted;
     private int boxFwTaken;
     private int boxSecondTaken;
     private boolean boxTookAnything;
     private boolean boxTookPartial;
-    private int emptyBoxStrikes;
-    private final Map<Integer, Integer> boxPickCount = new LinkedHashMap<>();
-    private final Set<Integer> boxBlacklist = new LinkedHashSet<>();
-    private final Deque<Integer> replaceSlots = new ArrayDeque<>();
+    private final Deque<Integer> replaceSlots = new ArrayDeque<Integer>();
     private boolean starvedWarned;
     private String starvedDetailKey = "";
     private String replaceSlotSummary = "";
     private int replaceRecheckSkips;
     private int shulkerBreakTarget;
     private int ecBreakTarget;
-    private List<BlockPos> fireTargets = new ArrayList<>();
+    private List<BlockPos> fireTargets = new ArrayList<BlockPos>();
     private int sortMoves;
     private int ecItemBefore;
     private int obsidianBefore;
     private int pickupWait;
-    // V5.1：等待计数按用途拆开。原来四个「等待」共用一个 waitTicks，
-    // 谁忘了在进入状态前清零就会读到上一段的残留值（潜影盒挖回就是这么每次误报 40 tick 的）。
-    private int ecScreenWaitTicks;   // 等末影箱界面出现
-    private int shScreenWaitTicks;   // 等潜影盒界面出现
-    private int shBreakWaitTicks;    // 等潜影盒被挖掉并进背包
-    private int ecBreakWaitTicks;    // 等末影箱被挖掉并进背包
-    /** 交挖之前的潜影盒槽位快照（V5.2：用来判断盒子是不是真进背包了）。 */
-    private InventoryPickupLogic.Snapshot shulkerBefore;
-    /** 本 tick 是否正被火球纠缠（V5.2：被火球打断时不该算挖掘超时）。 */
-    private boolean threatActive;
-    /** 本次挖回已经丢了几件垃圾腾位（V5.2，防止失控连丢）。 */
-    private int freeSlotDrops;
-    /** 每挖回一个方块最多丢几件腾位。 */
-    private static final int MAX_FREE_SLOT_DROPS = 9;
+    private int waitTicks;
     private int walkTicks;
     private int screenHoldTicks;
     private int openRetries;
     private int placeRetries;
     private int placeWaitTicks;
-    private final List<BlockPos> placeCandidates = new ArrayList<>();
-    private final Set<BlockPos> placeRejected = new LinkedHashSet<>();
+    private final List<BlockPos> placeCandidates = new ArrayList<BlockPos>();
+    private final Set<BlockPos> placeRejected = new LinkedHashSet<BlockPos>();
     private int placeCandidateIndex;
     private int placeCandidateTotal;
     private int placeRounds;
+    private int takeRounds;
     private String placeEmptyReason = "";
+    private int placeLavaSkipped;
     private int moveGuard;
     private boolean merged;
     private boolean breakRequested;
@@ -152,662 +138,1095 @@ public final class SupplyTask {
     private boolean pendingReturn;
     private int breakTicks;
     private BlockPos breakTarget;
+    private int rescueTicks;
+    private int rescueProgressTick;
+    private int rescueBackpackSeen = -1;
+    private int rescueDropSeen = -1;
+    private BlockPos rescueTarget;
+    private int boxXpTaken;
+    private int boxElytraTaken;
+    private int boxTotemTaken;
+    private int boxFoodTaken;
+    private boolean boxFoodNoRoom;
+    private int forcedFoodSlot = -1;
+    private TakeVerify takeVerify;
+    private int takeVerifyTicks;
+    private int takeVerifyRetries;
+    private boolean totemRoomWarned;
+    private int runLostShulkers;
+    private String runLostPos = "";
+    private int runLeftShulkers;
+    private String runLeftPos = "";
+    private int runLeftEnderChests;
+    private String runLeftEcPos = "";
+    private int mineIdleTicks;
+    private int mineRetries;
+    private int manualBreakRetries;
+    private boolean mineManual;
+    private String mineBackFailReason = "";
+    private int walkCenterTicks;
+    private boolean breakBlockGone;
+    private boolean ecBlockGone;
+    private int returnVerifyTicks;
+    private int returnVerifyBefore;
+    private int returnAttempt;
+    private int returnTargetSlot = -1;
+    private String shulkerSelectFailReason = "";
+    private int recoverTicks;
+    private int recoverStage;
+    private int recoverStageTicks;
+    private int recoverShulkerTarget;
+    private int recoverEcTarget;
+    private int recoverEcBefore;
+    private int recoverObsidianBefore;
+    private boolean recoverShulkerDone;
+    private boolean recoverEcDone;
+    private int recoverDropTicks;
+    private BlockPos recoverDropTarget;
+    private String recoverReason = "";
+    private static int pendingLostShulkers;
+    private static String pendingLostPos;
+    private static int pendingLeftShulkers;
+    private static String pendingLeftPos;
+    private static int pendingLeftEnderChests;
+    private static String pendingLeftEcPos;
+
     public SupplyTask(SupplyOptions opts) {
         this.opts = opts;
     }
+
     public void start() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.world == null) {
-            fail("玩家/世界为空，无法补给");
+            this.fail("\u73a9\u5bb6/\u4e16\u754c\u4e3a\u7a7a\uff0c\u65e0\u6cd5\u8865\u7ed9");
             return;
         }
-        state = State.WALK_CENTER;
-        status = TaskStatus.RUNNING;
-        delay = 0;
-        failReason = "";
-        plan.clear();
-        planIndex = 0;
-        storeTried.clear();
-        exhausted.clear();
-        foodExhausted = false;
-        fireTargets = new ArrayList<>();
-        sortMoves = 0;
-        emptyBoxStrikes = 0;
-        boxPickCount.clear();
-        boxBlacklist.clear();
-        waitTicksReset();
-        walkTicks = 0;
-        screenHoldTicks = 0;
-        openRetries = 0;
-        placeRetries = 0;
-        placeWaitTicks = 0;
-        placeCandidates.clear();
-        placeRejected.clear();
-        placeCandidateIndex = 0;
-        placeCandidateTotal = 0;
-        placeRounds = 0;
-        placeEmptyReason = "";
-        moveGuard = 0;
-        merged = false;
-        breakRequested = false;
-        walkPressed = false;
-        ecPos = null;
-        shulkerPos = null;
-        shulkerRawSlot = -1;
-        shulkerHotbarSlot = -1;
-        shulkerCountBeforeTake = 0;
+        this.state = State.WALK_CENTER;
+        this.status = TaskStatus.RUNNING;
+        this.delay = 0;
+        this.failReason = "";
+        this.plan.clear();
+        this.planIndex = 0;
+        this.storeTried.clear();
+        this.planOpened.clear();
+        this.exhausted.clear();
+        this.foodExhausted = false;
+        this.fireTargets = new ArrayList<BlockPos>();
+        this.sortMoves = 0;
+        this.waitTicks = 0;
+        this.walkTicks = 0;
+        this.screenHoldTicks = 0;
+        this.openRetries = 0;
+        this.placeRetries = 0;
+        this.placeWaitTicks = 0;
+        this.placeCandidates.clear();
+        this.placeRejected.clear();
+        this.placeCandidateIndex = 0;
+        this.placeCandidateTotal = 0;
+        this.placeRounds = 0;
+        this.placeEmptyReason = "";
+        this.moveGuard = 0;
+        this.merged = false;
+        this.breakRequested = false;
+        this.walkPressed = false;
+        this.ecPos = null;
+        this.shulkerPos = null;
+        this.shulkerRawSlot = -1;
+        this.shulkerHotbarSlot = -1;
+        this.shulkerCountBeforeTake = 0;
+        this.rescueTicks = 0;
+        this.rescueProgressTick = 0;
+        this.rescueBackpackSeen = -1;
+        this.rescueDropSeen = -1;
+        this.rescueTarget = null;
+        this.runLostShulkers = 0;
+        this.runLostPos = "";
+        this.totemRoomWarned = false;
+        this.runLeftShulkers = 0;
+        this.runLeftPos = "";
+        this.runLeftEnderChests = 0;
+        this.runLeftEcPos = "";
+        this.mineIdleTicks = 0;
+        this.mineRetries = 0;
+        this.breakBlockGone = false;
+        this.ecBlockGone = false;
         BlockBreaker.reset();
-        FOElytraLog.info("开始自动补给：目标 %s", describeTargets());
+        if (pendingLeftShulkers > 0) {
+            FOElytraLog.warn("\u4e0a\u6b21\u8865\u7ed9\u6709 %d \u4e2a\u6f5c\u5f71\u76d2\u7559\u5728\u539f\u5730\uff08\u4f4d\u7f6e %s\uff09", pendingLeftShulkers, pendingLeftPos);
+            pendingLeftShulkers = 0;
+            pendingLeftPos = "";
+        }
+        if (pendingLeftEnderChests > 0) {
+            FOElytraLog.warn("\u4e0a\u6b21\u8865\u7ed9\u6709 %d \u4e2a\u672b\u5f71\u7bb1\u7559\u5728\u539f\u5730\uff08\u4f4d\u7f6e %s\uff09", pendingLeftEnderChests, pendingLeftEcPos);
+            pendingLeftEnderChests = 0;
+            pendingLeftEcPos = "";
+        }
+        if (pendingLostShulkers > 0) {
+            FOElytraLog.warn("\u4e0a\u6b21\u8865\u7ed9\u4e22\u5931\u6f5c\u5f71\u76d2 %d \u4e2a\uff08\u4f4d\u7f6e %s\uff09", pendingLostShulkers, pendingLostPos);
+            pendingLostShulkers = 0;
+            pendingLostPos = "";
+        }
+        FOElytraLog.info("\u5f00\u59cb\u81ea\u52a8\u8865\u7ed9\uff1a\u76ee\u6807 %s", this.describeTargets());
     }
+
     public void abort(String reason) {
-        releaseKeys();
+        this.releaseKeys();
+        this.clearStuckSneak("\u8865\u7ed9\u4e2d\u6b62");
         BlockBreaker.cancel();
-        if (BaritoneHook.isMining()) BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        if (state != State.IDLE) FOElytraLog.warn("补给中止：%s", reason);
-        state = State.IDLE;
-        status = TaskStatus.IDLE;
-        delay = 0;
+        if (BaritoneHook.isMining()) {
+            BaritoneHook.stop();
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        if (this.state != State.IDLE) {
+            FOElytraLog.warn("\u8865\u7ed9\u4e2d\u6b62\uff1a%s", reason);
+        }
+        this.state = State.IDLE;
+        this.status = TaskStatus.IDLE;
+        this.delay = 0;
     }
+
     public TaskStatus status() {
-        return status;
+        return this.status;
     }
+
     public State state() {
-        return state;
+        return this.state;
     }
+
     public boolean isRunning() {
-        return status == TaskStatus.RUNNING;
+        return this.status == TaskStatus.RUNNING;
     }
+
     public String failReason() {
-        return failReason;
+        return this.failReason;
     }
+
     public String progress() {
-        if (status == TaskStatus.RUNNING) {
-            return state.toString() + (needs.isEmpty() ? "" : (" 还需 " + needs));
+        if (this.status == TaskStatus.RUNNING) {
+            return this.state.name() + (String)(this.needs.isEmpty() ? "" : " \u8fd8\u9700 " + String.valueOf(this.needs));
         }
-        return status.toString() + (failReason.isEmpty() ? "" : ("(" + failReason + ")"));
+        return this.status.name() + (String)(this.failReason.isEmpty() ? "" : "(" + this.failReason + ")");
     }
+
     public String lastMessage() {
-        return lastMessage;
+        return this.lastMessage;
     }
+
     public Set<Item> exhaustedItems() {
-        return java.util.Collections.unmodifiableSet(exhausted);
+        return Collections.unmodifiableSet(this.exhausted);
     }
+
     public boolean foodExhausted() {
-        return foodExhausted;
+        return this.foodExhausted;
     }
+
     private void markExhausted() {
-        if (needs.fireworkStacks > 0) exhausted.add(Items.FIREWORK_ROCKET);
-        if (needs.xpBottles > 0) exhausted.add(Items.EXPERIENCE_BOTTLE);
-        if (needs.totems > 0) exhausted.add(Items.TOTEM_OF_UNDYING);
-        if (needs.elytra > 0) exhausted.add(Items.ELYTRA);
-        if (needs.food > 0) foodExhausted = true;
-        if (!exhausted.isEmpty() || foodExhausted) {
-            FOElytraLog.detail("本轮判定这些暂时取不到：%s%s（可能是箱子里真没有，也可能是腾不出格子/界面没开成拿不出来）"
-                    + " —— 已登记 2 分钟冷却，先用现有的继续飞",
-                exhausted, foodExhausted ? " + 食物" : "");
+        if (this.needs.fireworkStacks > 0) {
+            this.exhausted.add(Items.FIREWORK_ROCKET);
+        }
+        if (this.needs.xpBottles > 0) {
+            this.exhausted.add(Items.EXPERIENCE_BOTTLE);
+        }
+        if (this.needs.totems > 0) {
+            this.exhausted.add(Items.TOTEM_OF_UNDYING);
+        }
+        if (this.needs.elytra > 0) {
+            this.exhausted.add(Items.ELYTRA);
+        }
+        if (this.needs.food > 0) {
+            this.foodExhausted = true;
+        }
+        if (!this.exhausted.isEmpty() || this.foodExhausted) {
+            FOElytraLog.detail("\u672c\u8f6e\u5224\u5b9a\u8fd9\u4e9b\u6682\u65f6\u53d6\u4e0d\u5230\uff1a%s%s\uff08\u53ef\u80fd\u662f\u7bb1\u5b50\u91cc\u771f\u6ca1\u6709\uff0c\u4e5f\u53ef\u80fd\u662f\u817e\u4e0d\u51fa\u683c\u5b50/\u754c\u9762\u6ca1\u5f00\u6210\u62ff\u4e0d\u51fa\u6765\uff09 \u2014\u2014 \u5df2\u767b\u8bb0 2 \u5206\u949f\u51b7\u5374\uff0c\u5148\u7528\u73b0\u6709\u7684\u7ee7\u7eed\u98de", this.exhausted, this.foodExhausted ? " + \u98df\u7269" : "");
         }
     }
+
     public void tick() {
-        if (status != TaskStatus.RUNNING) return;
+        if (this.status != TaskStatus.RUNNING) {
+            return;
+        }
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.world == null) {
-            fail("玩家/世界为空");
+            this.fail("\u73a9\u5bb6/\u4e16\u754c\u4e3a\u7a7a");
             return;
         }
-        if (delay > 0) {
-            delay--;
+        if (this.delay > 0) {
+            this.noSneak("\u8865\u7ed9\u8fd0\u884c\u4e2d\uff08\u7b49\u52a8\u4f5c\u95f4\u9694\uff09");
+            --this.delay;
             return;
         }
         try {
-            step(mc);
-        } catch (Throwable t) {
-            FOElytraLog.err("补给内部异常: %s", String.valueOf(t));
-            fail("内部异常 " + t.getClass().getSimpleName());
+            this.step(mc);
+        }
+        catch (Throwable t) {
+            FOElytraLog.err("\u8865\u7ed9\u5185\u90e8\u5f02\u5e38: %s", String.valueOf(t));
+            this.fail("\u5185\u90e8\u5f02\u5e38 " + t.getClass().getSimpleName());
         }
     }
+
     private void step(MinecraftClient mc) {
-        switch (state) {
-            case WALK_CENTER -> walkCenter(mc);
-            case SORT_INV -> sortInventory(mc);
-            case EVALUATE -> evaluate(mc);
-            case PUT_OUT_FIRE -> putOutFire(mc);
-            case PLACE_EC -> placeEnderChest(mc);
-            case OPEN_EC -> openEnderChest(mc);
-            case WAIT_EC -> waitEnderChest(mc, State.SCAN);
-            case SCAN -> scan(mc);
-            case TAKE_SHULKER -> takeShulker(mc);
-            case VERIFY_TAKE -> verifyTake(mc);
-            case PLACE_SH -> placeShulker(mc);
-            case OPEN_SH -> openShulker(mc);
-            case WAIT_SH -> waitShulker(mc);
-            case MOVE_ITEMS -> moveItems(mc);
-            case CLOSE_SH -> {
-                InvHelper.closeScreen();
-                breakRequested = false;
-                next(State.BREAK_SH, opts.actionDelay());
+        this.noSneak("\u72b6\u6001 " + String.valueOf((Object)this.state));
+        switch (this.state.ordinal()) {
+            case 1: {
+                this.walkCenter(mc);
+                break;
             }
-            case BREAK_SH -> breakShulker(mc);
-            case WAIT_BREAK_SH -> waitBreakShulker(mc);
-            case REOPEN_EC -> openEnderChest(mc);
-            case WAIT_EC_RETURN -> waitEnderChest(mc, State.RETURN_SH);
-            case RETURN_SH -> returnShulker(mc);
-            case CLOSE_EC -> {
-                InvHelper.closeScreen();
-                next(State.NEXT_SH, opts.actionDelay());
+            case 2: {
+                this.sortInventory(mc);
+                break;
             }
-            case NEXT_SH -> nextShulker(mc);
-            case BREAK_EC -> breakEnderChest(mc);
-            case WAIT_BREAK_EC -> waitBreakEnderChest(mc);
-            case DONE -> status = TaskStatus.DONE;
-            case FAILED -> status = TaskStatus.FAILED;
-            default -> status = TaskStatus.DONE;
+            case 3: {
+                this.evaluate(mc);
+                break;
+            }
+            case 4: {
+                this.putOutFire(mc);
+                break;
+            }
+            case 5: {
+                this.placeEnderChest(mc);
+                break;
+            }
+            case 6: {
+                this.openEnderChest(mc);
+                break;
+            }
+            case 7: {
+                this.waitEnderChest(mc, State.SCAN);
+                break;
+            }
+            case 8: {
+                this.scan(mc);
+                break;
+            }
+            case 9: {
+                this.takeShulker(mc);
+                break;
+            }
+            case 10: {
+                this.verifyTake(mc);
+                break;
+            }
+            case 11: {
+                this.placeShulker(mc);
+                break;
+            }
+            case 12: {
+                this.openShulker(mc);
+                break;
+            }
+            case 13: {
+                this.waitShulker(mc);
+                break;
+            }
+            case 14: {
+                this.moveItems(mc);
+                break;
+            }
+            case 15: {
+                InvHelper.closeScreen();
+                this.breakRequested = false;
+                this.next(State.BREAK_SH, this.opts.actionDelay());
+                break;
+            }
+            case 16: {
+                this.breakShulker(mc);
+                break;
+            }
+            case 17: {
+                this.waitBreakShulker(mc);
+                break;
+            }
+            case 18: {
+                this.openEnderChest(mc);
+                break;
+            }
+            case 19: {
+                this.waitEnderChest(mc, State.RETURN_SH);
+                break;
+            }
+            case 20: {
+                this.returnShulker(mc);
+                break;
+            }
+            case 21: {
+                InvHelper.closeScreen();
+                this.next(State.NEXT_SH, this.opts.actionDelay());
+                break;
+            }
+            case 22: {
+                this.nextShulker(mc);
+                break;
+            }
+            case 23: {
+                this.breakEnderChest(mc);
+                break;
+            }
+            case 24: {
+                this.waitBreakEnderChest(mc);
+                break;
+            }
+            case 25: {
+                this.verifyReturn(mc);
+                break;
+            }
+            case 26: {
+                this.recoverTick(mc);
+                break;
+            }
+            case 27: {
+                this.status = TaskStatus.DONE;
+                break;
+            }
+            case 28: {
+                this.status = TaskStatus.FAILED;
+                break;
+            }
+            default: {
+                this.status = TaskStatus.DONE;
+            }
         }
     }
+
     private void walkCenter(MinecraftClient mc) {
         if (InvHelper.screenOpen()) {
-            releaseKeys();
-            if (++screenHoldTicks > SCREEN_HOLD_MAX_TICKS) {
-                fail("你一直开着界面（" + (SCREEN_HOLD_MAX_TICKS / 20) + " 秒），补给已取消");
+            this.releaseKeys();
+            if (++this.screenHoldTicks > 600) {
+                this.fail("\u4f60\u4e00\u76f4\u5f00\u7740\u754c\u9762\uff0830 \u79d2\uff09\uff0c\u8865\u7ed9\u5df2\u53d6\u6d88");
                 return;
             }
-            if (screenHoldTicks % 100 == 0) {
-                FOElytraLog.warn("检测到你开着界面，补给暂停中（关掉后会自动继续）");
+            if (this.screenHoldTicks % 100 == 0) {
+                FOElytraLog.warn("\u68c0\u6d4b\u5230\u4f60\u5f00\u7740\u754c\u9762\uff0c\u8865\u7ed9\u6682\u505c\u4e2d\uff08\u5173\u6389\u540e\u4f1a\u81ea\u52a8\u7ee7\u7eed\uff09", new Object[0]);
             }
-            delay = 0;
+            this.delay = 0;
             return;
         }
-        screenHoldTicks = 0;
-        if (walkTicks++ > WALK_MAX_TICKS) {
-            releaseKeys();
-            next(State.SORT_INV, 2);
+        this.screenHoldTicks = 0;
+        if (this.walkTicks++ > 40) {
+            this.releaseKeys();
+            this.next(State.SORT_INV, 2);
             return;
         }
         BlockPos foot = mc.player.getBlockPos();
-        Vec3d center = new Vec3d(foot.getX() + 0.5, mc.player.getY(), foot.getZ() + 0.5);
+        Vec3d center = new Vec3d((double)foot.getX() + 0.5, mc.player.getY(), (double)foot.getZ() + 0.5);
         Vec3d delta = center.subtract(mc.player.getEntityPos());
         if (Math.abs(delta.x) < 0.2 && Math.abs(delta.z) < 0.2) {
-            releaseKeys();
-            next(State.SORT_INV, 2);
+            this.releaseKeys();
+            this.next(State.SORT_INV, 2);
             return;
         }
         double yaw = Math.toDegrees(Math.atan2(-delta.x, delta.z));
-        mc.player.setYaw((float) yaw);
+        mc.player.setYaw((float)yaw);
         PlayerAction.pressForward(true);
-        walkPressed = true;
-        delay = 0;
+        this.walkPressed = true;
+        this.delay = 0;
     }
+
     private void sortInventory(MinecraftClient mc) {
+        this.noSneak("\u6574\u7406\u80cc\u5305\u524d");
         ScreenHandler handler = mc.player.currentScreenHandler;
         if (handler == null || handler.slots.size() < 45) {
-            next(State.EVALUATE, opts.actionDelay());
+            this.next(State.EVALUATE, this.opts.actionDelay());
             return;
         }
         int moves = 0;
-        for (int b = 9; b < 36 && moves < 2 && sortMoves < 24; b++) {
+        for (int b = 9; b < 36 && moves < 2 && this.sortMoves < 24; ++b) {
+            int target;
             ItemStack back = mc.player.getInventory().getStack(b);
-            if (back.isEmpty() || !isKeyItem(back)) continue;
-            int target = designatedHotbarSlot(mc, back);
-            if (target < 0) continue;
-            if (moveRawToHotbar(handler, b, target)) {
-                moves++;
-                sortMoves++;
-            }
+            if (back.isEmpty() || !this.isKeyItem(back) || (target = this.designatedHotbarSlot(mc, back)) < 0 || !this.moveRawToHotbar(handler, b, target)) continue;
+            ++moves;
+            ++this.sortMoves;
         }
         if (moves > 0) {
-            delay = opts.actionDelay();
+            this.delay = this.opts.actionDelay();
             return;
         }
-        if (opts.debug()) FOElytraLog.debug("物品栏整理完成（快捷栏：0 镐 / 1 剑 / 2 末影箱 / 3-4 图腾 / 5 食物）");
-        next(State.EVALUATE, opts.actionDelay());
+        if (this.opts.debug()) {
+            FOElytraLog.debug("\u7269\u54c1\u680f\u6574\u7406\u5b8c\u6210\uff08\u5feb\u6377\u680f\uff1a0 \u9550 / 1 \u5251 / 2 \u672b\u5f71\u7bb1 / 3-4 \u56fe\u817e / 5 \u98df\u7269\uff09", new Object[0]);
+        }
+        this.next(State.EVALUATE, this.opts.actionDelay());
     }
+
     private boolean isKeyItem(ItemStack s) {
-        if (s.isEmpty()) return false;
-        return isPickaxe(s) || isSword(s) || s.isOf(Items.ENDER_CHEST)
-            || s.isOf(Items.TOTEM_OF_UNDYING) || matchesFood(s);
+        if (s.isEmpty()) {
+            return false;
+        }
+        return this.isPickaxe(s) || this.isSword(s) || s.isOf(Items.ENDER_CHEST) || s.isOf(Items.TOTEM_OF_UNDYING) || this.matchesFood(s);
     }
+
     private int designatedHotbarSlot(MinecraftClient mc, ItemStack s) {
-        if (isPickaxe(s)) return isPickaxe(mc.player.getInventory().getStack(0)) ? -1 : 0;
-        if (isSword(s)) return isSword(mc.player.getInventory().getStack(1)) ? -1 : 1;
-        if (s.isOf(Items.ENDER_CHEST)) return mc.player.getInventory().getStack(2).isOf(Items.ENDER_CHEST) ? -1 : 2;
+        if (this.isPickaxe(s)) {
+            return this.isPickaxe(mc.player.getInventory().getStack(0)) ? -1 : 0;
+        }
+        if (this.isSword(s)) {
+            return this.isSword(mc.player.getInventory().getStack(1)) ? -1 : 1;
+        }
+        if (s.isOf(Items.ENDER_CHEST)) {
+            return mc.player.getInventory().getStack(2).isOf(Items.ENDER_CHEST) ? -1 : 2;
+        }
         if (s.isOf(Items.TOTEM_OF_UNDYING)) {
-            if (!mc.player.getInventory().getStack(3).isOf(Items.TOTEM_OF_UNDYING)) return 3;
-            if (!mc.player.getInventory().getStack(4).isOf(Items.TOTEM_OF_UNDYING)) return 4;
+            if (!mc.player.getInventory().getStack(3).isOf(Items.TOTEM_OF_UNDYING)) {
+                return 3;
+            }
+            if (!mc.player.getInventory().getStack(4).isOf(Items.TOTEM_OF_UNDYING)) {
+                return 4;
+            }
             return -1;
         }
-        if (matchesFood(s)) {
+        if (this.matchesFood(s)) {
             ItemStack slot5 = mc.player.getInventory().getStack(5);
-            return (slot5.isEmpty() || !slot5.isOf(s.getItem())) ? 5 : -1;
+            return slot5.isEmpty() || !slot5.isOf(s.getItem()) ? 5 : -1;
         }
         return -1;
     }
+
     private boolean hotbarHasKeyItem(MinecraftClient mc, int slot) {
-        return isKeyItem(mc.player.getInventory().getStack(slot));
+        return this.isKeyItem(mc.player.getInventory().getStack(slot));
     }
+
     private boolean swapRaw(ScreenHandler handler, int rawA, int rawB) {
         InvHelper.click(handler, rawA, 0, SlotActionType.PICKUP);
         InvHelper.click(handler, rawB, 0, SlotActionType.PICKUP);
         InvHelper.click(handler, rawA, 0, SlotActionType.PICKUP);
         return true;
     }
+
     private boolean moveRawToHotbar(ScreenHandler handler, int invIndex, int hotbarSlot) {
-        if (hotbarSlot < 0 || hotbarSlot > 8) return false;
+        if (hotbarSlot < 0 || hotbarSlot > 8) {
+            return false;
+        }
         InvHelper.click(handler, invIndex, 0, SlotActionType.PICKUP);
         InvHelper.click(handler, 36 + hotbarSlot, 0, SlotActionType.PICKUP);
         InvHelper.click(handler, invIndex, 0, SlotActionType.PICKUP);
         return true;
     }
+
     private boolean isPickaxe(ItemStack s) {
-        return s.isOf(Items.NETHERITE_PICKAXE) || s.isOf(Items.DIAMOND_PICKAXE)
-            || s.isOf(Items.IRON_PICKAXE) || s.isOf(Items.STONE_PICKAXE)
-            || s.isOf(Items.WOODEN_PICKAXE) || s.isOf(Items.GOLDEN_PICKAXE);
+        return s.isOf(Items.NETHERITE_PICKAXE) || s.isOf(Items.DIAMOND_PICKAXE) || s.isOf(Items.IRON_PICKAXE) || s.isOf(Items.STONE_PICKAXE) || s.isOf(Items.WOODEN_PICKAXE) || s.isOf(Items.GOLDEN_PICKAXE);
     }
+
     private boolean isSword(ItemStack s) {
-        return s.isOf(Items.NETHERITE_SWORD) || s.isOf(Items.DIAMOND_SWORD)
-            || s.isOf(Items.IRON_SWORD) || s.isOf(Items.STONE_SWORD)
-            || s.isOf(Items.WOODEN_SWORD) || s.isOf(Items.GOLDEN_SWORD)
-            || s.isOf(Items.TRIDENT);
+        return s.isOf(Items.NETHERITE_SWORD) || s.isOf(Items.DIAMOND_SWORD) || s.isOf(Items.IRON_SWORD) || s.isOf(Items.STONE_SWORD) || s.isOf(Items.WOODEN_SWORD) || s.isOf(Items.GOLDEN_SWORD) || s.isOf(Items.TRIDENT);
     }
+
     private boolean isGoodElytra(ItemStack s) {
-        return s.getDamage() < 15 && ItemHelper.hasEnchantment(s, Enchantments.UNBREAKING, 3);
+        return s.getDamage() < 15 && ItemHelper.hasEnchantment(s, (RegistryKey<Enchantment>)Enchantments.UNBREAKING, 3);
     }
+
     private boolean isJunkNow(ItemStack s) {
-        if (s.isEmpty()) return true;
-        if (s.isOf(Items.FIREWORK_ROCKET)) return false;
-        if (s.isOf(Items.EXPERIENCE_BOTTLE)) return false;
-        if (s.isOf(Items.TOTEM_OF_UNDYING)) return false;
-        if (s.isOf(Items.ENDER_CHEST)) return false;
-        if (matchesFood(s)) return false;
-        if (isPickaxe(s) || isSword(s)) return false;
-        if (ItemHelper.isShulkerBox(s)) return false;
-        if (s.isOf(Items.ELYTRA)) return !isGoodElytra(s);
+        if (s.isEmpty()) {
+            return true;
+        }
+        if (s.isOf(Items.FIREWORK_ROCKET)) {
+            return false;
+        }
+        if (s.isOf(Items.EXPERIENCE_BOTTLE)) {
+            return false;
+        }
+        if (s.isOf(Items.TOTEM_OF_UNDYING)) {
+            return false;
+        }
+        if (s.isOf(Items.ENDER_CHEST)) {
+            return false;
+        }
+        if (this.matchesFood(s)) {
+            return false;
+        }
+        if (this.isFoodPriority(s)) {
+            return false;
+        }
+        if (this.isPickaxe(s) || this.isSword(s)) {
+            return false;
+        }
+        if (ItemHelper.isShulkerBox(s)) {
+            return false;
+        }
+        if (s.isOf(Items.ELYTRA)) {
+            return !this.isGoodElytra(s);
+        }
         return true;
     }
+
     private void evaluate(MinecraftClient mc) {
-        computeNeeds(mc);
-        int hotbarSlot = findEnderChestHotbar();
+        this.computeNeeds(mc);
+        int hotbarSlot = this.findEnderChestHotbar();
         if (hotbarSlot < 0) {
-            for (int i = 9; i < 36; i++) {
-                if (mc.player.getInventory().getStack(i).isOf(Items.ENDER_CHEST)) {
-                    int empty = InvHelper.findEmptyHotbarSlot();
-                    if (empty < 0) empty = 8;
-                    InvHelper.moveInvToHotbar(i, empty);
-                    hotbarSlot = empty;
-                    break;
+            for (int i = 9; i < 36; ++i) {
+                if (!mc.player.getInventory().getStack(i).isOf(Items.ENDER_CHEST)) continue;
+                int empty = InvHelper.findEmptyHotbarSlot();
+                if (empty < 0) {
+                    empty = 8;
                 }
+                InvHelper.moveInvToHotbar(i, empty);
+                hotbarSlot = empty;
+                break;
             }
         }
         if (hotbarSlot < 0) {
-            fail("背包里没有末影箱，无法补给");
+            this.fail("\u80cc\u5305\u91cc\u6ca1\u6709\u672b\u5f71\u7bb1\uff0c\u65e0\u6cd5\u8865\u7ed9");
             return;
         }
-        ecHotbarSlot = hotbarSlot;
-        int total = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
-        if (total < opts.minEnderChests()) {
-            FOElytraLog.warn("末影箱只剩 %d 个（建议至少 %d 个）", total, opts.minEnderChests());
+        this.ecHotbarSlot = hotbarSlot;
+        int total = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST);
+        if (total < this.opts.minEnderChests()) {
+            FOElytraLog.warn("\u672b\u5f71\u7bb1\u53ea\u5269 %d \u4e2a\uff08\u5efa\u8bae\u81f3\u5c11 %d \u4e2a\uff09", total, this.opts.minEnderChests());
         }
-        if (needs.isEmpty()) {
-            lastMessage = "无需补给";
-            FOElytraLog.info("当前物资已达标，跳过补给");
-            next(State.DONE, 0);
+        if (this.needs.isEmpty()) {
+            this.lastMessage = "\u65e0\u9700\u8865\u7ed9";
+            FOElytraLog.info("\u5f53\u524d\u7269\u8d44\u5df2\u8fbe\u6807\uff0c\u8df3\u8fc7\u8865\u7ed9", new Object[0]);
+            this.next(State.DONE, 0);
             return;
         }
-        if (!opts.autoPlaceEnderChest()) {
-            fail("未开启「自动放置末影箱」，且附近没有可用的末影箱");
+        if (!this.opts.autoPlaceEnderChest()) {
+            this.fail("\u672a\u5f00\u542f\u300c\u81ea\u52a8\u653e\u7f6e\u672b\u5f71\u7bb1\u300d\uff0c\u4e14\u9644\u8fd1\u6ca1\u6709\u53ef\u7528\u7684\u672b\u5f71\u7bb1");
             return;
         }
-        fireTargets = scanNearbyFire(mc, 3);
-        if (!fireTargets.isEmpty()) {
-            FOElytraLog.tip("先把身边的火打掉（%d 处）再补给", fireTargets.size());
-            next(State.PUT_OUT_FIRE, 0);
+        this.fireTargets = this.scanNearbyFire(mc, 3);
+        if (!this.fireTargets.isEmpty()) {
+            FOElytraLog.tip("\u5148\u628a\u8eab\u8fb9\u7684\u706b\u6253\u6389\uff08%d \u5904\uff09\u518d\u8865\u7ed9", this.fireTargets.size());
+            this.next(State.PUT_OUT_FIRE, 0);
             return;
         }
-        next(State.PLACE_EC, opts.actionDelay());
+        this.next(State.PLACE_EC, this.opts.actionDelay());
     }
+
     private List<BlockPos> scanNearbyFire(MinecraftClient mc, int radius) {
-        List<BlockPos> fire = new ArrayList<>();
+        ArrayList<BlockPos> fire = new ArrayList<BlockPos>();
         BlockPos origin = mc.player.getBlockPos();
-        for (int i = -radius; i <= radius; i++) {
-            for (int j = -radius; j <= radius; j++) {
-                for (int k = -radius; k <= radius; k++) {
+        for (int i = -radius; i <= radius; ++i) {
+            for (int j = -radius; j <= radius; ++j) {
+                for (int k = -radius; k <= radius; ++k) {
                     BlockPos target = origin.add(i, j, k);
-                    if (mc.world.getBlockState(target).getBlock() == Blocks.FIRE) fire.add(target);
+                    if (mc.world.getBlockState(target).getBlock() != Blocks.FIRE) continue;
+                    fire.add(target);
                 }
             }
         }
         return fire;
     }
+
     private void putOutFire(MinecraftClient mc) {
-        fireTargets.removeIf(p -> mc.world.getBlockState(p).getBlock() != Blocks.FIRE);
-        if (fireTargets.isEmpty()) {
-            next(State.PLACE_EC, opts.actionDelay());
+        this.fireTargets.removeIf(p -> mc.world.getBlockState(p).getBlock() != Blocks.FIRE);
+        if (this.fireTargets.isEmpty()) {
+            this.next(State.PLACE_EC, this.opts.actionDelay());
             return;
         }
-        BlockPos pos = fireTargets.remove(0);
-        InvHelper.lookAt(mc.player, Vec3d.ofCenter(pos));
+        BlockPos pos = this.fireTargets.remove(0);
+        InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)pos));
         if (mc.interactionManager != null) {
             mc.interactionManager.attackBlock(pos, Direction.UP);
         }
-        delay = 1;
+        this.delay = 1;
     }
+
     private void beginPlaceScan() {
-        placeCandidates.clear();
-        placeCandidateIndex = 0;
-        placeCandidateTotal = 0;
-        placeRounds = 0;
-        placeEmptyReason = "";
+        this.placeCandidates.clear();
+        this.placeCandidateIndex = 0;
+        this.placeCandidateTotal = 0;
+        this.placeRounds = 0;
+        this.placeEmptyReason = "";
+        this.placeLavaSkipped = 0;
     }
+
     private BlockPos nextPlaceCandidate(MinecraftClient mc, String what) {
+        ArrayList<BlockPos> wet;
+        List<BlockPos> free;
+        List<BlockPos> all;
         while (true) {
-            if (!placeCandidates.isEmpty()) {
-                BlockPos p = placeCandidates.remove(0);
-                if (placeRejected.contains(p)) continue;
-                placeCandidateIndex++;
-                return p;
+            if (!this.placeCandidates.isEmpty()) {
+                BlockPos p2 = this.placeCandidates.remove(0);
+                if (this.placeRejected.contains(p2)) continue;
+                ++this.placeCandidateIndex;
+                return p2;
             }
-            if (placeRounds >= PLACE_CANDIDATE_ROUNDS) return null;
-            placeRounds++;
-            List<BlockPos> all = InvHelper.findPlaceTargets(mc.player, opts.placeRadius(), true);
-            List<BlockPos> free = InvHelper.findPlaceTargets(mc.player, opts.placeRadius(), false);
-            placeCandidates.addAll(free);
-            placeCandidates.removeIf(placeRejected::contains);
-            placeCandidateIndex = 0;
-            placeCandidateTotal = placeCandidates.size();
-            if (placeCandidates.isEmpty()) {
-                int blocked = all.size() - free.size();
-                StringBuilder blockedList = new StringBuilder();
-                for (BlockPos p : all) {
-                    if (free.contains(p)) continue;
-                    if (blockedList.length() > 0) blockedList.append('、');
-                    blockedList.append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
-                    if (blockedList.length() > 120) {
-                        blockedList.append("…");
-                        break;
-                    }
-                }
-                if (free.isEmpty()) {
-                    placeEmptyReason = all.isEmpty()
-                        ? "附近没有能放" + what + "的位置（半径 " + opts.placeRadius() + " 都是挡住/悬空的）"
-                        : "周围没有能放" + what + "的位置（你站的位置挡住了）";
-                } else {
-                    placeEmptyReason = "能放" + what + "的位置都试过了（可用 " + free.size() + " 个，已拉黑 " + placeRejected.size() + " 个）";
-                }
-                FOElytraLog.detail("摆放候选用尽：可用 %d 个｜被自己碰撞箱挡住 %d 个（%s）｜已拉黑 %d 个｜半径 %d",
-                    free.size(), blocked, blockedList.length() == 0 ? "无" : blockedList, placeRejected.size(), opts.placeRadius());
+            if (this.placeRounds >= 2) {
                 return null;
             }
+            ++this.placeRounds;
+            all = InvHelper.findPlaceTargets((PlayerEntity)mc.player, this.opts.placeRadius(), true);
+            free = InvHelper.findPlaceTargets((PlayerEntity)mc.player, this.opts.placeRadius(), false);
+            this.placeCandidates.addAll(free);
+            this.placeCandidates.removeIf(this.placeRejected::contains);
+            wet = new ArrayList<BlockPos>();
+            ArrayList<BlockPos> wetFinal = wet;
+            this.placeCandidates.removeIf(p -> {
+                if (!SupplyTask.isLavaDanger(mc, p)) {
+                    return false;
+                }
+                wetFinal.add((BlockPos)p);
+                return true;
+            });
+            if (!wet.isEmpty()) {
+                this.placeRejected.addAll(wet);
+                this.placeLavaSkipped += wet.size();
+                FOElytraLog.detail("\u7b5b\u6389 %d \u4e2a\u5ca9\u6d46\u4f4d\u7f6e\uff08\u4e0b\u65b9 %d \u683c\u5185\u6709\u5ca9\u6d46\u6216\u7d27\u6328\u5ca9\u6d46\uff09\uff1a%s", wet.size(), 2, SupplyTask.posList(wet));
+            }
+            ArrayList<BlockPos> dry = new ArrayList<BlockPos>();
+            ArrayList<BlockPos> watery = new ArrayList<BlockPos>();
+            for (BlockPos p3 : this.placeCandidates) {
+                if (SupplyTask.isWaterNear(mc, p3)) {
+                    watery.add(p3);
+                    continue;
+                }
+                dry.add(p3);
+            }
+            if (!watery.isEmpty() && !dry.isEmpty()) {
+                this.placeCandidates.clear();
+                this.placeCandidates.addAll(dry);
+                this.placeCandidates.addAll(watery);
+                FOElytraLog.detail("\u5019\u9009\u91cc\u6709\u6c34\uff0c\u4f18\u5148\u6311\u4e0d\u542b\u6c34\u7684\u4f4d\u7f6e\uff08\u6709\u6c34\u7684 %d \u4e2a\u6392\u5728\u540e\u9762\uff0c\u4e0d\u542b\u6c34\u7684 %d \u4e2a\uff09", watery.size(), dry.size());
+            }
+            this.placeCandidateIndex = 0;
+            this.placeCandidateTotal = this.placeCandidates.size();
+            if (this.placeCandidates.isEmpty()) break;
         }
+        int blocked = all.size() - free.size();
+        StringBuilder blockedList = new StringBuilder();
+        for (BlockPos p4 : all) {
+            if (free.contains(p4)) continue;
+            if (blockedList.length() > 0) {
+                blockedList.append('\u3001');
+            }
+            blockedList.append(p4.getX()).append(',').append(p4.getY()).append(',').append(p4.getZ());
+            if (blockedList.length() <= 120) continue;
+            blockedList.append("\u2026");
+            break;
+        }
+        this.placeEmptyReason = free.isEmpty() ? (all.isEmpty() ? "\u9644\u8fd1\u6ca1\u6709\u80fd\u653e" + what + "\u7684\u4f4d\u7f6e\uff08\u534a\u5f84 " + this.opts.placeRadius() + " \u90fd\u662f\u6321\u4f4f/\u60ac\u7a7a\u7684\uff09" : "\u5468\u56f4\u6ca1\u6709\u80fd\u653e" + what + "\u7684\u4f4d\u7f6e\uff08\u4f60\u7ad9\u7684\u4f4d\u7f6e\u6321\u4f4f\u4e86\uff09") : (wet.size() >= free.size() ? "\u80fd\u653e" + what + "\u7684\u4f4d\u7f6e\u4e0b\u65b9\u662f\u5ca9\u6d46\u6216\u7d27\u6328\u5ca9\u6d46\uff08\u672c\u8f6e\u7b5b\u6389 " + wet.size() + " \u4e2a\uff09\uff0c\u6ca1\u6709\u5b89\u5168\u4f4d\u7f6e" : "\u80fd\u653e" + what + "\u7684\u4f4d\u7f6e\u90fd\u8bd5\u8fc7\u4e86\uff08\u53ef\u7528 " + free.size() + " \u4e2a\uff0c\u5df2\u62c9\u9ed1 " + this.placeRejected.size() + " \u4e2a\uff09");
+        FOElytraLog.detail("\u6446\u653e\u5019\u9009\u7528\u5c3d\uff1a\u53ef\u7528 %d \u4e2a\uff5c\u88ab\u81ea\u5df1\u78b0\u649e\u7bb1\u6321\u4f4f %d \u4e2a\uff08%s\uff09\uff5c\u5ca9\u6d46\u7b5b\u6389 %d \u4e2a\uff08\u7d2f\u8ba1 %d\uff09\uff5c\u5df2\u62c9\u9ed1 %d \u4e2a\uff5c\u534a\u5f84 %d", free.size(), blocked, blockedList.length() == 0 ? "\u65e0" : blockedList, wet.size(), this.placeLavaSkipped, this.placeRejected.size(), this.opts.placeRadius());
+        return null;
     }
+
     private void rejectPlaceCandidate(BlockPos pos, String what) {
-        if (pos != null) placeRejected.add(pos.toImmutable());
-        BlockPos next = null;
-        for (BlockPos p : placeCandidates) {
-            if (!placeRejected.contains(p)) { next = p; break; }
+        if (pos != null) {
+            this.placeRejected.add(pos.toImmutable());
         }
-        FOElytraLog.detail("换位置放%s：%d,%d,%d 被拒 → 改试 %s（候选 %d/%d）",
-            what, pos == null ? 0 : pos.getX(), pos == null ? 0 : pos.getY(), pos == null ? 0 : pos.getZ(),
-            next == null ? "重新扫一遍候选" : next.getX() + "," + next.getY() + "," + next.getZ(),
-            placeCandidateIndex, placeCandidateTotal);
+        BlockPos next = null;
+        for (BlockPos p : this.placeCandidates) {
+            if (this.placeRejected.contains(p)) continue;
+            next = p;
+            break;
+        }
+        FOElytraLog.detail("\u6362\u4f4d\u7f6e\u653e%s\uff1a%d,%d,%d \u88ab\u62d2 \u2192 \u6539\u8bd5 %s\uff08\u5019\u9009 %d/%d\uff09", what, pos == null ? 0 : pos.getX(), pos == null ? 0 : pos.getY(), pos == null ? 0 : pos.getZ(), next == null ? "\u91cd\u65b0\u626b\u4e00\u904d\u5019\u9009" : next.getX() + "," + next.getY() + "," + next.getZ(), this.placeCandidateIndex, this.placeCandidateTotal);
     }
+
+    private static boolean isLavaDanger(MinecraftClient mc, BlockPos pos) {
+        return SupplyTask.isFluidNear(mc, pos, true);
+    }
+
+    private static boolean isWaterNear(MinecraftClient mc, BlockPos pos) {
+        return SupplyTask.isFluidNear(mc, pos, false);
+    }
+
+    private static boolean isFluidNear(MinecraftClient mc, BlockPos pos, boolean lava) {
+        if (mc == null || mc.world == null || pos == null) {
+            return false;
+        }
+        for (int d = 1; d <= 2; ++d) {
+            if (!SupplyTask.fluidMatches(mc, pos.down(d), lava)) continue;
+            return true;
+        }
+        for (Direction dir : Direction.values()) {
+            if (dir == Direction.UP || dir == Direction.DOWN || !SupplyTask.fluidMatches(mc, pos.offset(dir), lava)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean fluidMatches(MinecraftClient mc, BlockPos pos, boolean lava) {
+        FluidState fluid = mc.world.getFluidState(pos);
+        if (fluid == null || fluid.isEmpty()) {
+            return false;
+        }
+        if (lava) {
+            return fluid.getFluid() == Fluids.LAVA || fluid.getFluid() == Fluids.FLOWING_LAVA;
+        }
+        return fluid.getFluid() == Fluids.WATER || fluid.getFluid() == Fluids.FLOWING_WATER;
+    }
+
+    private static String posList(List<BlockPos> list) {
+        StringBuilder sb = new StringBuilder();
+        for (BlockPos p : list) {
+            if (sb.length() > 0) {
+                sb.append('\u3001');
+            }
+            sb.append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
+            if (sb.length() <= 90) continue;
+            sb.append("\u2026");
+            break;
+        }
+        return sb.length() == 0 ? "\u65e0" : sb.toString();
+    }
+
+    private static String posText(BlockPos p) {
+        return p == null ? "\u65e0" : p.getX() + "," + p.getY() + "," + p.getZ();
+    }
+
+    private boolean walkToBlockCenterTick(MinecraftClient mc) {
+        if (mc.player == null) {
+            return false;
+        }
+        BlockPos foot = mc.player.getBlockPos();
+        double dx = (double)foot.getX() + 0.5 - mc.player.getX();
+        double dz = (double)foot.getZ() + 0.5 - mc.player.getZ();
+        if (Math.abs(dx) < 0.2 && Math.abs(dz) < 0.2) {
+            if (this.walkCenterTicks > 0) {
+                FOElytraLog.detail("\u5df2\u7ecf\u7ad9\u5230\u811a\u4e0b\u65b9\u5757\u4e2d\u5fc3\u4e86\uff08\u8fd8\u5dee %.2f/%.2f \u683c\uff09\uff0c\u53ef\u4ee5\u653e\u7bb1\u5b50", dx, dz);
+            }
+            this.walkCenterTicks = 0;
+            PlayerAction.pressForward(false);
+            return false;
+        }
+        if (this.walkCenterTicks == 0) {
+            FOElytraLog.detail("\u5148\u8d70\u5230\u811a\u4e0b\u65b9\u5757\u4e2d\u5fc3\u518d\u653e\u7bb1\u5b50\uff08\u8fd8\u5dee %.2f/%.2f \u683c\uff09", dx, dz);
+        }
+        ++this.walkCenterTicks;
+        if (this.walkCenterTicks > 40) {
+            FOElytraLog.detail("\u8d70\u4e2d\u5fc3\u8d70\u4e0d\u5230\u4f4d\uff08\u5df2\u7ecf %d tick\uff0c\u8fd8\u5dee %.2f/%.2f \u683c\uff09\uff0c\u5c31\u5728\u539f\u5730\u653e\u7bb1\u5b50", this.walkCenterTicks, dx, dz);
+            this.walkCenterTicks = 0;
+            PlayerAction.pressForward(false);
+            return false;
+        }
+        mc.player.setYaw((float)Math.toDegrees(Math.atan2(-dx, dz)));
+        PlayerAction.pressForward(true);
+        return true;
+    }
+
+    private int extinguishFireNearby(MinecraftClient mc) {
+        if (mc.world == null || mc.player == null || mc.interactionManager == null) {
+            return 0;
+        }
+        BlockPos base = mc.player.getBlockPos();
+        for (int dx = -3; dx <= 3; ++dx) {
+            for (int dy = -3; dy <= 3; ++dy) {
+                for (int dz = -3; dz <= 3; ++dz) {
+                    BlockPos p = base.add(dx, dy, dz);
+                    if (!mc.world.getBlockState(p).isOf(Blocks.FIRE)) continue;
+                    try {
+                        mc.interactionManager.attackBlock(p, Direction.UP);
+                        mc.player.swingHand(Hand.MAIN_HAND);
+                    }
+                    catch (Throwable t) {
+                        FOElytraLog.detailError("extinguishFireNearby", t);
+                        return 0;
+                    }
+                    FOElytraLog.detail("\u8865\u7ed9\u524d\u5148\u6253\u706d\u8eab\u8fb9\u7684\u706b\uff08%s\uff09", SupplyTask.posText(p));
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+
+    private boolean fireballNearby(MinecraftClient mc) {
+        if (mc.world == null || mc.player == null) {
+            return false;
+        }
+        try {
+            Box box = new Box(mc.player.getBlockPos()).expand(12.0);
+            List list = mc.world.getEntitiesByClass(FireballEntity.class, box, e -> e != null && e.isAlive());
+            return !list.isEmpty();
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("fireballNearby", t);
+            return false;
+        }
+    }
+
     private void placeEnderChest(MinecraftClient mc) {
-        beginPlaceScan();
+        BlockPos cand;
+        if (this.extinguishFireNearby(mc) > 0) {
+            return;
+        }
+        if (this.walkToBlockCenterTick(mc)) {
+            return;
+        }
+        this.beginPlaceScan();
         BlockPos pos = null;
-        while (true) {
-            BlockPos cand = nextPlaceCandidate(mc, "末影箱");
-            if (cand == null) break;
-            if (InvHelper.placeBlock(cand, ecHotbarSlot)) {
+        while ((cand = this.nextPlaceCandidate(mc, "\u672b\u5f71\u7bb1")) != null) {
+            if (InvHelper.placeBlock(cand, this.ecHotbarSlot)) {
                 pos = cand;
                 break;
             }
-            rejectPlaceCandidate(cand, "末影箱");
+            this.rejectPlaceCandidate(cand, "\u672b\u5f71\u7bb1");
         }
         if (pos == null) {
-            fail(placeEmptyReason.isEmpty() ? "附近没有合适的位置放置末影箱（半径 " + opts.placeRadius() + "）" : placeEmptyReason);
+            this.fail((String)(this.placeEmptyReason.isEmpty() ? "\u9644\u8fd1\u6ca1\u6709\u5408\u9002\u7684\u4f4d\u7f6e\u653e\u7f6e\u672b\u5f71\u7bb1\uff08\u534a\u5f84 " + this.opts.placeRadius() + "\uff09" : this.placeEmptyReason));
             return;
         }
-        ItemStack stack = mc.player.getInventory().getStack(ecHotbarSlot);
-        ecTitle = stack.isEmpty() ? "末影箱" : stack.getName().getString();
-        ecPos = pos;
-        ecBlockCountAfterPlace = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
-        FOElytraLog.tip("已放置末影箱于 %d,%d,%d", pos.getX(), pos.getY(), pos.getZ());
-        next(State.OPEN_EC, opts.actionDelay() * 2);
+        ItemStack stack = mc.player.getInventory().getStack(this.ecHotbarSlot);
+        this.ecTitle = stack.isEmpty() ? "\u672b\u5f71\u7bb1" : stack.getName().getString();
+        this.ecPos = pos;
+        this.ecBlockCountAfterPlace = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST);
+        FOElytraLog.tip("\u5df2\u653e\u7f6e\u672b\u5f71\u7bb1\u4e8e %d,%d,%d", pos.getX(), pos.getY(), pos.getZ());
+        this.next(State.OPEN_EC, this.opts.actionDelay() * 2);
     }
+
     private void openEnderChest(MinecraftClient mc) {
-        if (ecPos == null) {
-            fail("末影箱坐标丢失");
+        this.noSneak("\u5f00\u672b\u5f71\u7bb1\u524d");
+        if (this.ecPos == null) {
+            this.fail("\u672b\u5f71\u7bb1\u5750\u6807\u4e22\u5931");
             return;
         }
-        if (mc.world.getBlockState(ecPos).isAir()) {
-            fail("末影箱不见了（被破坏或被推走）");
+        if (mc.world.getBlockState(this.ecPos).isAir()) {
+            this.fail("\u672b\u5f71\u7bb1\u4e0d\u89c1\u4e86\uff08\u88ab\u7834\u574f\u6216\u88ab\u63a8\u8d70\uff09");
             return;
         }
-        InvHelper.interactBlock(ecPos);
-        ecScreenWaitTicks = 0;
-        next(pendingReturn ? State.WAIT_EC_RETURN : State.WAIT_EC, 1);
+        InvHelper.interactBlock(this.ecPos);
+        this.waitTicks = 0;
+        this.next(this.pendingReturn ? State.WAIT_EC_RETURN : State.WAIT_EC, 1);
     }
+
     private void waitEnderChest(MinecraftClient mc, State onSuccess) {
-        HandledScreen<?> screen = InvHelper.currentContainerScreen(ecTitle);
+        HandledScreen<?> screen = InvHelper.currentContainerScreen(this.ecTitle);
         if (screen != null) {
-            openRetries = 0;
-            next(onSuccess, opts.actionDelay());
+            this.openRetries = 0;
+            if (onSuccess == State.RETURN_SH) {
+                this.returnAttempt = -1;
+                this.returnVerifyTicks = 0;
+            }
+            this.next(onSuccess, this.opts.actionDelay());
             return;
         }
-        if (ecScreenWaitTicks++ > SCREEN_WAIT_TICKS) {
-            ecScreenWaitTicks = 0;
-            if (openRetries++ >= OPEN_RETRY) {
-                fail("末影箱界面打不开（标题不匹配或服务器拦截）");
+        if (this.waitTicks++ > 40) {
+            this.waitTicks = 0;
+            if (this.openRetries++ >= 3) {
+                this.fail("\u672b\u5f71\u7bb1\u754c\u9762\u6253\u4e0d\u5f00\uff08\u6807\u9898\u4e0d\u5339\u914d\u6216\u670d\u52a1\u5668\u62e6\u622a\uff09");
                 return;
             }
-            next(State.OPEN_EC, opts.actionDelay());
+            this.next(State.OPEN_EC, this.opts.actionDelay());
         }
     }
-    private int findSingleBoxCoveringAll(MinecraftClient mc, boolean xpMode) {
-        int best = -1;
-        int bestSurplus = 0;
-        for (int i = 0; i < scanned.size(); i++) {
-            ShulkerScanner.Entry e = scanned.get(i);
-            boolean okFw = e.fireworkStacks() >= needs.fireworkStacks;
-            boolean okSecond = xpMode ? e.xpBottles() >= needs.xpBottles : e.elytra() >= needs.elytra;
-            boolean okFood = e.food() >= needs.food;
-            boolean okTotem = e.totems() >= needs.totems;
-            if (!(okFw && okSecond && okFood && okTotem)) continue;
-            if (e.fireworkStacks() + e.xpBottles() + e.food() + e.totems() + e.elytra() <= 0) continue;
-            int surplus = (e.fireworkStacks() - needs.fireworkStacks)
-                + (xpMode ? e.xpBottles() - needs.xpBottles : e.elytra() - needs.elytra)
-                + (e.food() - needs.food) + (e.totems() - needs.totems);
-            if (best < 0 || surplus > bestSurplus) {
-                best = i;
-                bestSurplus = surplus;
-            }
-        }
-        return best;
-    }
-    private List<ShulkerScanner.Entry> filterBoxes(List<ShulkerScanner.Entry> found) {
-        List<ShulkerScanner.Entry> ok = new ArrayList<>();
-        List<Integer> overLimit = new ArrayList<>();
-        for (ShulkerScanner.Entry e : found) {
-            if (boxBlacklist.contains(e.slot())) {
-                FOElytraLog.detail("跳过盒子 槽位%d（上次没取到东西，本次补给不再选它）", e.slot());
-                continue;
-            }
-            int picks = boxPickCount.getOrDefault(e.slot(), 0);
-            if (picks >= SHULKER_MAX_PICKS_PER_BOX) {
-                FOElytraLog.detail("跳过盒子 槽位%d（本盒已取 %d 次）", e.slot(), picks);
-                overLimit.add(e.slot());
-                continue;
-            }
-            ok.add(e);
-        }
-        if (ok.isEmpty() && !overLimit.isEmpty()) {
-            FOElytraLog.detail("只剩这几个盒子可用（都取满 %d 次了，这次允许重来）：%s",
-                SHULKER_MAX_PICKS_PER_BOX, overLimit);
-            boxPickCount.keySet().removeAll(overLimit);
-            for (ShulkerScanner.Entry e : found) {
-                if (!boxBlacklist.contains(e.slot())) ok.add(e);
-            }
-        }
-        return ok;
-    }
-    private int findFoodBox(ScreenHandler handler, List<ShulkerScanner.Entry> entries) {
-        List<Item> prio = opts.foodPriority();
-        if (prio == null || prio.isEmpty()) return ShulkerScanner.findFoodRichest(entries);
-        int best = -1;
-        int bestRank = Integer.MAX_VALUE;
-        int bestCount = 0;
-        for (int i = 0; i < entries.size(); i++) {
-            int rank = Integer.MAX_VALUE;
-            int count = 0;
-            for (int r = 0; r < prio.size(); r++) {
-                int n = countFoodInBox(handler, entries.get(i).slot(), prio.get(r));
-                if (n > 0) {
-                    rank = r;
-                    count = n;
-                    break;
-                }
-            }
-            if (rank < bestRank || (rank == bestRank && count > bestCount)) {
-                bestRank = rank;
-                bestCount = count;
-                best = i;
-            }
-        }
-        if (best < 0 || bestRank == Integer.MAX_VALUE) {
-            FOElytraLog.detail("优先级食物在哪个盒子里都没有，改按「食物总量最多」挑盒子");
-            return ShulkerScanner.findFoodRichest(entries);
-        }
-        FOElytraLog.detail("按优先级挑食物盒：盒[%d] %s（命中最靠前的优先级第 %d 位，%d 个）",
-            entries.get(best).slot(), entries.get(best).title(), bestRank + 1, bestCount);
-        return best;
-    }
-    private int countFoodInBox(ScreenHandler handler, int rawSlot, Item item) {
-        if (handler == null || item == null || rawSlot < 0 || rawSlot >= handler.slots.size()) return 0;
+
+    private int countPlanFireworkBoxes() {
         int n = 0;
-        for (ItemStack s : ItemHelper.shulkerContents(handler.slots.get(rawSlot).getStack())) {
-            if (!s.isEmpty() && s.isOf(item)) n += s.getCount();
+        for (PlanItem p : this.plan) {
+            if (p.fireworkStacks() <= 0) continue;
+            ++n;
         }
         return n;
     }
+
+    private int countPlanSecondBoxes() {
+        int n = 0;
+        for (PlanItem p : this.plan) {
+            if (p.second() <= 0) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private int countPlanGapBoxes() {
+        int n = 0;
+        for (PlanItem p : this.plan) {
+            if (p.fireworkStacks() > 0 || p.second() > 0) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private void warnUnopenedPlanBoxes(String where) {
+        if (this.plan.isEmpty()) {
+            return;
+        }
+        ArrayList<Integer> missed = new ArrayList<Integer>();
+        for (PlanItem p : this.plan) {
+            if (this.planOpened.contains(p.rawSlot())) continue;
+            missed.add(p.rawSlot());
+        }
+        if (missed.isEmpty()) {
+            return;
+        }
+        FOElytraLog.warn("%s\uff1a\u672c\u8f6e\u8ba1\u5212\u91cc\u6709 %d \u4e2a\u76d2\u5b50\u59cb\u7ec8\u6ca1\u88ab\u6253\u5f00\u53d6\u7269\uff08\u69fd\u4f4d %s\uff0c\u8ba1\u5212 %d \u4e2a\uff09\u2192 \u8fd9\u4e9b\u9700\u6c42\u6ca1\u52a8\u8fc7\uff0c\u4e0d\u8981\u5f53\u6210\u300c\u76d2\u5b50\u91cc\u6ca1\u6709\u300d", where, missed.size(), missed, this.plan.size());
+    }
+
+    private List<Integer> computeShulkerPlan(int fireworkNeed, int secondNeed, boolean xpMode) {
+        int i;
+        int total = this.scanned.size();
+        int f = Math.max(0, fireworkNeed);
+        int e = Math.max(0, secondNeed);
+        int MAX = 0x1FFFFFFF;
+        int[][][] dp = new int[f + 1][e + 1][2];
+        for (i = 0; i <= f; ++i) {
+            for (int j = 0; j <= e; ++j) {
+                dp[i][j][0] = 0x1FFFFFFF;
+                dp[i][j][1] = 0;
+            }
+        }
+        dp[0][0][0] = 0;
+        for (i = 0; i < total; ++i) {
+            int a = this.boxFireworkValue(i);
+            int b = this.boxSecondValue(i, xpMode);
+            for (int ca = f; ca >= 0; --ca) {
+                for (int cb = e; cb >= 0; --cb) {
+                    int nb;
+                    int na;
+                    int count;
+                    if (dp[ca][cb][0] >= 0x1FFFFFFF || (count = dp[ca][cb][0] + 1) >= dp[na = Math.min(f, ca + a)][nb = Math.min(e, cb + b)][0]) continue;
+                    dp[na][nb][0] = count;
+                    dp[na][nb][1] = dp[ca][cb][1] | 1 << i;
+                }
+            }
+        }
+        ArrayList<Integer> out = new ArrayList<Integer>();
+        if (dp[f][e][0] >= 0x1FFFFFFF) {
+            return out;
+        }
+        int mask = dp[f][e][1];
+        for (int i2 = 0; i2 < total; ++i2) {
+            if ((mask & 1 << i2) == 0) continue;
+            out.add(i2);
+        }
+        return out;
+    }
+
+    private int hotbarFoodCount(MinecraftClient mc) {
+        int n = 0;
+        for (int i = 0; i < 9; ++i) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.isEmpty() || !this.matchesFood(s)) continue;
+            n += s.getCount();
+        }
+        return n;
+    }
+
+    private int boxSecondValue(int idx, boolean xpMode) {
+        if (idx < 0 || idx >= this.scanned.size()) {
+            return 0;
+        }
+        ShulkerScanner.Entry e = this.scanned.get(idx);
+        return xpMode ? e.xpStacks() : e.elytra();
+    }
+
+    private int boxFireworkValue(int idx) {
+        if (idx < 0 || idx >= this.scanned.size()) {
+            return 0;
+        }
+        return this.scanned.get(idx).fireworkStacks();
+    }
+
     private void scan(MinecraftClient mc) {
+        int foodBox;
+        this.noSneak("\u626b\u672b\u5f71\u7bb1\u524d");
         ScreenHandler handler = mc.player.currentScreenHandler;
-        int containerSlots = containerSlots(handler);
-        computeNeeds(mc);
-        if (!plan.isEmpty()) {
-            FOElytraLog.detail("SCAN 重建计划：丢弃上一轮的 %d 条（planIndex 已到 %d）", plan.size(), planIndex);
+        int containerSlots = SupplyTask.containerSlots(handler);
+        this.computeNeeds(mc);
+        if (!this.plan.isEmpty()) {
+            FOElytraLog.detail("SCAN \u91cd\u5efa\u8ba1\u5212\uff1a\u4e22\u5f03\u4e0a\u4e00\u8f6e\u7684 %d \u6761\uff08planIndex \u5df2\u5230 %d\uff09", this.plan.size(), this.planIndex);
+            if (this.planIndex < this.plan.size()) {
+                this.warnUnopenedPlanBoxes("\u91cd\u5efa\u8ba1\u5212\u524d");
+            }
         }
-        plan.clear();
-        planIndex = 0;
-        storeTried.clear();
-        boxFwTaken = 0;
-        boxSecondTaken = 0;
-        starvedWarned = false;
-        starvedDetailKey = "";
-        replaceRecheckSkips = 0;
-        List<ShulkerScanner.Entry> found = ShulkerScanner.scan(handler, containerSlots, opts.foodItems());
+        this.plan.clear();
+        this.planIndex = 0;
+        this.takeRounds = 0;
+        this.storeTried.clear();
+        this.planOpened.clear();
+        this.resetBoxTakeCounters();
+        this.starvedWarned = false;
+        this.starvedDetailKey = "";
+        this.replaceRecheckSkips = 0;
+        List<ShulkerScanner.Entry> found = ShulkerScanner.scan(handler, containerSlots, this.opts.foodItems());
         if (found.isEmpty()) {
-            fail("末影箱里没有可用的潜影盒");
+            this.fail("\u672b\u5f71\u7bb1\u91cc\u6ca1\u6709\u53ef\u7528\u7684\u6f5c\u5f71\u76d2");
             return;
         }
-        scanned = filterBoxes(found);
-        if (scanned.isEmpty()) {
-            lastMessage = "这些盒子本次补给都用过了（取空或没取到东西）";
-            markExhausted();
-            FOElytraLog.warn("%s（需求：%s）", lastMessage, needs);
-            next(State.CLOSE_EC, 0);
+        this.scanned = new ArrayList<ShulkerScanner.Entry>(found);
+        if (this.scanned.isEmpty()) {
+            this.lastMessage = "\u672b\u5f71\u7bb1\u91cc\u7684\u76d2\u5b50\u90fd\u662f\u7a7a\u7684";
+            this.markExhausted();
+            FOElytraLog.warn("%s\uff08\u9700\u6c42\uff1a%s\uff09", this.lastMessage, this.needs);
+            this.next(State.CLOSE_EC, 0);
             return;
         }
-        Set<Integer> plannedSlots = new LinkedHashSet<>();
-        boolean xpMode = needs.xpBottles > 0;
-        computeReplaceSlots(mc, xpMode);
-        int secondNeed = xpMode ? ItemHelper.toStacks(Items.EXPERIENCE_BOTTLE, needs.xpBottles) : needs.elytra;
-        List<Integer> chosen;
-        int oneBox = findSingleBoxCoveringAll(mc, xpMode);
-        if (oneBox >= 0) {
-            chosen = List.of(oneBox);
-            FOElytraLog.tip("一个盒子就能全包（%s），直接取它", scanned.get(oneBox).title());
-            FOElytraLog.detail("单盒全包快路：盒[%d] %s（烟花%d组 瓶%d 食物%d 图腾%d 鞘翅%d）",
-                scanned.get(oneBox).slot(), scanned.get(oneBox).title(),
-                scanned.get(oneBox).fireworkStacks(), scanned.get(oneBox).xpBottles(),
-                scanned.get(oneBox).food(), scanned.get(oneBox).totems(), scanned.get(oneBox).elytra());
-        } else {
-            chosen = (needs.fireworkStacks > 0 || secondNeed > 0)
-                ? ShulkerScanner.select(scanned, needs.fireworkStacks, secondNeed, xpMode)
-                : List.of();
+        boolean xpMode = this.needs.xpBottles > 0;
+        this.computeReplaceSlots(mc, xpMode);
+        int fwNeed = Math.max(0, this.needs.fireworkStacks);
+        int secondNeed = xpMode ? Math.max(0, ItemHelper.toStacks(Items.EXPERIENCE_BOTTLE, this.needs.xpBottles)) : Math.max(0, this.needs.elytra);
+        List<Integer> chosen = this.computeShulkerPlan(fwNeed, secondNeed, xpMode);
+        if (chosen.isEmpty() && (fwNeed > 0 || secondNeed > 0)) {
+            FOElytraLog.warn("\u672b\u5f71\u7bb1\u91cc\u6ca1\u6709\u80fd\u51d1\u9f50 \u70df\u82b1 %d \u7ec4 / %s %d \u7684\u76d2\u5b50\u7ec4\u5408\uff08\u9700\u6c42\uff1a%s\uff09", fwNeed, xpMode ? "\u74f6" : "\u9798\u7fc5", secondNeed, this.needs);
+            StringBuilder ev = new StringBuilder();
+            for (ShulkerScanner.Entry e : this.scanned) {
+                if (ev.length() > 0) {
+                    ev.append("\uff5c");
+                }
+                ev.append("\u69fd\u4f4d").append(e.slot()).append(' ').append(e.title()).append("\uff1a\u70df\u82b1 ").append(e.fireworkStacks()).append(" \u7ec4").append("\u3001").append(xpMode ? "\u74f6 " + e.xpBottles() + " \u4e2a" : "\u9798\u7fc5 " + e.elytra() + " \u6761").append("\u3001\u98df\u7269 ").append(e.food()).append("\u3001\u56fe\u817e ").append(e.totems());
+            }
+            FOElytraLog.warn("\u626b\u63cf\u5230\u7684\u76d2\u5b50\u4e00\u5171 %d \u4e2a\uff08\u8fd9\u5c31\u662f\u5168\u90e8\u8bc1\u636e\uff09\uff1a%s", this.scanned.size(), ev.length() == 0 ? "\u65e0" : ev);
+            FOElytraLog.warn("\u7ed3\u8bba\uff1a\u8fd9 %d \u4e2a\u76d2\u5b50\u52a0\u8d77\u6765\u4e5f\u51d1\u4e0d\u51fa\u7f3a\u53e3\uff08\u4e0d\u662f\u540d\u5b57/\u989c\u8272\u7684\u5224\u65ad\uff0c\u662f\u6309\u76d2\u5185\u5b9e\u9645\u6570\u91cf\u7b97\u7684\uff09", this.scanned.size());
         }
-        int fwLeft = needs.fireworkStacks;
+        if (this.needs.food > 0 && this.hotbarFoodCount(mc) < 30 && (foodBox = ShulkerScanner.findFoodRichest(this.scanned)) >= 0 && this.scanned.get(foodBox).food() > 0) {
+            FOElytraLog.detail("\u5feb\u6377\u680f\u98df\u7269\u53ea\u6709 %d \u4e2a\uff08< 30\uff09\u2192 \u518d\u5f00\u4e00\u4e2a\u98df\u7269\u6700\u591a\u7684\u76d2\u5b50 \u69fd\u4f4d%d\uff08\u98df\u7269 %d \u4e2a\uff09", this.hotbarFoodCount(mc), this.scanned.get(foodBox).slot(), this.scanned.get(foodBox).food());
+            chosen.add(foodBox);
+        }
+        if (this.needs.totems > 0) {
+            int totemBox = ShulkerScanner.findTotemRichest(this.scanned);
+            if (totemBox >= 0 && this.scanned.get(totemBox).totems() > 0) {
+                FOElytraLog.detail("\u56fe\u817e\u4f18\u5148\uff1a\u518d\u5f00\u4e00\u4e2a\u56fe\u817e\u6700\u591a\u7684\u76d2\u5b50 \u69fd\u4f4d%d\uff08\u91cc\u9762\u56fe\u817e %d \u4e2a\uff0c\u8fd8\u5dee %d \u4e2a\uff09", this.scanned.get(totemBox).slot(), this.scanned.get(totemBox).totems(), this.needs.totems);
+                chosen.add(0, totemBox);
+            } else {
+                FOElytraLog.warn("\u672b\u5f71\u7bb1\u91cc\u6ca1\u6709\u88c5\u7740\u56fe\u817e\u7684\u76d2\u5b50\uff08\u6700\u591a\u7684\u90a3\u4e2a\u53ea\u6709 %d \u4e2a\uff09", totemBox < 0 ? 0 : this.scanned.get(totemBox).totems());
+            }
+        }
+        LinkedHashSet<Integer> plannedSlots = new LinkedHashSet<Integer>();
+        int fwLeft = fwNeed;
         int secondLeft = secondNeed;
-        for (int idx : chosen) {
-            if (idx < 0 || idx >= scanned.size()) continue;
-            ShulkerScanner.Entry e = scanned.get(idx);
+        Iterator<Integer> iterator = chosen.iterator();
+        while (iterator.hasNext()) {
+            int idx = iterator.next();
+            if (idx < 0 || idx >= this.scanned.size()) continue;
+            ShulkerScanner.Entry e = this.scanned.get(idx);
             int takeFw = Math.min(fwLeft, e.fireworkStacks());
             int takeSecond = Math.min(secondLeft, xpMode ? e.xpStacks() : e.elytra());
-            if (takeFw <= 0 && takeSecond <= 0) continue;
-            if (!plannedSlots.add(e.slot())) continue;
-            plan.add(new PlanItem(e.slot(), takeFw, takeSecond, xpMode, e.title()));
+            if (takeFw <= 0 && takeSecond <= 0 && e.food() <= 0 && e.totems() <= 0 || !plannedSlots.add(e.slot())) continue;
+            this.plan.add(new PlanItem(e.slot(), takeFw, takeSecond, xpMode, e.title()));
             fwLeft -= takeFw;
             secondLeft -= takeSecond;
-            if (fwLeft <= 0 && secondLeft <= 0) break;
         }
-        if (needs.food > 0) {
-            int idx = findFoodBox(handler, scanned);
-            if (idx >= 0 && scanned.get(idx).food() > 0) {
-                ShulkerScanner.Entry e = scanned.get(idx);
-                if (plannedSlots.add(e.slot())) {
-                    plan.add(new PlanItem(e.slot(), 0, 0, xpMode, e.title()));
-                } else {
-                    FOElytraLog.detail("食物最富的盒子 %s 已经在计划里了，不重复排队", e.title());
-                }
+        if (this.plan.size() > this.opts.maxShulkers()) {
+            FOElytraLog.warn("\u672b\u5f71\u7bb1\u91cc\u7684\u4e1c\u897f\u8fc7\u4e8e\u5206\u6563\uff1a\u6700\u5c11\u8981 %d \u4e2a\u76d2\u5b50\uff0c\u8d85\u8fc7\u5355\u6b21\u4e0a\u9650 %d\uff0c\u53ea\u53d6\u524d %d \u4e2a\uff08\u5269\u4e0b\u7684\u4e0b\u4e00\u8f6e\u6309\u5269\u4f59\u9700\u6c42\u518d\u9009\uff09", this.plan.size(), this.opts.maxShulkers(), this.opts.maxShulkers());
+            this.plan.subList(this.opts.maxShulkers(), this.plan.size()).clear();
+        }
+        if (this.opts.debug()) {
+            for (ShulkerScanner.Entry e : this.scanned) {
+                FOElytraLog.debug("\u76d2\u5b50[%d] %s: \u70df\u82b1%d\u7ec4 \u74f6%d \u98df\u7269%d \u56fe\u817e%d \u9798\u7fc5%d", e.slot(), e.title(), e.fireworkStacks(), e.xpBottles(), e.food(), e.totems(), e.elytra());
             }
         }
-        if (needs.totems > 0) {
-            int idx = ShulkerScanner.findTotemRichest(scanned);
-            if (idx >= 0 && scanned.get(idx).totems() >= Math.min(2, Math.max(1, needs.totems))) {
-                ShulkerScanner.Entry e = scanned.get(idx);
-                if (plannedSlots.add(e.slot())) {
-                    plan.add(new PlanItem(e.slot(), 0, 0, xpMode, e.title()));
-                } else {
-                    FOElytraLog.detail("图腾最多的盒子 %s 已经在计划里了，不重复排队", e.title());
-                }
-            }
-        }
-        if (plan.size() > opts.maxShulkers()) {
-            FOElytraLog.warn("需要 %d 个盒子，超过单次上限 %d，只取前 %d 个", plan.size(), opts.maxShulkers(), opts.maxShulkers());
-            plan.subList(opts.maxShulkers(), plan.size()).clear();
-        }
-        for (PlanItem p : plan) {
-            boxPickCount.merge(p.rawSlot(), 1, Integer::sum);
-        }
-        if (opts.debug()) {
-            for (ShulkerScanner.Entry e : scanned) {
-                FOElytraLog.debug("盒子[%d] %s: 烟花%d组 瓶%d 食物%d 图腾%d 鞘翅%d",
-                    e.slot(), e.title(), e.fireworkStacks(), e.xpBottles(), e.food(), e.totems(), e.elytra());
-            }
-        }
-        if (plan.isEmpty()) {
-            lastMessage = "没翻到能补上需求的东西（可能是箱子里没有，也可能这批盒子没东西）";
-            markExhausted();
-            FOElytraLog.warn("%s（需求：%s）", lastMessage, needs);
-            next(State.CLOSE_EC, 0);
+        if (this.plan.isEmpty()) {
+            this.lastMessage = "\u6ca1\u7ffb\u5230\u80fd\u8865\u4e0a\u9700\u6c42\u7684\u4e1c\u897f\uff08\u53ef\u80fd\u662f\u7bb1\u5b50\u91cc\u6ca1\u6709\uff0c\u4e5f\u53ef\u80fd\u8fd9\u6279\u76d2\u5b50\u6ca1\u4e1c\u897f\uff09";
+            this.markExhausted();
+            FOElytraLog.warn("%s\uff08\u9700\u6c42\uff1a%s\uff09", this.lastMessage, this.needs);
+            this.next(State.CLOSE_EC, 0);
             return;
         }
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < plan.size(); i++) {
-            PlanItem p = plan.get(i);
-            if (i > 0) sb.append("、");
+        for (int i = 0; i < this.plan.size(); ++i) {
+            PlanItem p = this.plan.get(i);
+            if (i > 0) {
+                sb.append("\u3001");
+            }
             sb.append(p.rawSlot());
             if (p.fireworkStacks() > 0 || p.second() > 0) {
-                sb.append("(烟花").append(p.fireworkStacks()).append("组");
-                if (p.second() > 0) sb.append(' ').append(p.xpMode() ? "瓶" : "鞘翅").append(p.second());
+                sb.append("(\u70df\u82b1").append(p.fireworkStacks()).append("\u7ec4");
+                if (p.second() > 0) {
+                    sb.append(' ').append(p.xpMode() ? "\u74f6" : "\u9798\u7fc5").append(p.second());
+                }
                 sb.append(")");
-            } else {
-                sb.append("(食物/图腾)");
+                continue;
             }
+            sb.append("(\u98df\u7269/\u56fe\u817e)");
         }
-        FOElytraLog.info("所需的潜影盒槽位列表为：[%s]（需求：%s）", sb, needs);
-        next(State.TAKE_SHULKER, opts.actionDelay());
+        FOElytraLog.info("\u672c\u8f6e\u53d6\u7269\u8ba1\u5212\uff1a\u76d2\u5b50 [%s]\uff08\u6700\u5c11 %d \u4e2a\uff09\uff5c\u9700\u6c42 \u70df\u82b1 %d \u7ec4/\u74f6 %d/\u98df\u7269 %d/\u56fe\u817e %d/\u9798\u7fc5 %d", sb, this.plan.size(), this.needs.fireworkStacks, this.needs.xpBottles, this.needs.food, this.needs.totems, this.needs.elytra);
+        FOElytraLog.detail("\u8ba1\u5212\u91cc\u7684\u76d2\u5b50\u53ea\u6709\u771f\u88ab\u6253\u5f00\u53d6\u8fc7\u624d\u7b97\u7528\u8fc7\uff1b\u8fd9\u8f6e\u8ba1\u5212\u542b\u70df\u82b1\u76d2 %d \u4e2a\u3001\u74f6/\u9798\u7fc5\u76d2 %d \u4e2a\u3001\u98df\u7269\u56fe\u817e\u76d2 %d \u4e2a", this.countPlanFireworkBoxes(), this.countPlanSecondBoxes(), this.countPlanGapBoxes());
+        this.next(State.TAKE_SHULKER, this.opts.actionDelay());
     }
+
     private void computeReplaceSlots(MinecraftClient mc, boolean xpMode) {
-        replaceSlots.clear();
-        int keepFireworks = Math.max(0, opts.targetFireworkStacks());
+        this.replaceSlots.clear();
+        int keepFireworks = Math.max(0, this.opts.targetFireworkStacks());
         int fwKept = 0;
         int fwPartialKept = 0;
         int bottleKept = 0;
@@ -817,841 +1236,2007 @@ public final class SupplyTask {
         int foodKept = 0;
         int toolKept = 0;
         int shulkerKept = 0;
-        List<Integer> emptySlots = new ArrayList<>();
-        List<Integer> junkSlots = new ArrayList<>();
-        for (int i = 9; i < 36; i++) {
+        int surplusKept = 0;
+        int targetBottles = Math.max(0, this.opts.targetXpBottles());
+        int targetFood = Math.max(0, this.opts.targetFoodCount());
+        boolean fwSurplus = ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)mc.player, Items.FIREWORK_ROCKET)) > keepFireworks;
+        boolean bottleSurplus = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.EXPERIENCE_BOTTLE) > targetBottles;
+        boolean foodSurplus = this.countFood(mc) > targetFood;
+        ArrayList<Integer> emptySlots = new ArrayList<Integer>();
+        ArrayList<Integer> junkSlots = new ArrayList<Integer>();
+        ArrayList<Integer> surplusSlots = new ArrayList<Integer>();
+        for (int i = 9; i < 36; ++i) {
             ItemStack s = mc.player.getInventory().getStack(i);
             if (s.isEmpty()) {
                 emptySlots.add(i);
                 continue;
             }
             if (s.isOf(Items.FIREWORK_ROCKET)) {
-                if (s.getCount() < s.getMaxCount()) fwPartialKept++;
-                else fwKept++;
-            } else if (s.isOf(Items.EXPERIENCE_BOTTLE)) {
-                bottleKept++;
-            } else if (s.isOf(Items.TOTEM_OF_UNDYING)) {
-                totemKept++;
-            } else if (s.isOf(Items.ENDER_CHEST)) {
-                ecKept++;
-            } else if (matchesFood(s)) {
-                foodKept++;
-            } else if (isPickaxe(s) || isSword(s)) {
-                toolKept++;
-            } else if (ItemHelper.isShulkerBox(s)) {
-                shulkerKept++;
-            } else if (s.isOf(Items.ELYTRA)) {
-                if (isGoodElytra(s) && (needs.elytra > 0 || elytraKept < 5)) elytraKept++;
-                else junkSlots.add(i);
-            } else {
+                if (fwSurplus) {
+                    ++surplusKept;
+                    if (s.getCount() < s.getMaxCount()) {
+                        surplusSlots.add(0, i);
+                        continue;
+                    }
+                    surplusSlots.add(i);
+                    continue;
+                }
+                if (s.getCount() < s.getMaxCount()) {
+                    ++fwPartialKept;
+                    continue;
+                }
+                ++fwKept;
+                continue;
+            }
+            if (s.isOf(Items.EXPERIENCE_BOTTLE)) {
+                if (bottleSurplus) {
+                    ++surplusKept;
+                    surplusSlots.add(0, i);
+                    continue;
+                }
+                ++bottleKept;
+                continue;
+            }
+            if (s.isOf(Items.TOTEM_OF_UNDYING)) {
+                ++totemKept;
+                continue;
+            }
+            if (s.isOf(Items.ENDER_CHEST)) {
+                ++ecKept;
+                continue;
+            }
+            if (this.matchesFood(s) || this.isFoodPriority(s)) {
+                if (foodSurplus) {
+                    ++surplusKept;
+                    surplusSlots.add(i);
+                    continue;
+                }
+                ++foodKept;
+                continue;
+            }
+            if (this.isPickaxe(s) || this.isSword(s)) {
+                ++toolKept;
+                continue;
+            }
+            if (ItemHelper.isShulkerBox(s)) {
+                ++shulkerKept;
+                continue;
+            }
+            if (s.isOf(Items.ELYTRA)) {
+                if (this.isGoodElytra(s) && (this.needs.elytra > 0 || elytraKept < 5)) {
+                    ++elytraKept;
+                    continue;
+                }
                 junkSlots.add(i);
+                continue;
+            }
+            junkSlots.add(i);
+        }
+        this.replaceSlots.addAll(emptySlots);
+        this.replaceSlots.addAll(junkSlots);
+        this.replaceSlots.addAll(surplusSlots);
+        this.replaceSlotSummary = String.format("\u7a7a\u69fd %d / \u6742\u7269 %d / \u591a\u51fa\u6765\u7684\u7269\u8d44 %d \u683c / \u6392\u9664\uff1a\u70df\u82b1 %d \u645e\uff08\u96f6\u6563 %d \u683c\u3001\u76ee\u6807 %d \u7ec4\uff09\u3001\u74f6 %d \u645e\u3001\u56fe\u817e %d \u4e2a\u3001\u672b\u5f71\u7bb1 %d \u4e2a\u3001\u98df\u7269 %d \u5806\u3001\u5de5\u5177 %d \u4ef6\u3001\u6f5c\u5f71\u76d2 %d \u4e2a\u3001\u597d\u9798\u7fc5 %d \u6761", emptySlots.size(), junkSlots.size(), surplusKept, fwKept, fwPartialKept, keepFireworks, bottleKept, totemKept, ecKept, foodKept, toolKept, shulkerKept, elytraKept);
+        if (this.opts.debug()) {
+            FOElytraLog.debug("\u53ef\u66ff\u6362\u69fd\u4f4d %d \u4e2a\uff08\u7a7a\u69fd %d \u4e2a\u4f18\u5148 + \u6742\u7269 %d \u4e2a + \u591a\u51fa\u6765\u7684\u7269\u8d44 %d \u683c\uff09\uff1a%s\uff5c\u6392\u9664 \u6ee1\u645e\u70df\u82b1%d\u645e/\u96f6\u6563\u70df\u82b1%d\u683c(\u76ee\u6807%d\u7ec4) \u74f6%d\u645e \u9798\u7fc5%d\u6761 \u56fe\u817e%d\u4e2a \u672b\u5f71\u7bb1%d\u4e2a \u98df\u7269%d\u5806 \u5de5\u5177%d\u4ef6 \u76d2%d\u4e2a\uff08xpMode=%s\uff09", this.replaceSlots.size(), emptySlots.size(), junkSlots.size(), surplusSlots.size(), this.replaceSlots, fwKept, fwPartialKept, keepFireworks, bottleKept, elytraKept, totemKept, ecKept, foodKept, toolKept, shulkerKept, xpMode);
+        }
+    }
+
+    private void takeShulker(MinecraftClient mc) {
+        HandledScreen<?> screen;
+        this.noSneak("\u53d6\u76d2\u5b50\u524d");
+        if (this.planIndex >= this.plan.size()) {
+            this.next(State.CLOSE_EC, 0);
+            return;
+        }
+        this.computeNeeds(mc);
+        if (this.needs.isEmpty()) {
+            FOElytraLog.detail("\u53d6\u76d2\u524d\u590d\u6838\uff1a\u672c\u8f6e\u9700\u6c42\u5df2\u7ecf\u6ee1\u8db3\uff0c\u8df3\u8fc7\u8fd9\u4e2a\u76d2\u5b50\uff08\u6ca1\u5fc5\u8981\u518d\u5f00\u4e00\u6b21\u7bb1\u5b50\uff09", new Object[0]);
+            this.planIndex = this.plan.size();
+            this.next(State.CLOSE_EC, this.opts.actionDelay());
+            return;
+        }
+        if (this.needs.totems > 0 && this.noRoomForTotems(mc)) {
+            this.warnTotemNoRoom();
+            this.exhausted.add(Items.TOTEM_OF_UNDYING);
+            this.needs.totems = 0;
+            FOElytraLog.warn("\u56fe\u817e\u5148\u8bb0\u6210\u6682\u65f6\u53d6\u4e0d\u5230\uff08\u80cc\u5305\u6ca1\u5730\u65b9\u653e\uff09\uff0c\u672c\u8f6e\u4e0d\u518d\u4e3a\u5b83\u5f00\u76d2\u5b50", new Object[0]);
+            if (this.needs.isEmpty()) {
+                this.planIndex = this.plan.size();
+                this.next(State.CLOSE_EC, this.opts.actionDelay());
+                return;
             }
         }
-        replaceSlots.addAll(emptySlots);
-        replaceSlots.addAll(junkSlots);
-        replaceSlotSummary = String.format("空槽 %d / 杂物 %d / 排除：烟花 %d 摞（零散 %d 格、目标 %d 组）、"
-                + "瓶 %d 摞、图腾 %d 个、末影箱 %d 个、食物 %d 堆、工具 %d 件、潜影盒 %d 个、好鞘翅 %d 条",
-            emptySlots.size(), junkSlots.size(), fwKept, fwPartialKept, keepFireworks,
-            bottleKept, totemKept, ecKept, foodKept, toolKept, shulkerKept, elytraKept);
-        if (opts.debug()) {
-            FOElytraLog.debug("可替换槽位 %d 个（空槽 %d 个优先 + 杂物 %d 个）：%s｜"
-                    + "排除 满摞烟花%d摞/零散烟花%d格(目标%d组) 瓶%d摞 鞘翅%d条 图腾%d个 末影箱%d个 食物%d堆 工具%d件 盒%d个（xpMode=%s）",
-                replaceSlots.size(), emptySlots.size(), junkSlots.size(), replaceSlots,
-                fwKept, fwPartialKept, keepFireworks, bottleKept, elytraKept, totemKept, ecKept, foodKept,
-                toolKept, shulkerKept, xpMode);
-        }
-    }
-    private void takeShulker(MinecraftClient mc) {
-        if (planIndex >= plan.size()) {
-            next(State.CLOSE_EC, 0);
+        if ((screen = InvHelper.currentContainerScreen(this.ecTitle)) == null) {
+            this.fail("\u53d6\u76d2\u65f6\u672b\u5f71\u7bb1\u754c\u9762\u5df2\u5173\u95ed");
             return;
         }
-        HandledScreen<?> screen = InvHelper.currentContainerScreen(ecTitle);
-        if (screen == null) {
-            fail("取盒时末影箱界面已关闭");
-            return;
-        }
-        shulkerRawSlot = plan.get(planIndex).rawSlot();
+        this.shulkerRawSlot = this.plan.get(this.planIndex).rawSlot();
         ScreenHandler handler = mc.player.currentScreenHandler;
-        int hotbarSlot = makeHotbarRoom(handler);
+        this.shulkerCountBeforeTake = ItemHelper.countShulkers((PlayerEntity)mc.player);
+        int hotbarSlot = this.makeHotbarRoom(handler);
         if (hotbarSlot < 0) {
-            fail("快捷栏没有空位可以放潜影盒（已尝试把杂物/多余烟花挪回背包，仍腾不出来）");
+            hotbarSlot = this.swapOutReplaceableHotbar(handler);
+            if (hotbarSlot < 0) {
+                this.fail("\u5feb\u6377\u680f 9 \u683c\u5168\u662f\u8981\u7559\u7684\u4e1c\u897f\uff08\u56fe\u817e\u3001\u70df\u82b1\u3001\u7ecf\u9a8c\u74f6\u3001\u9798\u7fc5\u3001\u98df\u7269\u3001\u672b\u5f71\u7bb1\u3001\u9550\u5251\u3001\u6f5c\u5f71\u76d2\u90fd\u6362\u4e0d\u5f97\uff09\uff0c\u76d2\u5b50\u62ff\u4e0d\u5230\u624b\u4e0a\uff1b\u8bc1\u636e\uff1a\u80cc\u5305\u6f5c\u5f71\u76d2 " + this.shulkerCountBeforeTake + " \u4e2a\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d " + this.countEmptyHotbar(mc) + "\uff5c\u53ef\u66ff\u6362\u5feb\u6377\u680f " + this.countReplaceableHotbar(mc) + "\uff5c\u5bb9\u5668\u7a7a\u4f4d " + this.countEmptyContainer(handler, -1));
+                return;
+            }
+            this.shulkerHotbarSlot = hotbarSlot;
+            this.next(State.VERIFY_TAKE, this.opts.actionDelay());
             return;
         }
-        int rawPlayerSlot = InvHelper.playerSlotId(handler, mc.player, hotbarSlot);
+        int rawPlayerSlot = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, hotbarSlot);
         if (rawPlayerSlot < 0) {
-            fail("找不到快捷栏槽位映射");
+            this.fail("\u627e\u4e0d\u5230\u5feb\u6377\u680f\u69fd\u4f4d\u6620\u5c04\uff08hotbar=" + hotbarSlot + "\uff09");
             return;
         }
-        shulkerCountBeforeTake = ItemHelper.countShulkers(mc.player);
-        InvHelper.moveStack(handler, shulkerRawSlot, rawPlayerSlot);
-        shulkerHotbarSlot = hotbarSlot;
-        next(State.VERIFY_TAKE, opts.actionDelay());
+        InvHelper.moveStack(handler, this.shulkerRawSlot, rawPlayerSlot);
+        this.shulkerHotbarSlot = hotbarSlot;
+        this.next(State.VERIFY_TAKE, this.opts.actionDelay());
     }
+
     private void verifyTake(MinecraftClient mc) {
-        ItemStack held = mc.player.getInventory().getStack(shulkerHotbarSlot);
-        int boxes = ItemHelper.countShulkers(mc.player);
+        PlanItem opened;
+        ItemStack held = mc.player.getInventory().getStack(this.shulkerHotbarSlot);
+        int boxes = ItemHelper.countShulkers((PlayerEntity)mc.player);
         if (!ItemHelper.isShulkerBox(held)) {
-            fail("潜影盒没有取到手（槽位 " + shulkerHotbarSlot + " 上是 "
-                + (held.isEmpty() ? "空" : held.getName().getString()) + "；背包潜影盒 " + boxes + " 个）");
+            this.fail("\u6f5c\u5f71\u76d2\u6ca1\u6709\u53d6\u5230\u624b\uff08\u69fd\u4f4d " + this.shulkerHotbarSlot + " \u4e0a\u662f " + (held.isEmpty() ? "\u7a7a" : held.getName().getString()) + "\uff1b\u80cc\u5305\u6f5c\u5f71\u76d2 " + boxes + " \u4e2a\uff09");
             return;
         }
-        if (boxes < shulkerCountBeforeTake + 1) {
-            FOElytraLog.detail("VERIFY_TAKE 复核异常：背包潜影盒 %d，取出前 %d（本地没看到盒子进背包）",
-                boxes, shulkerCountBeforeTake);
+        if (boxes < this.shulkerCountBeforeTake + 1) {
+            FOElytraLog.detail("VERIFY_TAKE \u590d\u6838\u5f02\u5e38\uff1a\u80cc\u5305\u6f5c\u5f71\u76d2 %d\uff0c\u53d6\u51fa\u524d %d\uff08\u672c\u5730\u6ca1\u770b\u5230\u76d2\u5b50\u8fdb\u80cc\u5305\uff09", boxes, this.shulkerCountBeforeTake);
         }
-        shulkerTitle = held.getName().getString();
+        this.shulkerTitle = held.getName().getString();
         InvHelper.closeScreen();
-        openRetries = 0;
-        placeRetries = 0;
-        placeWaitTicks = 0;
-        starvedWarned = false;
-        starvedDetailKey = "";
-        replaceRecheckSkips = 0;
-        pendingReturn = false;
-        boxFwTaken = 0;
-        boxSecondTaken = 0;
-        storeTried.clear();
-        boxTookAnything = false;
-        boxTookPartial = false;
-        computeReplaceSlots(mc, needs.xpBottles > 0);
-        PlanItem item = plan.get(planIndex);
-        if (item.fireworkStacks() > 0 || item.second() > 0) {
-            FOElytraLog.tip("本盒需要取出 %d 组烟花、%d %s（当前需求：%s）",
-                item.fireworkStacks(), item.second(), item.xpMode() ? "组附魔之瓶" : "个鞘翅", needs);
+        PlanItem planItem = opened = this.planIndex >= 0 && this.planIndex < this.plan.size() ? this.plan.get(this.planIndex) : null;
+        if (opened != null) {
+            this.planOpened.add(opened.rawSlot());
         }
-        next(State.PLACE_SH, Math.max(6, opts.actionDelay() * 3));
+        this.openRetries = 0;
+        this.placeRetries = 0;
+        this.placeWaitTicks = 0;
+        this.starvedWarned = false;
+        this.starvedDetailKey = "";
+        this.replaceRecheckSkips = 0;
+        this.pendingReturn = false;
+        this.resetBoxTakeCounters();
+        this.storeTried.clear();
+        this.boxTookAnything = false;
+        this.boxTookPartial = false;
+        this.computeReplaceSlots(mc, this.needs.xpBottles > 0);
+        PlanItem item = this.plan.get(this.planIndex);
+        if (item.fireworkStacks() > 0 || item.second() > 0) {
+            FOElytraLog.tip("\u672c\u76d2\u9700\u8981\u53d6\u51fa %d \u7ec4\u70df\u82b1\u3001%d %s\uff08\u5f53\u524d\u9700\u6c42\uff1a%s\uff09", item.fireworkStacks(), item.second(), item.xpMode() ? "\u7ec4\u9644\u9b54\u4e4b\u74f6" : "\u4e2a\u9798\u7fc5", this.needs);
+        }
+        this.next(State.PLACE_SH, this.opts.actionDelay() * 3);
     }
+
     private void placeShulker(MinecraftClient mc) {
-        if (!ensureShulkerSelected(mc)) {
-            fail("手上和背包里都找不到潜影盒可放（selectedSlot=" + mc.player.getInventory().getSelectedSlot() + "）");
+        BlockPos cand;
+        this.noSneak("\u653e\u76d2\u5b50\u524d");
+        this.computeNeeds(mc);
+        if (this.needs.isEmpty()) {
+            FOElytraLog.detail("\u653e\u76d2\u524d\u590d\u6838\uff1a\u672c\u8f6e\u9700\u6c42\u5df2\u7ecf\u6ee1\u8db3\uff0c\u4e0d\u653e\u4e86\uff0c\u628a\u76d2\u5b50\u653e\u56de\u672b\u5f71\u7bb1", new Object[0]);
+            this.planIndex = this.plan.size();
+            this.pendingReturn = true;
+            this.next(State.REOPEN_EC, this.opts.actionDelay());
             return;
         }
-        beginPlaceScan();
-        int before = ItemHelper.countShulkers(mc.player);
+        if (!this.ensureShulkerSelected(mc)) {
+            this.fail((String)(this.shulkerSelectFailReason == null || this.shulkerSelectFailReason.isEmpty() ? "\u624b\u4e0a\u548c\u80cc\u5305\u91cc\u90fd\u6ca1\u6709\u6f5c\u5f71\u76d2\u53ef\u653e\uff08\u80cc\u5305\u6f5c\u5f71\u76d2 " + ItemHelper.countShulkers((PlayerEntity)mc.player) + " \u4e2a\uff09" : this.shulkerSelectFailReason));
+            return;
+        }
+        this.beginPlaceScan();
+        int before = ItemHelper.countShulkers((PlayerEntity)mc.player);
         BlockPos pos = null;
-        while (true) {
-            BlockPos cand = nextPlaceCandidate(mc, "潜影盒");
-            if (cand == null) break;
-            boolean accepted = InvHelper.placeBlock(cand, shulkerHotbarSlot);
-            shulkerCountAfterPlace = ItemHelper.countShulkers(mc.player);
-            FOElytraLog.detail("PLACE_SH 放盒：目标 %s｜selectedSlot=%d 手持=%s｜背包潜影盒 %d → %d｜"
-                    + "interactBlock 客户端结果=%s｜getBlockState=%s（方块/数量都要等服务端包回来才算数）",
-                cand.toShortString(), mc.player.getInventory().getSelectedSlot(), describeHeld(mc),
-                before, shulkerCountAfterPlace, accepted, describeBlock(mc, cand));
+        while ((cand = this.nextPlaceCandidate(mc, "\u6f5c\u5f71\u76d2")) != null) {
+            boolean accepted = InvHelper.placeBlock(cand, this.shulkerHotbarSlot);
+            this.shulkerCountAfterPlace = ItemHelper.countShulkers((PlayerEntity)mc.player);
+            FOElytraLog.detail("PLACE_SH \u653e\u76d2\uff1a\u76ee\u6807 %s\uff5cselectedSlot=%d \u624b\u6301=%s\uff5c\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u2192 %d\uff5cinteractBlock \u5ba2\u6237\u7aef\u7ed3\u679c=%s\uff5cgetBlockState=%s\uff08\u65b9\u5757/\u6570\u91cf\u90fd\u8981\u7b49\u670d\u52a1\u7aef\u5305\u56de\u6765\u624d\u7b97\u6570\uff09", cand.toShortString(), mc.player.getInventory().getSelectedSlot(), this.describeHeld(mc), before, this.shulkerCountAfterPlace, accepted, this.describeBlock(mc, cand));
             if (accepted) {
                 pos = cand;
                 break;
             }
-            FOElytraLog.warn("放置潜影盒：客户端当场拒绝（目标 %s，手持 %s）→ 换下一个位置",
-                cand.toShortString(), describeHeld(mc));
-            rejectPlaceCandidate(cand, "潜影盒");
+            FOElytraLog.warn("\u653e\u7f6e\u6f5c\u5f71\u76d2\uff1a\u5ba2\u6237\u7aef\u5f53\u573a\u62d2\u7edd\uff08\u76ee\u6807 %s\uff0c\u624b\u6301 %s\uff09\u2192 \u6362\u4e0b\u4e00\u4e2a\u4f4d\u7f6e", cand.toShortString(), this.describeHeld(mc));
+            this.rejectPlaceCandidate(cand, "\u6f5c\u5f71\u76d2");
         }
         if (pos == null) {
-            fail(placeEmptyReason.isEmpty() ? "附近没有合适的位置放置潜影盒" : placeEmptyReason);
+            this.fail(this.placeEmptyReason.isEmpty() ? "\u9644\u8fd1\u6ca1\u6709\u5408\u9002\u7684\u4f4d\u7f6e\u653e\u7f6e\u6f5c\u5f71\u76d2" : this.placeEmptyReason);
             return;
         }
-        shulkerPos = pos;
-        placeWaitTicks = 0;
-        next(State.OPEN_SH, opts.actionDelay());
+        this.shulkerPos = pos;
+        this.placeWaitTicks = 0;
+        this.next(State.OPEN_SH, this.opts.actionDelay());
     }
+
     private void openShulker(MinecraftClient mc) {
-        if (shulkerPos == null) {
-            fail("潜影盒坐标丢失（没经过 PLACE_SH 就进了 OPEN_SH）");
+        this.noSneak("\u5f00\u76d2\u5b50\u524d");
+        if (this.shulkerPos == null) {
+            this.fail("\u6f5c\u5f71\u76d2\u5750\u6807\u4e22\u5931\uff08\u6ca1\u7ecf\u8fc7 PLACE_SH \u5c31\u8fdb\u4e86 OPEN_SH\uff09");
             return;
         }
-        BlockState st = mc.world.getBlockState(shulkerPos);
-        int boxes = ItemHelper.countShulkers(mc.player);
+        BlockState st = mc.world.getBlockState(this.shulkerPos);
+        int boxes = ItemHelper.countShulkers((PlayerEntity)mc.player);
         if (!st.isAir()) {
-            if (placeWaitTicks > 0) {
-                FOElytraLog.detail("OPEN_SH 潜影盒方块已出现（轮询了 %d tick）：%s",
-                    placeWaitTicks, describeBlock(mc, shulkerPos));
+            if (this.placeWaitTicks > 0) {
+                FOElytraLog.detail("OPEN_SH \u6f5c\u5f71\u76d2\u65b9\u5757\u5df2\u51fa\u73b0\uff08\u8f6e\u8be2\u4e86 %d tick\uff09\uff1a%s", this.placeWaitTicks, this.describeBlock(mc, this.shulkerPos));
             }
-            placeWaitTicks = 0;
-            placeRetries = 0;
-            InvHelper.interactBlock(shulkerPos);
-            shScreenWaitTicks = 0;
-            next(State.WAIT_SH, 1);
+            this.placeWaitTicks = 0;
+            this.placeRetries = 0;
+            InvHelper.interactBlock(this.shulkerPos);
+            this.waitTicks = 0;
+            this.next(State.WAIT_SH, 1);
             return;
         }
-        placeWaitTicks++;
-        if (placeWaitTicks <= SHULKER_BLOCK_WAIT_TICKS) {
-            if (placeWaitTicks == 1 || placeWaitTicks % PLACE_POLL_LOG_INTERVAL == 0) {
-                FOElytraLog.detail("OPEN_SH 还没看到潜影盒方块（%d/%d tick，服务端包在路上或这次放置将被回滚）："
-                        + "目标 %s｜背包潜影盒 %d（放置后记录 %d）｜selectedSlot=%d 手持=%s",
-                    placeWaitTicks, SHULKER_BLOCK_WAIT_TICKS, shulkerPos.toShortString(),
-                    boxes, shulkerCountAfterPlace, mc.player.getInventory().getSelectedSlot(), describeHeld(mc));
+        ++this.placeWaitTicks;
+        if (this.placeWaitTicks <= 60) {
+            if (this.placeWaitTicks == 1 || this.placeWaitTicks % 20 == 0) {
+                FOElytraLog.detail("OPEN_SH \u8fd8\u6ca1\u770b\u5230\u6f5c\u5f71\u76d2\u65b9\u5757\uff08%d/%d tick\uff0c\u670d\u52a1\u7aef\u5305\u5728\u8def\u4e0a\u6216\u8fd9\u6b21\u653e\u7f6e\u5c06\u88ab\u56de\u6eda\uff09\uff1a\u76ee\u6807 %s\uff5c\u80cc\u5305\u6f5c\u5f71\u76d2 %d\uff08\u653e\u7f6e\u540e\u8bb0\u5f55 %d\uff09\uff5cselectedSlot=%d \u624b\u6301=%s", this.placeWaitTicks, 60, this.shulkerPos.toShortString(), boxes, this.shulkerCountAfterPlace, mc.player.getInventory().getSelectedSlot(), this.describeHeld(mc));
             }
-            next(State.OPEN_SH, 0);
+            this.next(State.OPEN_SH, 0);
             return;
         }
-        FOElytraLog.detail("OPEN_SH 失败诊断：目标 %s｜getBlockState=%s｜背包潜影盒 现在=%d / 放置后=%d / 取出前=%d｜"
-                + "selectedSlot=%d 手持=%s｜轮询 %d tick 无方块｜已换位置 %d 次",
-            shulkerPos.toShortString(), describeBlock(mc, shulkerPos), boxes, shulkerCountAfterPlace,
-            shulkerCountBeforeTake, mc.player.getInventory().getSelectedSlot(), describeHeld(mc),
-            placeWaitTicks, placeRetries);
+        FOElytraLog.detail("OPEN_SH \u5931\u8d25\u8bca\u65ad\uff1a\u76ee\u6807 %s\uff5cgetBlockState=%s\uff5c\u80cc\u5305\u6f5c\u5f71\u76d2 \u73b0\u5728=%d / \u653e\u7f6e\u540e=%d / \u53d6\u51fa\u524d=%d\uff5cselectedSlot=%d \u624b\u6301=%s\uff5c\u8f6e\u8be2 %d tick \u65e0\u65b9\u5757\uff5c\u5df2\u6362\u4f4d\u7f6e %d \u6b21", this.shulkerPos.toShortString(), this.describeBlock(mc, this.shulkerPos), boxes, this.shulkerCountAfterPlace, this.shulkerCountBeforeTake, mc.player.getInventory().getSelectedSlot(), this.describeHeld(mc), this.placeWaitTicks, this.placeRetries);
         if (boxes >= 1) {
-            placeRetries++;
-            rejectPlaceCandidate(shulkerPos, "潜影盒");
-            FOElytraLog.warn("潜影盒放下去后 %d tick 里客户端都没看到方块（盒子还在背包 %d 个）→ "
-                    + "把这个位置拉黑、换个位置再放（第 %d 次换位置，%d tick 后重放）",
-                placeWaitTicks, boxes, placeRetries, PLACE_RETRY_WAIT_TICKS);
-            placeWaitTicks = 0;
-            next(State.PLACE_SH, PLACE_RETRY_WAIT_TICKS);
+            ++this.placeRetries;
+            this.rejectPlaceCandidate(this.shulkerPos, "\u6f5c\u5f71\u76d2");
+            FOElytraLog.warn("\u6f5c\u5f71\u76d2\u653e\u4e0b\u53bb\u540e %d tick \u91cc\u5ba2\u6237\u7aef\u90fd\u6ca1\u770b\u5230\u65b9\u5757\uff08\u76d2\u5b50\u8fd8\u5728\u80cc\u5305 %d \u4e2a\uff09\u2192 \u628a\u8fd9\u4e2a\u4f4d\u7f6e\u62c9\u9ed1\u3001\u6362\u4e2a\u4f4d\u7f6e\u518d\u653e\uff08\u7b2c %d \u6b21\u6362\u4f4d\u7f6e\uff0c%d tick \u540e\u91cd\u653e\uff09", this.placeWaitTicks, boxes, this.placeRetries, 10);
+            this.placeWaitTicks = 0;
+            this.next(State.PLACE_SH, 10);
             return;
         }
-        fail("潜影盒没有放好（方块始终没出现，而且盒子已经不在背包里了：放置后 " + shulkerCountAfterPlace
-            + " → 现在 " + boxes + "，目标 " + shulkerPos.toShortString() + " 现在是 " + describeBlock(mc, shulkerPos)
-            + "，可能是服务端收下了物品但方块没落地，或盒子被别的玩家/实体拿走）");
+        this.fail("\u6f5c\u5f71\u76d2\u6ca1\u6709\u653e\u597d\uff08\u65b9\u5757\u59cb\u7ec8\u6ca1\u51fa\u73b0\uff0c\u800c\u4e14\u76d2\u5b50\u5df2\u7ecf\u4e0d\u5728\u80cc\u5305\u91cc\u4e86\uff1a\u653e\u7f6e\u540e " + this.shulkerCountAfterPlace + " \u2192 \u73b0\u5728 " + boxes + "\uff0c\u76ee\u6807 " + this.shulkerPos.toShortString() + " \u73b0\u5728\u662f " + this.describeBlock(mc, this.shulkerPos) + "\uff0c\u53ef\u80fd\u662f\u670d\u52a1\u7aef\u6536\u4e0b\u4e86\u7269\u54c1\u4f46\u65b9\u5757\u6ca1\u843d\u5730\uff0c\u6216\u76d2\u5b50\u88ab\u522b\u7684\u73a9\u5bb6/\u5b9e\u4f53\u62ff\u8d70\uff09");
     }
+
     private void waitShulker(MinecraftClient mc) {
-        if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen) {
-            ScreenHandler handler = mc.player.currentScreenHandler;
-            if (containerSlots(handler) >= 27) {
-                merged = false;
-                moveGuard = 0;
-                next(State.MOVE_ITEMS, opts.actionDelay());
-                return;
-            }
+        ScreenHandler handler;
+        this.noSneak("\u7b49\u76d2\u5b50\u754c\u9762");
+        if (mc.currentScreen instanceof ShulkerBoxScreen && SupplyTask.containerSlots(handler = mc.player.currentScreenHandler) >= 27) {
+            this.merged = false;
+            this.moveGuard = 0;
+            this.next(State.MOVE_ITEMS, this.opts.actionDelay());
+            return;
         }
-        if (shScreenWaitTicks++ > SCREEN_WAIT_TICKS) {
-            if (openRetries++ >= OPEN_RETRY) {
-                fail("潜影盒界面打不开");
+        if (this.waitTicks++ > 40) {
+            if (this.openRetries++ >= 3) {
+                this.fail("\u6f5c\u5f71\u76d2\u754c\u9762\u6253\u4e0d\u5f00");
                 return;
             }
-            next(State.OPEN_SH, opts.actionDelay());
+            this.next(State.OPEN_SH, this.opts.actionDelay());
         }
     }
+
     private void moveItems(MinecraftClient mc) {
-        if (moveGuard++ > MOVE_GUARD) {
-            FOElytraLog.warn("取物资步数超限，停止搬运");
-            next(State.CLOSE_SH, 0);
+        this.noSneak("\u53d6\u7269\u72b6\u6001\u6bcf tick");
+        if (this.moveGuard++ > 240) {
+            FOElytraLog.warn("\u53d6\u7269\u8d44\u6b65\u6570\u8d85\u9650\uff0c\u505c\u6b62\u642c\u8fd0", new Object[0]);
+            this.next(State.CLOSE_SH, 0);
             return;
         }
         ScreenHandler handler = mc.player.currentScreenHandler;
-        int containerSlots = containerSlots(handler);
+        int containerSlots = SupplyTask.containerSlots(handler);
         if (containerSlots < 27) {
-            next(State.CLOSE_SH, 0);
+            this.next(State.CLOSE_SH, 0);
             return;
         }
-        if (opts.storeLoot() && storeOneJunkStack(mc, handler)) {
-            delay = opts.actionDelay();
+        if (this.takeVerify != null && this.verifyTakeStep(mc, handler, containerSlots)) {
+            this.delay = this.opts.actionDelay();
             return;
         }
-        if (!merged) {
+        if (this.opts.storeLoot() && this.storeOneJunkStack(mc, handler)) {
+            this.delay = this.opts.actionDelay();
+            return;
+        }
+        if (!this.merged) {
             InvHelper.mergeSameItems(handler, s -> s.isOf(Items.FIREWORK_ROCKET), 0, containerSlots);
             InvHelper.mergeSameItems(handler, s -> s.isOf(Items.EXPERIENCE_BOTTLE), 0, containerSlots);
             InvHelper.mergeSameItems(handler, s -> s.isOf(Items.TOTEM_OF_UNDYING), 0, containerSlots);
-            merged = true;
-            delay = opts.actionDelay();
-            return;
-        }
-        if (putOutOneStack(mc, handler, containerSlots, false)) {
-            boxTookAnything = true;
-            delay = opts.actionDelay();
-            return;
-        }
-        if (putOutOneStack(mc, handler, containerSlots, true)) {
-            boxTookAnything = true;
-            boxTookPartial = true;
-            delay = opts.actionDelay();
-            return;
-        }
-        if (!boxTookAnything) {
-            FOElytraLog.warn("本盒没有取到任何东西（盒子里没有需要的物品，或背包 9-35 格全是要留的东西）");
-        } else if (boxTookPartial) {
-            FOElytraLog.tip("本盒只取到零散堆（没有整摞可拿）");
-        }
-        FOElytraLog.tip("本次取物完成（本盒已取 烟花 %d 组 / %s %d），剩余需求（增量账，跨盒时会按背包重算）：%s",
-            boxFwTaken, needs.xpBottles > 0 ? "瓶" : "鞘翅", boxSecondTaken,
-            needs.isEmpty() ? "无" : needs.toString());
-        next(State.CLOSE_SH, opts.actionDelay());
-    }
-    private int hotbarSameItem(MinecraftClient mc, ScreenHandler handler, Item item) {
-        for (int j = 0; j < 9; j++) {
-            if (mc.player.getInventory().getStack(j).isOf(item)) {
-                int raw = InvHelper.playerSlotId(handler, mc.player, j);
-                if (raw >= 0) return raw;
+            this.merged = true;
+            if (this.planIndex < this.plan.size()) {
+                PlanItem item = this.plan.get(this.planIndex);
+                FOElytraLog.detail("\u76d2\u5185\u5408\u5e76\u5b8c\u6210\uff08\u540c\u7c7b\u645e\u5408\u5e76\u624b\u52bf\uff1a\u62ac\u8d77\u6700\u5c0f\u90a3\u645e \u2192 \u53cc\u51fb\u805a\u62e2 PICKUP_ALL \u2192 \u653e\u56de\uff09\uff1b\u672c\u76d2\u8ba1\u5212\u53d6\u51fa %d \u7ec4\u70df\u82b1\u3001%d %s\uff08m/n \u53e3\u5f84\uff09", item.fireworkStacks(), item.second(), item.xpMode() ? "\u4e2a\u7ecf\u9a8c\u74f6" : "\u6761\u9798\u7fc5");
             }
+            this.delay = this.opts.actionDelay();
+            return;
+        }
+        if (this.putOutOneStack(mc, handler, containerSlots)) {
+            this.boxTookAnything = true;
+            this.delay = this.opts.actionDelay();
+            return;
+        }
+        if (!this.boxTookAnything) {
+            FOElytraLog.warn("\u672c\u76d2\u6ca1\u6709\u53d6\u5230\u4efb\u4f55\u4e1c\u897f\uff08\u76d2\u5b50\u91cc\u6ca1\u6709\u9700\u8981\u7684\u6574\u645e\uff0c\u6216\u80cc\u5305 9-35 \u683c\u5168\u662f\u8981\u7559\u7684\u4e1c\u897f\uff09", new Object[0]);
+        } else if (this.boxTookPartial) {
+            FOElytraLog.tip("\u672c\u76d2\u53ea\u53d6\u5230\u96f6\u6563\u5806\uff08\u6ca1\u6709\u6574\u645e\u53ef\u62ff\uff09", new Object[0]);
+        }
+        FOElytraLog.tip("\u672c\u76d2\u5b9e\u9645\u53d6\u5230 \u70df\u82b1 %d \u7ec4/\u74f6 %d/\u98df\u7269 %d/\u56fe\u817e %d/\u9798\u7fc5 %d\uff5c\u5269\u4f59\u9700\u6c42 %s", this.boxFwTaken, this.boxXpTaken, this.boxFoodTaken, this.boxTotemTaken, this.boxElytraTaken, this.needs.isEmpty() ? "\u65e0" : this.needs.toString());
+        this.logBoxZeroReasons(mc, handler, containerSlots);
+        if (this.planIndex < this.plan.size()) {
+            int gotSecond;
+            PlanItem planned = this.plan.get(this.planIndex);
+            int n = gotSecond = planned.xpMode() ? this.boxXpTaken / 64 : this.boxElytraTaken;
+            if (this.boxFwTaken < planned.fireworkStacks() || gotSecond < planned.second()) {
+                FOElytraLog.warn("\u672c\u76d2\u8ba1\u5212 \u70df\u82b1 %d \u7ec4/%s %d\uff0c\u5b9e\u9645\u53d6\u5230 \u70df\u82b1 %d \u7ec4/%s %d\uff08\u6ca1\u53d6\u5230\u7684\u90e8\u5206\u7559\u7ed9\u6e05\u5355\u91cc\u540e\u9762\u7684\u76d2\u5b50\uff09", planned.fireworkStacks(), planned.xpMode() ? "\u74f6" : "\u9798\u7fc5", planned.second(), this.boxFwTaken, planned.xpMode() ? "\u74f6" : "\u9798\u7fc5", gotSecond);
+            }
+        }
+        this.next(State.CLOSE_SH, this.opts.actionDelay());
+    }
+
+    private void resetBoxTakeCounters() {
+        this.boxFwTaken = 0;
+        this.boxSecondTaken = 0;
+        this.boxXpTaken = 0;
+        this.boxElytraTaken = 0;
+        this.boxTotemTaken = 0;
+        this.boxFoodTaken = 0;
+        this.boxFoodNoRoom = false;
+        this.forcedFoodSlot = -1;
+        this.takeVerify = null;
+        this.takeVerifyTicks = 0;
+        this.takeVerifyRetries = 0;
+    }
+
+    private void beginTakeVerify(MinecraftClient mc, ScreenHandler handler, int srcSlot, Item item, int kind) {
+        ItemStack src = ((Slot)handler.slots.get(srcSlot)).getStack();
+        this.takeVerify = new TakeVerify(item, srcSlot, ItemHelper.countInInventory((PlayerEntity)mc.player, item), this.countInContainer(handler, item), kind, src.isEmpty() ? 0 : src.getCount());
+        this.takeVerifyTicks = 0;
+        this.takeVerifyRetries = 0;
+    }
+
+    private int countInContainer(ScreenHandler handler, Item item) {
+        int n = 0;
+        int limit = Math.min(SupplyTask.containerSlots(handler), handler.slots.size());
+        for (int i = 0; i < limit; ++i) {
+            ItemStack s = ((Slot)handler.slots.get(i)).getStack();
+            if (s.isEmpty() || !s.isOf(item)) continue;
+            n += s.getCount();
+        }
+        return n;
+    }
+
+    private boolean verifyTakeStep(MinecraftClient mc, ScreenHandler handler, int containerSlots) {
+        TakeVerify v = this.takeVerify;
+        if (containerSlots < 27) {
+            this.takeVerify = null;
+            return false;
+        }
+        int nowInv = ItemHelper.countInInventory((PlayerEntity)mc.player, v.item());
+        int nowBox = this.countInContainer(handler, v.item());
+        if (nowInv > v.beforeInv() || v.beforeBox() >= 0 && nowBox < v.beforeBox()) {
+            FOElytraLog.detail("\u53d6\u7269\u9a8c\u8bc1\u901a\u8fc7\uff1a%s \u80cc\u5305 %d \u2192 %d\uff5c\u76d2\u5185 %d \u2192 %d", v.item().getName().getString(), v.beforeInv(), nowInv, v.beforeBox(), nowBox);
+            if (v.kind() == 1) {
+                ++this.boxFwTaken;
+            }
+            if (v.kind() == 2) {
+                ++this.boxSecondTaken;
+                if (v.item() == Items.EXPERIENCE_BOTTLE) {
+                    this.boxXpTaken += v.takenCount();
+                } else {
+                    this.boxElytraTaken += v.takenCount();
+                }
+            }
+            if (v.kind() == 3) {
+                this.boxTotemTaken += v.takenCount();
+            }
+            if (v.kind() == 4) {
+                this.boxFoodTaken += v.takenCount();
+            }
+            if (v.takenCount() < ItemHelper.stackSize(v.item())) {
+                this.boxTookPartial = true;
+            }
+            this.boxTookAnything = true;
+            this.consumeNeed(v.item(), v.takenCount());
+            this.takeVerify = null;
+            return false;
+        }
+        ++this.takeVerifyTicks;
+        if (this.takeVerifyTicks <= 30) {
+            return true;
+        }
+        if (this.takeVerifyRetries < 1) {
+            ++this.takeVerifyRetries;
+            FOElytraLog.warn("\u53d6\u7269\u6ca1\u751f\u6548\uff08%s \u80cc\u5305\u4ecd %d \u4e2a\uff09\u2192 \u6362\u6210\u4e09\u51fb\u4e92\u6362\u518d\u70b9\u4e00\u6b21", v.item().getName().getString(), nowInv);
+            this.noSneak("\u53d6\u7269\u91cd\u8bd5\u524d");
+            if (!this.mergeIntoPartialStack(mc, handler, v.srcSlot(), v.item())) {
+                this.moveToReplaceSlot(mc, handler, v.srcSlot(), v.item() == Items.EXPERIENCE_BOTTLE);
+            }
+            this.takeVerifyTicks = 0;
+            return true;
+        }
+        FOElytraLog.warn("\u53d6\u7269\u4e24\u6b21\u90fd\u6ca1\u751f\u6548\uff08%s \u80cc\u5305\u4ecd %d \u4e2a / \u76d2\u5185 %d \u4e2a\uff09\u2192 \u8fd9\u4e00\u7c7b\u8bb0\u6210\u6682\u65f6\u53d6\u4e0d\u5230", v.item().getName().getString(), nowInv, nowBox);
+        this.markTakeFailed(v.item());
+        this.takeVerify = null;
+        return false;
+    }
+
+    private void markTakeFailed(Item item) {
+        if (item == null) {
+            return;
+        }
+        this.exhausted.add(item);
+        if (this.matchesFood(item)) {
+            this.foodExhausted = true;
+        }
+        FOElytraLog.warn("\u6682\u65f6\u53d6\u4e0d\u5230\uff1a%s\uff08\u91cd\u8bd5\u4e00\u6b21\u4ecd\u6ca1\u8fdb\u80cc\u5305\uff09\u2192 \u672c\u8f6e\u4e0d\u518d\u4e3a\u5b83\u5f00\u76d2\u5b50\uff0c\u9700\u6c42\u5148\u7559\u7740\u4e0d\u5047\u88c5\u8865\u4e0a\u4e86", item.getName().getString());
+    }
+
+    private boolean quickTake(MinecraftClient mc, ScreenHandler handler, int srcSlot, Item item) {
+        return this.bulkTake(mc, handler, srcSlot, item);
+    }
+
+    private boolean slotTake(MinecraftClient mc, ScreenHandler handler, int srcSlot, int destInvIndex, Item item) {
+        ItemStack src = ((Slot)handler.slots.get(srcSlot)).getStack();
+        if (src.isEmpty() || !src.isOf(item)) {
+            return false;
+        }
+        int raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, destInvIndex);
+        if (raw < 0) {
+            return false;
+        }
+        this.noSneak("\u53d6\u98df\u7269\u6362\u4f4d\u524d");
+        this.beginTakeVerify(mc, handler, srcSlot, item, SupplyTask.kindOf(item));
+        InvHelper.moveStack(handler, srcSlot, raw);
+        FOElytraLog.detail("\u98df\u7269\u4e09\u51fb\u4e92\u6362\uff1a\u76d2\u5185\u69fd %d \u7684 %s x%d \u2192 \u624b\u4e0a/\u5feb\u6377\u680f %d\uff5c\u642c\u8fd0\u524d \u80cc\u5305 %d / \u76d2\u5185 %d", srcSlot, item.getName().getString(), this.takeVerify.takenCount(), destInvIndex, this.takeVerify.beforeInv(), this.takeVerify.beforeBox());
+        return true;
+    }
+
+    private boolean bulkTake(MinecraftClient mc, ScreenHandler handler, int srcSlot, Item item) {
+        this.noSneak("\u6574\u645e\u53d6\u7269\u524d");
+        if (this.mergeIntoPartialStack(mc, handler, srcSlot, item)) {
+            return true;
+        }
+        if (this.moveToReplaceSlot(mc, handler, srcSlot, item == Items.EXPERIENCE_BOTTLE)) {
+            return true;
+        }
+        FOElytraLog.detail("\u6574\u645e\u53d6\u7269\u6ca1\u843d\u70b9\uff1a\u76d2\u5185\u69fd %d \u7684 %s \u65e2\u6ca1\u6709\u534a\u645e\u540c\u7c7b\u53ef\u5408\u5e76\uff0c\u80cc\u5305\u4e5f\u6ca1\u6709\u53ef\u66ff\u6362\u69fd\uff08\u4e09\u51fb\u4e92\u6362\u9700\u8981\u843d\u70b9\uff09", srcSlot, item.getName().getString());
+        return false;
+    }
+
+    private boolean noSpaceForStack(MinecraftClient mc, Item item) {
+        for (int i = 0; i < 36; ++i) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (!s.isOf(item) || s.getCount() >= s.getMaxCount()) continue;
+            return false;
+        }
+        if (InvHelper.emptyBackpackSlots() > 0) {
+            return false;
+        }
+        return InvHelper.findEmptyHotbarSlot() < 0;
+    }
+
+    private int hotbarIndexOf(MinecraftClient mc, Item item) {
+        for (int j = 0; j < 9; ++j) {
+            if (!mc.player.getInventory().getStack(j).isOf(item)) continue;
+            return j;
         }
         return -1;
     }
+
+    private boolean noRoomForTotems(MinecraftClient mc) {
+        if (mc.player == null) {
+            return false;
+        }
+        PlayerInventory inv = mc.player.getInventory();
+        if (!inv.getStack(3).isOf(Items.TOTEM_OF_UNDYING) || !inv.getStack(4).isOf(Items.TOTEM_OF_UNDYING)) {
+            return false;
+        }
+        for (int i = 0; i < 36; ++i) {
+            ItemStack s = inv.getStack(i);
+            if (!s.isOf(Items.TOTEM_OF_UNDYING) || s.getCount() >= s.getMaxCount()) continue;
+            return false;
+        }
+        if (InvHelper.emptyBackpackSlots() > 0) {
+            return false;
+        }
+        return this.surplusSwapCandidate(mc) < 0;
+    }
+
+    private int surplusSwapCandidate(MinecraftClient mc) {
+        if (mc.player == null) {
+            return -1;
+        }
+        boolean fwSurplus = ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)mc.player, Items.FIREWORK_ROCKET)) > Math.max(0, this.opts.targetFireworkStacks());
+        boolean bottleSurplus = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.EXPERIENCE_BOTTLE) > Math.max(0, this.opts.targetXpBottles());
+        boolean foodSurplus = this.countFood(mc) > Math.max(0, this.opts.targetFoodCount());
+        for (int i = 9; i < 36; ++i) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.isEmpty()) continue;
+            if (this.isJunkNow(s)) {
+                return i;
+            }
+            if (s.isOf(Items.FIREWORK_ROCKET) && fwSurplus) {
+                return i;
+            }
+            if (s.isOf(Items.EXPERIENCE_BOTTLE) && bottleSurplus) {
+                return i;
+            }
+            if (!this.matchesFood(s) && !this.isFoodPriority(s) || !foodSurplus) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private void warnTotemNoRoom() {
+        if (this.totemRoomWarned) {
+            return;
+        }
+        this.totemRoomWarned = true;
+        FOElytraLog.warn("\u80cc\u5305\u6ca1\u6709\u7a7a\u4f4d\u653e\u66f4\u591a\u56fe\u817e\uff08\u5feb\u6377\u680f 3/4 \u5df2\u6ee1\u3001\u80cc\u5305\u65e0\u7a7a\u4f4d\uff09\uff0c\u5148\u817e\u683c\u5b50", new Object[0]);
+    }
+
+    private int foodTargetSlot(MinecraftClient mc, Item item) {
+        int same = this.hotbarIndexOf(mc, item);
+        if (same >= 0) {
+            return same;
+        }
+        int empty = InvHelper.findEmptyHotbarSlot();
+        if (empty >= 0) {
+            return empty;
+        }
+        for (int h = 0; h < 9; ++h) {
+            if (!this.isJunkNow(mc.player.getInventory().getStack(h))) continue;
+            return h;
+        }
+        return -1;
+    }
+
+    private int smallestFireworkHotbarSlot(MinecraftClient mc) {
+        int best = -1;
+        int bestCount = Integer.MAX_VALUE;
+        for (int h = 0; h < 9; ++h) {
+            ItemStack s = mc.player.getInventory().getStack(h);
+            if (!s.isOf(Items.FIREWORK_ROCKET) || s.getCount() >= bestCount) continue;
+            bestCount = s.getCount();
+            best = h;
+        }
+        return best;
+    }
+
+    private int forceFoodSlotByMovingFirework(MinecraftClient mc, ScreenHandler handler) {
+        int h = this.smallestFireworkHotbarSlot(mc);
+        if (h < 0) {
+            FOElytraLog.warn("\u98df\u7269\u6ca1\u5730\u65b9\u653e\uff0c\u60f3\u632a\u4e00\u7ec4\u70df\u82b1\u817e\u4f4d\u5b50\uff0c\u4f46\u5feb\u6377\u680f 0~8 \u91cc\u4e00\u7ec4\u70df\u82b1\u90fd\u6ca1\u6709", new Object[0]);
+            return -1;
+        }
+        int count = mc.player.getInventory().getStack(h).getCount();
+        int raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, h);
+        FOElytraLog.warn("\u6ca1\u6709\u7a7a\u683c\u653e\u98df\u7269 \u2192 \u628a\u5feb\u6377\u680f\u7b2c %d \u683c\u90a3\u7ec4\u70df\u82b1\uff08%d \u4e2a\uff09\u642c\u56de\u76d2\u5b50\u817e\u4f4d\u7f6e", h + 1, count);
+        if (raw >= 0) {
+            InvHelper.quickMove(handler, raw);
+            if (mc.player.getInventory().getStack(h).isEmpty()) {
+                this.forcedFoodSlot = h;
+                return h;
+            }
+        }
+        int back = -1;
+        for (int i = 9; i < 36; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            back = i;
+            break;
+        }
+        if (back < 0) {
+            FOElytraLog.warn("\u642c\u56de\u76d2\u5b50\u5931\u8d25\uff0c\u80cc\u5305 9~35 \u4e5f\u6ca1\u6709\u7a7a\u683c \u2192 \u76d2\u5b50\u91cc\u7684\u98df\u7269\u653e\u4e0d\u4e0b", new Object[0]);
+            return -1;
+        }
+        int rawBack = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, back);
+        if (raw < 0 || rawBack < 0) {
+            FOElytraLog.warn("\u642c\u56de\u76d2\u5b50\u5931\u8d25\uff0c\u80cc\u5305\u7a7a\u683c\u4e5f\u6362\u4e0d\u52a8\uff08\u69fd\u4f4d\u5bf9\u4e0d\u4e0a\uff09\u2192 \u76d2\u5b50\u91cc\u7684\u98df\u7269\u653e\u4e0d\u4e0b", new Object[0]);
+            return -1;
+        }
+        InvHelper.moveStack(handler, raw, rawBack);
+        if (mc.player.getInventory().getStack(h).isEmpty()) {
+            FOElytraLog.warn("\u642c\u56de\u76d2\u5b50\u6ca1\u6210\u529f \u2192 \u6539\u6210\u628a\u5feb\u6377\u680f\u7b2c %d \u683c\u90a3\u7ec4\u70df\u82b1\uff08%d \u4e2a\uff09\u6362\u8fdb\u80cc\u5305\u7b2c %d \u683c", h + 1, count, back + 1);
+            this.forcedFoodSlot = h;
+            return h;
+        }
+        FOElytraLog.warn("\u642c\u56de\u76d2\u5b50\u5931\u8d25\uff0c\u80cc\u5305\u7a7a\u683c\u4e5f\u6362\u4e0d\u52a8 \u2192 \u76d2\u5b50\u91cc\u7684\u98df\u7269\u653e\u4e0d\u4e0b", new Object[0]);
+        return -1;
+    }
+
+    private int foodTargetSlotForBox(MinecraftClient mc, ScreenHandler handler, int containerSlots) {
+        for (int i = 0; i < containerSlots; ++i) {
+            int t;
+            ItemStack s = ((Slot)handler.slots.get(i)).getStack();
+            if (s.isEmpty() || !this.matchesFood(s) || (t = this.foodTargetSlot(mc, s.getItem())) < 0) continue;
+            return t;
+        }
+        return -1;
+    }
+
+    private ShulkerScanner.Entry currentBoxEntry() {
+        if (this.planIndex < 0 || this.planIndex >= this.plan.size()) {
+            return null;
+        }
+        int slot = this.plan.get(this.planIndex).rawSlot();
+        for (ShulkerScanner.Entry e : this.scanned) {
+            if (e.slot() != slot) continue;
+            return e;
+        }
+        return null;
+    }
+
+    private void logBoxZeroReasons(MinecraftClient mc, ScreenHandler handler, int containerSlots) {
+        ShulkerScanner.Entry e = this.currentBoxEntry();
+        if (e == null) {
+            return;
+        }
+        this.zeroReason("\u70df\u82b1", Items.FIREWORK_ROCKET, e.fireworkStacks(), this.boxFwTaken, "\u7ec4", mc, handler, containerSlots);
+        this.zeroReason("\u7ecf\u9a8c\u74f6", Items.EXPERIENCE_BOTTLE, e.xpBottles(), this.boxXpTaken, "\u4e2a", mc, handler, containerSlots);
+        this.zeroReason("\u9798\u7fc5", Items.ELYTRA, e.elytra(), this.boxElytraTaken, "\u6761", mc, handler, containerSlots);
+        this.zeroReason("\u56fe\u817e", Items.TOTEM_OF_UNDYING, e.totems(), this.boxTotemTaken, "\u4e2a", mc, handler, containerSlots);
+        this.zeroReason("\u98df\u7269", null, e.food(), this.boxFoodTaken, "\u4e2a", mc, handler, containerSlots);
+    }
+
+    private void zeroReason(String name, Item item, int avail, int taken, String unit, MinecraftClient mc, ScreenHandler handler, int containerSlots) {
+        if (taken > 0) {
+            return;
+        }
+        if (avail <= 0) {
+            FOElytraLog.detail("%s\uff1a\u76d2\u5b50\u91cc\u672c\u6765\u5c31\u6ca1\u6709\uff08\u626b\u63cf 0 %s\uff09", name, unit);
+            return;
+        }
+        String why = item == null ? (this.foodTargetSlotForBox(mc, handler, containerSlots) < 0 ? "\u6709\u4f46\u6ca1\u5730\u65b9\u653e\uff08\u5feb\u6377\u680f\u6ca1\u6709\u540c\u79cd\u98df\u7269\u683c\u3001\u6ca1\u6709\u7a7a\u683c\u3001\u4e5f\u6ca1\u6709\u53ef\u66ff\u6362\u683c\uff0c\u552f\u4e00\u80fd\u632a\u7684\u70df\u82b1\u4e5f\u6ca1\u632a\u6210\uff09" : "\u6709\u4f46\u642c\u8fd0\u6ca1\u751f\u6548\uff08\u624b\u52bf\u5931\u8d25\uff09") : (item == Items.TOTEM_OF_UNDYING ? (this.noRoomForTotems(mc) ? "\u6709\u4f46\u6ca1\u5730\u65b9\u653e\uff08\u5feb\u6377\u680f 3/4 \u5df2\u6ee1\u3001\u80cc\u5305\u65e0\u7a7a\u4f4d\uff09" : "\u6709\u4f46\u642c\u8fd0\u6ca1\u751f\u6548\uff08\u624b\u52bf\u5931\u8d25\uff09") : (this.noSpaceForStack(mc, item) ? "\u6709\u4f46\u6ca1\u5730\u65b9\u653e\uff08\u80cc\u5305\u6ca1\u6709\u540c\u7c7b\u53ef\u5408\u5e76\u683c\u3001\u4e5f\u6ca1\u7a7a\u4f4d/\u53ef\u66ff\u6362\u683c\uff09" : "\u6709\u4f46\u642c\u8fd0\u6ca1\u751f\u6548\uff08\u624b\u52bf\u5931\u8d25\uff09"));
+        FOElytraLog.warn("%s\uff1a\u76d2\u5b50\u91cc\u6709 %d %s\uff0c\u4f46\u4e00\u53d1\u6ca1\u53d6\u5230 \u2014\u2014 %s", name, avail, unit, why);
+    }
+
     private int bestFoodSlot(MinecraftClient mc, ScreenHandler handler, int containerSlots) {
-        List<Item> prio = opts.foodPriority();
+        List<Item> prio = this.opts.foodPriority();
         int bestSlot = -1;
         int bestRank = Integer.MAX_VALUE;
-        for (int i = 0; i < containerSlots; i++) {
-            ItemStack stack = handler.slots.get(i).getStack();
-            if (stack.isEmpty() || !matchesFood(stack)) continue;
-            if (hotbarSameItem(mc, handler, stack.getItem()) < 0) continue;
+        for (int i = 0; i < containerSlots; ++i) {
+            ItemStack stack = ((Slot)handler.slots.get(i)).getStack();
+            if (stack.isEmpty() || !this.matchesFood(stack) || this.foodTargetSlot(mc, stack.getItem()) < 0 && this.smallestFireworkHotbarSlot(mc) < 0) continue;
             int rank = 0;
             if (prio != null && !prio.isEmpty()) {
                 int idx = prio.indexOf(stack.getItem());
-                rank = idx < 0 ? prio.size() : idx;
+                int n = rank = idx < 0 ? prio.size() : idx;
             }
-            if (rank < bestRank) {
-                bestRank = rank;
-                bestSlot = i;
-            }
+            if (rank >= bestRank) continue;
+            bestRank = rank;
+            bestSlot = i;
         }
         return bestSlot;
     }
-    private boolean putOutOneStack(MinecraftClient mc, ScreenHandler handler, int containerSlots, boolean allowPartial) {
-        PlanItem item = plan.get(planIndex);
-        int foodSlot = needs.food > 0 ? bestFoodSlot(mc, handler, containerSlots) : -1;
-        for (int i = 0; i < containerSlots; i++) {
-            ItemStack stack = handler.slots.get(i).getStack();
+
+    private boolean putOutOneStack(MinecraftClient mc, ScreenHandler handler, int containerSlots) {
+        int foodSlot;
+        PlanItem item = this.plan.get(this.planIndex);
+        int n = foodSlot = this.needs.food > 0 ? this.bestFoodSlot(mc, handler, containerSlots) : -1;
+        if (this.needs.totems > 0) {
+            FOElytraLog.detail("\u56fe\u817e\u6700\u91cd\u8981\uff1a\u672c\u8f6e\u5148\u4ece\u76d2\u5b50\u91cc\u62ff\u56fe\u817e\uff08\u8fd8\u5dee %d \u4e2a\uff09\uff0c\u5176\u5b83\u7269\u8d44/\u6742\u7269\u90fd\u7528\u6765\u7ed9\u5b83\u817e\u683c\u5b50", this.needs.totems);
+        }
+        for (int i = 0; i < containerSlots; ++i) {
+            ItemStack stack = ((Slot)handler.slots.get(i)).getStack();
             if (stack.isEmpty()) continue;
-            if (matchesFood(stack) && needs.food > 0) {
-                if (i != foodSlot) continue;
-                int raw = hotbarSameItem(mc, handler, stack.getItem());
-                if (raw < 0) continue;
-                int taken = stack.getCount();
-                Item takenItem = stack.getItem();
-                InvHelper.moveStack(handler, i, raw);
-                consumeNeed(takenItem, taken);
+            if (stack.isOf(Items.TOTEM_OF_UNDYING) && this.needs.totems > 0 && !this.exhausted.contains(Items.TOTEM_OF_UNDYING)) {
+                int target;
+                if (this.noRoomForTotems(mc)) {
+                    this.warnTotemNoRoom();
+                    this.exhausted.add(Items.TOTEM_OF_UNDYING);
+                    this.needs.totems = 0;
+                    FOElytraLog.warn("\u56fe\u817e\u5148\u8bb0\u6210\u6682\u65f6\u53d6\u4e0d\u5230\uff08\u80cc\u5305\u6ca1\u5730\u65b9\u653e\u3001\u4e5f\u6ca1\u6709\u80fd\u6362\u51fa\u53bb\u7684\u7269\u8d44\uff09\uff0c\u8fd9\u8f6e\u4e0d\u518d\u4ece\u76d2\u5b50\u91cc\u62ff\u5b83", new Object[0]);
+                    return false;
+                }
+                int n2 = target = mc.player.getInventory().getStack(3).isOf(Items.TOTEM_OF_UNDYING) ? 4 : 3;
+                if (this.slotTake(mc, handler, i, target, Items.TOTEM_OF_UNDYING)) {
+                    FOElytraLog.info("\u56fe\u817e\u8fdb\u5feb\u6377\u680f\u7b2c %d \u683c\uff08\u6700\u91cd\u8981\uff0c\u4f18\u5148\u62ff\uff09", target + 1);
+                    return true;
+                }
+                if (!this.bulkTake(mc, handler, i, Items.TOTEM_OF_UNDYING)) continue;
                 return true;
             }
-            if (stack.isOf(Items.TOTEM_OF_UNDYING) && needs.totems > 0) {
-                int target = mc.player.getInventory().getStack(3).isOf(Items.TOTEM_OF_UNDYING) ? 4 : 3;
-                int raw = InvHelper.playerSlotId(handler, mc.player, target);
-                if (raw >= 0) {
-                    int taken = stack.getCount();
-                    Item takenItem = stack.getItem();
-                    InvHelper.moveStack(handler, i, raw);
-                    consumeNeed(takenItem, taken);
+            if (this.matchesFood(stack) && this.needs.food > 0) {
+                if (i != foodSlot) continue;
+                int foodTarget = this.foodTargetSlot(mc, stack.getItem());
+                if (foodTarget < 0) {
+                    foodTarget = this.forceFoodSlotByMovingFirework(mc, handler);
+                }
+                if (foodTarget < 0) {
+                    if (this.boxFoodNoRoom) continue;
+                    this.boxFoodNoRoom = true;
+                    FOElytraLog.warn("\u76d2\u5185\u69fd %d \u6709 %s x%d\uff0c\u4f46\u5feb\u6377\u680f\u6ca1\u6709\u540c\u79cd\u98df\u7269\u683c\u3001\u6ca1\u6709\u7a7a\u683c\u3001\u4e5f\u6ca1\u6709\u53ef\u66ff\u6362\u683c\u3001\u70df\u82b1\u4e5f\u632a\u4e0d\u8d70 \u2192 \u98df\u7269\u8fd9\u6b21\u771f\u653e\u4e0d\u4e0b", i, stack.getItem().getName().getString(), stack.getCount());
+                    continue;
+                }
+                int foodCount = stack.getCount();
+                if (this.slotTake(mc, handler, i, foodTarget, stack.getItem())) {
+                    if (this.forcedFoodSlot == foodTarget) {
+                        this.forcedFoodSlot = -1;
+                        FOElytraLog.info("\u98df\u7269\u653e\u8fdb\u5feb\u6377\u680f\u7b2c %d \u683c\uff08%d \u4e2a\uff09", foodTarget + 1, foodCount);
+                    }
                     return true;
                 }
-                continue;
+                if (!this.mergeIntoPartialStack(mc, handler, i, stack.getItem())) continue;
+                return true;
             }
-            if (stack.isOf(Items.FIREWORK_ROCKET)
-                && (allowPartial || stack.getCount() >= stack.getMaxCount())
-                && boxFwTaken < item.fireworkStacks()) {
-                int taken = stack.getCount();
-                Item takenItem = stack.getItem();
-                if (mergeIntoPartialStack(mc, handler, i, takenItem)
-                    || moveToReplaceSlot(mc, handler, i, item.xpMode())) {
-                    boxFwTaken++;
-                    consumeNeed(takenItem, taken);
+            if (stack.isOf(Items.FIREWORK_ROCKET) && stack.getCount() >= stack.getMaxCount() && this.needs.fireworkStacks > 0) {
+                if (this.exhausted.contains(Items.FIREWORK_ROCKET)) {
+                    FOElytraLog.detail("\u76d2\u5185\u69fd %d \u6709\u70df\u82b1 x%d\uff0c\u4f46\u70df\u82b1\u5df2\u88ab\u767b\u8bb0\u6210\u672c\u8f6e\u6682\u65f6\u53d6\u4e0d\u5230\uff08\u91cd\u8bd5\u4e24\u6b21\u6ca1\u8fdb\u80cc\u5305\uff09\u2192 \u8fd9\u4e00\u8f6e\u4e0d\u518d\u52a8\u5b83", i, stack.getCount());
+                    continue;
+                }
+                if (this.mergeIntoPartialStack(mc, handler, i, stack.getItem())) {
                     return true;
                 }
-                return false;
+                return this.bulkTake(mc, handler, i, stack.getItem());
             }
-            boolean isSecond = item.xpMode()
-                ? stack.isOf(Items.EXPERIENCE_BOTTLE)
-                : (stack.isOf(Items.ELYTRA)
-                    && ItemHelper.hasEnchantment(stack, net.minecraft.enchantment.Enchantments.UNBREAKING, 3)
-                    && stack.getDamage() < 15);
-            if (isSecond && (allowPartial || stack.getCount() >= stack.getMaxCount())
-                && boxSecondTaken < item.second()) {
-                int taken = stack.getCount();
-                Item takenItem = stack.getItem();
-                if (mergeIntoPartialStack(mc, handler, i, takenItem)
-                    || moveToReplaceSlot(mc, handler, i, item.xpMode())) {
-                    boxSecondTaken++;
-                    consumeNeed(takenItem, taken);
-                    return true;
-                }
-                return false;
+            boolean isSecond = stack.isOf(Items.ELYTRA) && ItemHelper.hasEnchantment(stack, (RegistryKey<Enchantment>)Enchantments.UNBREAKING, 3) && stack.getDamage() < 15;
+            boolean bl = item.xpMode() ? stack.isOf(Items.EXPERIENCE_BOTTLE) : isSecond;
+            if (!isSecond || stack.getCount() < stack.getMaxCount() || !(item.xpMode() ? this.needs.xpBottles > 0 : this.needs.elytra > 0) || this.exhausted.contains(stack.getItem())) continue;
+            if (this.mergeIntoPartialStack(mc, handler, i, stack.getItem())) {
+                return true;
             }
+            return this.bulkTake(mc, handler, i, stack.getItem());
         }
         return false;
     }
+
     private boolean mergeIntoPartialStack(MinecraftClient mc, ScreenHandler handler, int rawSlot, Item item) {
-        ItemStack src = handler.slots.get(rawSlot).getStack();
-        if (src.isEmpty() || !src.isOf(item)) return false;
-        for (int pass = 0; pass < 2; pass++) {
+        ItemStack src = ((Slot)handler.slots.get(rawSlot)).getStack();
+        if (src.isEmpty() || !src.isOf(item)) {
+            return false;
+        }
+        for (int pass = 0; pass < 2; ++pass) {
             int from = pass == 0 ? 0 : 9;
             int to = pass == 0 ? 9 : 36;
-            for (int inv = from; inv < to; inv++) {
+            for (int inv = from; inv < to; ++inv) {
+                int raw;
                 ItemStack s = mc.player.getInventory().getStack(inv);
-                if (s.isEmpty() || !s.isOf(item)) continue;
-                if (s.getCount() >= s.getMaxCount()) continue;
-                int raw = InvHelper.playerSlotId(handler, mc.player, inv);
-                if (raw < 0) continue;
+                if (s.isEmpty() || !s.isOf(item) || s.getCount() >= s.getMaxCount() || (raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, inv)) < 0) continue;
+                this.beginTakeVerify(mc, handler, rawSlot, item, SupplyTask.kindOf(item));
                 InvHelper.moveStack(handler, rawSlot, raw);
-                FOElytraLog.detail("合并取物：盒 #%d %s → 背包 #%d（已有 %d/%d）",
-                    rawSlot, item.getName().getString(), inv, s.getCount(), s.getMaxCount());
+                FOElytraLog.detail("\u5408\u5e76\u53d6\u7269\uff1a\u76d2 #%d %s \u2192 \u80cc\u5305 #%d\uff08\u5df2\u6709 %d/%d\uff09\uff5c\u642c\u8fd0\u524d \u80cc\u5305 %d / \u76d2\u5185 %d", rawSlot, item.getName().getString(), inv, s.getCount(), s.getMaxCount(), this.takeVerify.beforeInv(), this.takeVerify.beforeBox());
                 return true;
             }
         }
         return false;
     }
+
+    private static int kindOf(Item item) {
+        if (item == Items.FIREWORK_ROCKET) {
+            return 1;
+        }
+        if (item == Items.EXPERIENCE_BOTTLE || item == Items.ELYTRA) {
+            return 2;
+        }
+        if (item == Items.TOTEM_OF_UNDYING) {
+            return 3;
+        }
+        return 4;
+    }
+
     private boolean moveToReplaceSlot(MinecraftClient mc, ScreenHandler handler, int rawSlot, boolean xpMode) {
-        if (replaceSlots.isEmpty()) {
-            computeReplaceSlots(mc, xpMode);
+        if (this.replaceSlots.isEmpty()) {
+            this.computeReplaceSlots(mc, xpMode);
         }
         int invIndex = -1;
         int rawTarget = -1;
-        for (int checked = 0; checked < SWAP_RECHECK_MAX && !replaceSlots.isEmpty(); checked++) {
-            int candidate = replaceSlots.pollFirst();
+        for (int checked = 0; checked < 6 && !this.replaceSlots.isEmpty(); ++checked) {
+            int candidate = this.replaceSlots.pollFirst();
             ItemStack now = mc.player.getInventory().getStack(candidate);
-            if (!isJunkNow(now)) {
-                replaceRecheckSkips++;
-                Integer next = replaceSlots.peekFirst();
-                FOElytraLog.detail("换位目标 背包 #%d = %s → 已排除（现在不是杂物了，RC-10 复检），改选 #%s",
-                    candidate, describeStack(now), next == null ? "（名单已空）" : String.valueOf(next));
+            if (!this.isJunkNow(now)) {
+                ++this.replaceRecheckSkips;
+                Integer next = this.replaceSlots.peekFirst();
+                FOElytraLog.detail("\u6362\u4f4d\u76ee\u6807 \u80cc\u5305 #%d = %s \u2192 \u5df2\u6392\u9664\uff08\u73b0\u5728\u4e0d\u662f\u6742\u7269\u4e86\uff0cRC-10 \u590d\u68c0\uff09\uff0c\u6539\u9009 #%s", candidate, this.describeStack(now), next == null ? "\uff08\u540d\u5355\u5df2\u7a7a\uff09" : String.valueOf(next));
                 continue;
             }
-            int raw = InvHelper.playerSlotId(handler, mc.player, candidate);
+            int raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, candidate);
             if (raw < 0) continue;
             invIndex = candidate;
             rawTarget = raw;
             break;
         }
         if (rawTarget < 0) {
-            if (!starvedWarned) {
-                starvedWarned = true;
-                FOElytraLog.warn("没多余槽位了（背包 9-35 格全是要留的东西），停止取物");
+            String what;
+            if (!this.starvedWarned) {
+                this.starvedWarned = true;
+                FOElytraLog.warn("\u6ca1\u591a\u4f59\u69fd\u4f4d\u4e86\uff08\u80cc\u5305 9-35 \u683c\u5168\u662f\u8981\u7559\u7684\u4e1c\u897f\uff09\uff0c\u505c\u6b62\u53d6\u7269", new Object[0]);
             }
-            ItemStack stuck = (rawSlot >= 0 && rawSlot < handler.slots.size())
-                ? handler.slots.get(rawSlot).getStack() : ItemStack.EMPTY;
-            String what = stuck.isEmpty()
-                ? ("盒 #" + rawSlot)
-                : ("盒 #" + rawSlot + " " + stuck.getName().getString() + " x" + stuck.getCount());
-            if (!what.equals(starvedDetailKey)) {
-                starvedDetailKey = what;
-                String summary = replaceSlotSummary.isEmpty() ? "（没有可替换槽位统计）" : replaceSlotSummary;
-                if (replaceRecheckSkips > 0) summary += "｜点击前复检又排除 " + replaceRecheckSkips + " 格";
-                FOElytraLog.detail("取物受阻（拿不出来）：想取 %s，但背包 9-35 没有可用槽位（%s）"
-                        + "→ 本盒放弃该物品；这只说明「腾不出格子」，不代表盒子里/末影箱里没有（不登记暂时取不到）",
-                    what, summary);
+            ItemStack stuck = rawSlot >= 0 && rawSlot < handler.slots.size() ? ((Slot)handler.slots.get(rawSlot)).getStack() : ItemStack.EMPTY;
+            String string = what = stuck.isEmpty() ? "\u76d2 #" + rawSlot : "\u76d2 #" + rawSlot + " " + stuck.getName().getString() + " x" + stuck.getCount();
+            if (!what.equals(this.starvedDetailKey)) {
+                Object summary;
+                this.starvedDetailKey = what;
+                Object object = summary = this.replaceSlotSummary.isEmpty() ? "\uff08\u6ca1\u6709\u53ef\u66ff\u6362\u69fd\u4f4d\u7edf\u8ba1\uff09" : this.replaceSlotSummary;
+                if (this.replaceRecheckSkips > 0) {
+                    summary = (String)summary + "\uff5c\u70b9\u51fb\u524d\u590d\u68c0\u53c8\u6392\u9664 " + this.replaceRecheckSkips + " \u683c";
+                }
+                FOElytraLog.detail("\u53d6\u7269\u53d7\u963b\uff08\u62ff\u4e0d\u51fa\u6765\uff09\uff1a\u60f3\u53d6 %s\uff0c\u4f46\u80cc\u5305 9-35 \u6ca1\u6709\u53ef\u7528\u69fd\u4f4d\uff08%s\uff09\u2192 \u672c\u76d2\u653e\u5f03\u8be5\u7269\u54c1\uff1b\u8fd9\u53ea\u8bf4\u660e\u300c\u817e\u4e0d\u51fa\u683c\u5b50\u300d\uff0c\u4e0d\u4ee3\u8868\u76d2\u5b50\u91cc/\u672b\u5f71\u7bb1\u91cc\u6ca1\u6709\uff08\u4e0d\u767b\u8bb0\u6682\u65f6\u53d6\u4e0d\u5230\uff09", what, summary);
             }
             return false;
         }
+        ItemStack moving = ((Slot)handler.slots.get(rawSlot)).getStack();
+        if (!moving.isEmpty()) {
+            this.beginTakeVerify(mc, handler, rawSlot, moving.getItem(), SupplyTask.kindOf(moving.getItem()));
+        }
+        this.noSneak("\u4e09\u51fb\u4e92\u6362\u524d");
         InvHelper.moveStack(handler, rawSlot, rawTarget);
-        FOElytraLog.debug("取物：盒 #%d → 背包 #%d", rawSlot, invIndex);
+        FOElytraLog.detail("\u4e09\u51fb\u4e92\u6362\u53d6\u7269\uff08\u6d88\u8017\u4e00\u683c\u53ef\u66ff\u6362\u69fd\uff09\uff1a\u76d2\u5185\u69fd %d \u7684 %s x%d \u2192 \u80cc\u5305 #%d\uff1b\u88ab\u6362\u51fa\u6765\u7684\u4e1c\u897f\u843d\u56de\u76d2\u5185\u69fd %d\uff0c\u4e0d\u4e22", rawSlot, moving.isEmpty() ? "\u7a7a" : moving.getItem().getName().getString(), moving.getCount(), invIndex, rawSlot);
         return true;
     }
+
     private void consumeNeed(Item item, int taken) {
         int count = Math.max(1, taken);
-        if (item == Items.FIREWORK_ROCKET) needs.fireworkStacks -= Math.max(1, count / 64);
-        else if (item == Items.EXPERIENCE_BOTTLE) needs.xpBottles -= count;
-        else if (item == Items.TOTEM_OF_UNDYING) needs.totems -= count;
-        else if (item == Items.ELYTRA) needs.elytra -= count;
-        else if (matchesFood(item)) needs.food -= count;
-        if (needs.fireworkStacks < 0) needs.fireworkStacks = 0;
-        if (needs.xpBottles < 0) needs.xpBottles = 0;
-        if (needs.food < 0) needs.food = 0;
-        if (needs.totems < 0) needs.totems = 0;
-        if (needs.elytra < 0) needs.elytra = 0;
+        if (item == Items.FIREWORK_ROCKET) {
+            this.needs.fireworkStacks -= Math.max(1, count / 64);
+        } else if (item == Items.EXPERIENCE_BOTTLE) {
+            this.needs.xpBottles -= count;
+        } else if (item == Items.TOTEM_OF_UNDYING) {
+            this.needs.totems -= count;
+        } else if (item == Items.ELYTRA) {
+            this.needs.elytra -= count;
+        } else if (this.matchesFood(item)) {
+            this.needs.food -= count;
+        }
+        if (this.needs.fireworkStacks < 0) {
+            this.needs.fireworkStacks = 0;
+        }
+        if (this.needs.xpBottles < 0) {
+            this.needs.xpBottles = 0;
+        }
+        if (this.needs.food < 0) {
+            this.needs.food = 0;
+        }
+        if (this.needs.totems < 0) {
+            this.needs.totems = 0;
+        }
+        if (this.needs.elytra < 0) {
+            this.needs.elytra = 0;
+        }
     }
+
     private int findReceiveSlot(MinecraftClient mc, ItemStack moving) {
-        var inv = mc.player.getInventory();
+        int i;
+        PlayerInventory inv = mc.player.getInventory();
         Item item = moving.getItem();
-        for (int i = 0; i < 36; i++) {
+        for (i = 0; i < 36; ++i) {
             ItemStack s = inv.getStack(i);
-            if (!s.isEmpty() && s.isOf(item) && s.getCount() < s.getMaxCount()) return i;
+            if (s.isEmpty() || !s.isOf(item) || s.getCount() >= s.getMaxCount()) continue;
+            return i;
         }
         if (item == Items.FIREWORK_ROCKET || item == Items.EXPERIENCE_BOTTLE) {
-            for (int i = 0; i < 9; i++) {
-                if (inv.getStack(i).isEmpty()) return i;
+            for (i = 0; i < 9; ++i) {
+                if (!inv.getStack(i).isEmpty()) continue;
+                return i;
             }
         }
-        for (int i = 9; i < 36; i++) {
-            if (inv.getStack(i).isEmpty()) return i;
+        for (i = 9; i < 36; ++i) {
+            if (!inv.getStack(i).isEmpty()) continue;
+            return i;
         }
-        for (int i = 0; i < 9; i++) {
-            if (inv.getStack(i).isEmpty()) return i;
+        for (i = 0; i < 9; ++i) {
+            if (!inv.getStack(i).isEmpty()) continue;
+            return i;
         }
         return -1;
     }
+
     private boolean storeOneJunkStack(MinecraftClient mc, ScreenHandler handler) {
-        for (int i = 9; i < 36; i++) {
-            if (storeTried.contains(i)) continue;
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isEmpty() || isEssential(s)) continue;
-            if (!opts.storeItems().isEmpty() && !opts.storeItems().contains(s.getItem())) continue;
-            int raw = InvHelper.playerSlotId(handler, mc.player, i);
-            if (raw < 0) continue;
-            storeTried.add(i);
-            InvHelper.quickMove(handler, raw);
+        int containerSlots = SupplyTask.containerSlots(handler);
+        for (int i = 9; i < 36; ++i) {
+            int raw;
+            ItemStack s;
+            if (this.storeTried.contains(i) || (s = mc.player.getInventory().getStack(i)).isEmpty() || this.isEssential(s) || !this.opts.storeItems().isEmpty() && !this.opts.storeItems().contains(s.getItem()) || (raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, i)) < 0) continue;
+            int target = -1;
+            for (int c = 0; c < containerSlots; ++c) {
+                ItemStack in = ((Slot)handler.slots.get(c)).getStack();
+                if (!in.isEmpty() && (!in.isOf(s.getItem()) || in.getCount() >= in.getMaxCount())) continue;
+                target = c;
+                break;
+            }
+            this.storeTried.add(i);
+            if (target < 0) {
+                FOElytraLog.detail("\u76d2\u5185\u6ca1\u6709\u7a7a\u69fd\u4e5f\u6ca1\u6709\u53ef\u5408\u5e76\u7684\u540c\u7c7b\u645e\uff0c%s \u5148\u7559\u5728\u80cc\u5305\uff08\u4e09\u51fb\u4e92\u6362\u8981\u6709\u843d\u70b9\uff09", s.getItem().getName().getString());
+                continue;
+            }
+            this.noSneak("\u585e\u6742\u7269\u8fdb\u76d2\u524d");
+            InvHelper.moveStack(handler, raw, target);
+            FOElytraLog.detail("\u585e\u6742\u7269\u8fdb\u76d2\uff08\u4e09\u51fb\u4e92\u6362\uff09\uff1a\u80cc\u5305 #%d \u7684 %s x%d \u2192 \u76d2\u5185\u69fd %d", i, s.getItem().getName().getString(), s.getCount(), target);
             return true;
         }
         return false;
     }
+
     private boolean isEssential(ItemStack s) {
-        return s.isOf(Items.FIREWORK_ROCKET) || s.isOf(Items.EXPERIENCE_BOTTLE)
-            || s.isOf(Items.TOTEM_OF_UNDYING) || s.isOf(Items.ELYTRA)
-            || s.isOf(Items.ENDER_CHEST) || ItemHelper.isShulkerBox(s)
-            || isPickaxe(s) || isSword(s) || matchesFood(s);
+        return s.isOf(Items.FIREWORK_ROCKET) || s.isOf(Items.EXPERIENCE_BOTTLE) || s.isOf(Items.TOTEM_OF_UNDYING) || s.isOf(Items.ELYTRA) || s.isOf(Items.ENDER_CHEST) || ItemHelper.isShulkerBox(s) || this.isPickaxe(s) || this.isSword(s) || this.matchesFood(s) || this.isFoodPriority(s);
     }
+
+    private boolean isFoodPriority(ItemStack s) {
+        if (s.isEmpty()) {
+            return false;
+        }
+        List<Item> prio = this.opts.foodPriority();
+        return prio != null && !prio.isEmpty() && prio.contains(s.getItem());
+    }
+
     private boolean matchesFood(ItemStack s) {
-        if (opts.foodItems().isEmpty()) return ItemHelper.isFood(s);
-        return opts.foodItems().contains(s.getItem());
+        if (this.opts.foodItems().isEmpty()) {
+            return ItemHelper.isFood(s);
+        }
+        return this.opts.foodItems().contains(s.getItem());
     }
+
     private boolean matchesFood(Item item) {
-        if (item == null) return false;
-        List<Item> food = opts.foodItems();
-        if (food == null || food.isEmpty()) return SettingHelper.isFood(item);
+        if (item == null) {
+            return false;
+        }
+        List<Item> food = this.opts.foodItems();
+        if (food == null || food.isEmpty()) {
+            return SettingHelper.isFood(item);
+        }
         return food.contains(item);
     }
+
     private void breakShulker(MinecraftClient mc) {
-        if (shulkerPos == null) {
-            next(State.REOPEN_EC, 0);
+        this.noSneak("\u6316\u76d2\u5b50\u524d");
+        if (this.shulkerPos == null) {
+            this.next(State.REOPEN_EC, 0);
             return;
         }
         InvHelper.closeScreen();
-        if (mc.world.getBlockState(shulkerPos).isAir()) {
-            next(State.WAIT_BREAK_SH, 1);
+        if (mc.world.getBlockState(this.shulkerPos).isAir()) {
+            this.next(State.WAIT_BREAK_SH, 1);
             return;
         }
-        if (!breakRequested) {
-            breakTicks = 0;
-            pickupWait = 0;
-            shBreakWaitTicks = 0;
-            freeSlotDrops = 0;
-            shulkerBefore = snapshotShulkers(mc);
-            shulkerBreakTarget = ItemHelper.countShulkers(mc.player) + 1;
-            Block block = mc.world.getBlockState(shulkerPos).getBlock();
-            if (opts.useBaritoneMine() && BaritoneHook.available() && hasPickaxe(mc)) {
-                if (BaritoneHook.mine(shulkerBreakTarget, block)) {
-                    breakRequested = true;
-                    FOElytraLog.tip("让 Baritone 挖回潜影盒（目标：背包 %d 个）", shulkerBreakTarget);
-                    next(State.WAIT_BREAK_SH, 1);
+        if (!this.breakRequested) {
+            this.breakTicks = 0;
+            this.pickupWait = 0;
+            this.waitTicks = 0;
+            this.rescueTicks = 0;
+            this.rescueProgressTick = 0;
+            this.rescueBackpackSeen = -1;
+            this.rescueDropSeen = -1;
+            this.rescueTarget = null;
+            this.mineIdleTicks = 0;
+            this.mineRetries = 0;
+            this.manualBreakRetries = 0;
+            this.mineManual = false;
+            this.mineBackFailReason = "";
+            this.breakBlockGone = false;
+            this.shulkerBreakTarget = ItemHelper.countShulkers((PlayerEntity)mc.player) + 1;
+            Block block = mc.world.getBlockState(this.shulkerPos).getBlock();
+            if (this.opts.useBaritoneMine() && BaritoneHook.available() && this.hasPickaxe(mc)) {
+                if (BaritoneHook.mine(this.shulkerBreakTarget, block)) {
+                    this.breakRequested = true;
+                    FOElytraLog.tip("\u8ba9 Baritone \u6316\u56de\u6f5c\u5f71\u76d2\uff08\u76ee\u6807\uff1a\u80cc\u5305 %d \u4e2a\uff09", this.shulkerBreakTarget);
+                    this.next(State.WAIT_BREAK_SH, 1);
                     return;
                 }
-            } else if (!hasPickaxe(mc)) {
-                FOElytraLog.warn("快捷栏里没有镐，挖不回潜影盒，它会留在原地");
-                pendingReturn = false;
-                next(State.REOPEN_EC, opts.actionDelay());
-                return;
+            } else if (!this.hasPickaxe(mc)) {
+                FOElytraLog.warn("\u5feb\u6377\u680f\u91cc\u6ca1\u6709\u9550\uff1a\u6539\u7528\u5f92\u624b\u6316\u56de\u6f5c\u5f71\u76d2 %s\uff08\u5f92\u624b\u6316\u5f97\u6162\uff0c\u4f46\u76d2\u5b50\u4f1a\u6389\uff09", SupplyTask.posText(this.shulkerPos));
+            } else {
+                FOElytraLog.warn("Baritone \u6316\u6398\u4e0d\u53ef\u7528\uff0c\u6539\u7528\u6e10\u8fdb\u7834\u574f\uff08\u6389\u843d\u7269\u53ef\u80fd\u4e0d\u4f1a\u81ea\u52a8\u6361\u8d77\uff09", new Object[0]);
             }
-            FOElytraLog.warn("Baritone 挖掘不可用，改用渐进破坏（掉落物可能不会自动捡起）");
-            breakRequested = true;
+            this.breakRequested = true;
         }
-        if (BlockBreaker.tick(shulkerPos)) {
-            breakRequested = false;
-            if (!mc.world.getBlockState(shulkerPos).isAir()) {
-                FOElytraLog.warn("潜影盒没能挖掉，它留在了原地");
-                pendingReturn = false;
-                next(State.REOPEN_EC, opts.actionDelay());
+        if (BlockBreaker.tick(this.shulkerPos)) {
+            this.breakRequested = false;
+            if (!mc.world.getBlockState(this.shulkerPos).isAir()) {
+                if (this.manualBreakRetries < 2) {
+                    ++this.manualBreakRetries;
+                    BlockBreaker.reset();
+                    InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)this.shulkerPos));
+                    FOElytraLog.warn("\u5f92\u624b\u6316\u6ca1\u6316\u6389\u6f5c\u5f71\u76d2\uff08%s\uff09\u2192 \u6362\u4e2a\u89d2\u5ea6\u518d\u6316\u4e00\u6b21\uff08\u7b2c %d/2 \u6b21\uff09", SupplyTask.posText(this.shulkerPos), this.manualBreakRetries);
+                    this.breakRequested = true;
+                    this.delay = this.opts.actionDelay();
+                    return;
+                }
+                FOElytraLog.warn("\u5f92\u624b\u6316 2 \u6b21\u90fd\u6ca1\u6316\u6389\u6f5c\u5f71\u76d2\uff08%s\uff09", SupplyTask.posText(this.shulkerPos));
+                this.leaveShulkerBehind("\u5f92\u624b\u6316 2 \u6b21\u6ca1\u6316\u6389\uff08\u65b9\u5757\u6ca1\u6d88\u5931\uff09", false);
                 return;
             }
-            shBreakWaitTicks = 0;
-            next(State.WAIT_BREAK_SH, 2);
+            this.waitTicks = 0;
+            this.next(State.WAIT_BREAK_SH, 2);
         }
     }
+
     private void waitBreakShulker(MinecraftClient mc) {
-        boolean gone = mc.world.getBlockState(shulkerPos).isAir();
-        // V5.2：槽位差 + 数量差取或。只看数量会漏掉「叠放进原来那摞」，只看槽位会漏掉叠放本身。
-        boolean gotIt = InventoryPickupLogic.pickedUp(shulkerBefore, snapshotShulkers(mc))
-            || ItemHelper.countShulkers(mc.player) >= shulkerBreakTarget;
-        if (threatActive) {
-            // 被火球纠缠时不推进挖掘超时（Baritone 这时本来也被暂停了）
-            if (shBreakWaitTicks != 0) {
-                FOElytraLog.detail("被火球打断，挖掘等待计数清零（原 %d tick）", shBreakWaitTicks);
-            }
-            shBreakWaitTicks = 0;
-        } else {
-            shBreakWaitTicks++;
-        }
-        MineWaitLogic.Outcome outcome =
-            MineWaitLogic.evaluate(gone, gotIt, shBreakWaitTicks, MineWaitLogic.SHULKER_TIMEOUT_TICKS);
-        if (outcome == MineWaitLogic.Outcome.COLLECTED) {
+        boolean fresh;
+        boolean gotIt;
+        boolean gone = mc.world.getBlockState(this.shulkerPos).isAir();
+        int backpackNow = ItemHelper.countShulkers((PlayerEntity)mc.player);
+        boolean bl = gotIt = backpackNow >= this.shulkerBreakTarget;
+        if (gone && gotIt) {
             BaritoneHook.stop();
-            breakRequested = false;
-            FOElytraLog.tip("潜影盒已收回（背包 %d 个）", ItemHelper.countShulkers(mc.player));
-            pendingReturn = true;
-            next(State.REOPEN_EC, opts.actionDelay());
+            this.breakRequested = false;
+            FOElytraLog.tip("\u6f5c\u5f71\u76d2\u5df2\u6536\u56de\uff08\u80cc\u5305 %d \u4e2a\uff09", backpackNow);
+            this.pendingReturn = true;
+            this.next(State.REOPEN_EC, this.opts.actionDelay());
             return;
         }
-        // 方块已经没了但盒子还没进背包 —— 很可能是背包满了，主动丢垃圾腾位（V5.2）
-        if (gone && !gotIt) freeSlotForPickup(mc);
-        // 方块还在 = Baritone 正常在挖（寻路/挖掘/捡拾），不要插手中断；方块没了才进入拾取窗口收尾。
-        stopMiningAfterPickupWindow(gone);
-        if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
-            FOElytraLog.warn("挖掘补给箱失败!（盒子没进背包：可能掉在远处/被水冲走/背包满）");
-            BaritoneHook.stop();
-            breakRequested = false;
-            pendingReturn = true;
-            next(State.REOPEN_EC, opts.actionDelay());
+        if (!gone) {
+            this.waitBreakShulkerMining(mc, backpackNow);
+            return;
+        }
+        if (!this.breakBlockGone) {
+            this.breakBlockGone = true;
+            this.waitTicks = 0;
+            this.rescueProgressTick = 0;
+            this.mineIdleTicks = 0;
+            FOElytraLog.detail("\u6f5c\u5f71\u76d2\u5df2\u7ecf\u6316\u6389\uff08%s\uff09\uff0c\u5f00\u59cb\u7b49\u6389\u843d\u7269\u8fdb\u80cc\u5305", SupplyTask.posText(this.shulkerPos));
+        }
+        this.stopMiningAfterPickupWindow(true);
+        ++this.waitTicks;
+        this.rescueSupplyDrops(mc, true, backpackNow);
+        if (this.waitTicks <= 300) {
+            return;
+        }
+        DropEvidence ev = this.nearbySupplyDrops(mc);
+        boolean bl2 = fresh = this.waitTicks - this.rescueProgressTick <= 200;
+        if (ev.count() > 0 && fresh && this.waitTicks <= 900) {
+            if (this.waitTicks % 40 == 0) {
+                FOElytraLog.detail("\u8865\u7ed9\u7bb1\u6389\u843d\u7269\u8fd8\u6ca1\u6361\u5b8c\uff1a\u9644\u8fd1 %d \u4e2a\uff08\u6700\u8fd1 %.1f \u683c\uff0c\u5728 %s\uff09\uff5c\u5df2\u7b49 %d \u79d2\uff0c\u7ee7\u7eed\u8ffd", ev.count(), ev.nearest(), SupplyTask.posText(ev.nearestPos()), this.waitTicks / 20);
+            }
+            return;
+        }
+        FOElytraLog.warn("\u6316\u6398\u8865\u7ed9\u7bb1\u5931\u8d25\uff1a\u80cc\u5305\u4ecd %d \u4e2a\uff5c\u9644\u8fd1\u6389\u843d\u7269 %d \u4e2a\uff08\u6700\u8fd1 %s\uff0c\u5728 %s\uff09\uff5c\u53ef\u80fd\u6389\u8fdb\u5ca9\u6d46/\u865a\u7a7a", backpackNow, ev.count(), ev.nearestPos() == null ? "\u65e0" : String.format("%.1f \u683c", ev.nearest()), SupplyTask.posText(ev.nearestPos()));
+        BaritoneHook.stop();
+        this.breakRequested = false;
+        this.recordLostShulker("\u76d2\u5b50\u5df2\u6d88\u5931\u4f46\u6ca1\u8fdb\u80cc\u5305");
+        this.pendingReturn = true;
+        this.next(State.REOPEN_EC, this.opts.actionDelay());
+    }
+
+    private void waitBreakShulkerMining(MinecraftClient mc, int backpackNow) {
+        this.stopMiningAfterPickupWindow(false);
+        if (this.fireballNearby(mc)) {
+            if (this.waitTicks > 40 || this.mineIdleTicks > 0) {
+                FOElytraLog.detail("\u9644\u8fd1\u6709\u706b\u7403\uff0c\u6316\u6398\u7b49\u5f85\u8ba1\u65f6\u5148\u6e05\u96f6\uff08%s\uff09", SupplyTask.posText(this.shulkerPos));
+            }
+            this.waitTicks = 0;
+            this.mineIdleTicks = 0;
+        }
+        ++this.waitTicks;
+        if (this.mineManual) {
+            boolean breakerDone = BlockBreaker.tick(this.shulkerPos);
+            if (!mc.world.getBlockState(this.shulkerPos).isAir()) {
+                if (!breakerDone) {
+                    return;
+                }
+                this.retryMineBack(mc, this.shulkerPos, true, this.hasPickaxe(mc) ? "\u5f92\u624b\u6316\u6ca1\u6316\u6389\uff08\u65b9\u5757\u6ca1\u6d88\u5931\uff09" : "\u6ca1\u6709\u9550\u5b50\uff0c\u5f92\u624b\u6316\u6ca1\u6316\u6389");
+                return;
+            }
+            this.mineManual = false;
+            return;
+        }
+        if (BaritoneHook.isMining()) {
+            this.mineIdleTicks = 0;
+            if (this.waitTicks % 100 == 0) {
+                FOElytraLog.info("\u6316\u76d2\u4e2d\u2026\u5df2 %d \u79d2\uff08\u65b9\u5757\u8fd8\u5728 %s\uff0cBaritone \u6b63\u5728\u6316\uff09", this.waitTicks / 20, SupplyTask.posText(this.shulkerPos));
+            }
+        } else {
+            ++this.mineIdleTicks;
+            if (this.mineIdleTicks >= 60) {
+                this.mineIdleTicks = 0;
+                if (this.mineRetries >= 3) {
+                    String why = this.mineFailClass(mc, "\u6f5c\u5f71\u76d2");
+                    FOElytraLog.warn("\u6f5c\u5f71\u76d2\u6316\u4e0d\u52a8\uff08\u5df2\u91cd\u8bd5 %d \u6b21\uff09\uff1a%s", this.mineRetries, why);
+                    this.leaveShulkerBehind(why);
+                    return;
+                }
+                if (!this.mineManual && this.opts.useBaritoneMine() && BaritoneHook.available() && this.hasPickaxe(mc)) {
+                    ++this.mineRetries;
+                    Block block = mc.world.getBlockState(this.shulkerPos).getBlock();
+                    boolean issued = BaritoneHook.mine(this.shulkerBreakTarget, block);
+                    FOElytraLog.warn("\u91cd\u65b0\u4e0b\u53d1\u6316\u76d2\uff1a\u7b2c %d/%d \u6b21\uff08\u65b9\u5757\u8fd8\u5728 %s\uff09\uff5c\u4e0b\u53d1%s", this.mineRetries, 3, SupplyTask.posText(this.shulkerPos), issued ? "\u6210\u529f" : "\u5931\u8d25");
+                    if (!issued) {
+                        this.retryMineBack(mc, this.shulkerPos, true, this.mineFailClass(mc, "\u6f5c\u5f71\u76d2"));
+                        return;
+                    }
+                } else {
+                    this.retryMineBack(mc, this.shulkerPos, true, this.hasPickaxe(mc) ? "\u6316\u77ff\u8fdb\u7a0b\u53cd\u590d\u505c\u6389" : "\u6ca1\u6709\u9550\u5b50");
+                    return;
+                }
+            }
+        }
+        if (this.waitTicks > 400) {
+            String why = "\u7b49 20 \u79d2\u6ca1\u6316\u6389\uff08\u91cd\u53d1\u6316\u77ff " + this.mineRetries + " \u6b21\uff0c\u80cc\u5305\u6f5c\u5f71\u76d2 " + backpackNow + " \u4e2a\uff09";
+            FOElytraLog.warn("\u7b49\u6316\u76d2\u7b49\u5230 %d \u79d2\u8fd8\u6ca1\u6316\u6389\uff08\u65b9\u5757\u8fd8\u5728 %s\uff0c\u91cd\u53d1\u6316\u77ff %d \u6b21\uff0c\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u4e2a\uff09", 20, SupplyTask.posText(this.shulkerPos), this.mineRetries, backpackNow);
+            this.leaveShulkerBehind(why);
         }
     }
+
+    private void leaveShulkerBehind(String why) {
+        this.leaveShulkerBehind(why, true);
+    }
+
+    private void leaveShulkerBehind(String why, boolean returnBox) {
+        MinecraftClient mc;
+        ++this.runLeftShulkers;
+        String pos = SupplyTask.posText(this.shulkerPos);
+        this.runLeftPos = this.runLeftPos.isEmpty() ? pos : this.runLeftPos + "\u3001" + pos;
+        ++pendingLeftShulkers;
+        String string = pendingLeftPos = pendingLeftPos.isEmpty() ? pos : pendingLeftPos + "\u3001" + pos;
+        if (this.shulkerPos != null) {
+            this.placeRejected.add(this.shulkerPos.toImmutable());
+        }
+        int backpack = (mc = MinecraftClient.getInstance()) == null || mc.player == null ? 0 : ItemHelper.countShulkers((PlayerEntity)mc.player);
+        FOElytraLog.warn("\u6f5c\u5f71\u76d2\u6ca1\u6316\u6389\uff0c\u8fd8\u7559\u5728 %s \u2014\u2014 \u5df2\u505c\u624b\uff08\u4f60\u53ef\u4ee5\u81ea\u5df1\u6316\uff0c\u6216\u4e0b\u6b21\u8865\u7ed9\u518d\u6765\uff09", pos);
+        FOElytraLog.detail("\u8fd9\u6b21\u4e0d\u7b97\u4e22\u5931\uff08\u65b9\u5757\u6ca1\u4e22\uff09\uff1a\u539f\u56e0 %s\uff5c\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u4e2a\uff5c%s \u5df2\u8bb0\u8fdb\u672c\u6b21\u4e0d\u518d\u5c1d\u8bd5\u7684\u9ed1\u540d\u5355", why, backpack, pos);
+        BaritoneHook.stop();
+        this.breakRequested = false;
+        this.pendingReturn = returnBox;
+        this.planIndex = this.plan.size();
+        if (this.recoverNeeded()) {
+            FOElytraLog.warn("\u4e16\u754c\u91cc\u8fd8\u6709\u6211\u65b9\u653e\u4e0b\u7684\u4e1c\u897f \u2192 \u4e0d\u518d\u653e\u4e0b\u4e00\u4e2a\u76d2\u5b50\uff0c\u5148\u628a\u7559\u4e0b\u7684\u5168\u6536\u56de\u6765\uff08\u539f\u56e0\uff1a%s\uff09", why);
+            this.beginRecover("\u6709\u76d2\u5b50\u6ca1\u6316\u56de\u6765\uff1a" + why);
+            return;
+        }
+        this.next(State.REOPEN_EC, this.opts.actionDelay());
+    }
+
+    private String mineFailClass(MinecraftClient mc, String what) {
+        if (!BaritoneHook.available()) {
+            return "\u6ca1\u6709 Baritone \u5b9e\u4f8b\uff08\u5f92\u624b\u6316\u4e5f\u6ca1\u6316\u6389\uff09";
+        }
+        if (!this.opts.useBaritoneMine()) {
+            return "\u6ca1\u5f00 Baritone \u6316\u6398\uff0c\u6e10\u8fdb\u7834\u574f\u4e5f\u6ca1\u6316\u6389";
+        }
+        if (!this.hasPickaxe(mc)) {
+            return "\u6ca1\u6709\u9550\u5b50\uff0c\u5f92\u624b\u6316\u4e5f\u6ca1\u6316\u6389 " + what;
+        }
+        return "\u6316\u77ff\u8fdb\u7a0b\u53cd\u590d\u505c\u6389/\u65b9\u5757\u6ca1\u6d88\u5931\uff08\u91cd\u8bd5 3 \u6b21\uff09";
+    }
+
+    private void retryMineBack(MinecraftClient mc, BlockPos pos, boolean shulker, String why) {
+        if (this.mineRetries < 3) {
+            ++this.mineRetries;
+            BaritoneHook.stop();
+            BlockBreaker.reset();
+            this.mineManual = true;
+            this.mineIdleTicks = 0;
+            InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)pos));
+            FOElytraLog.warn("%s \u7b2c %d/%d \u6b21\u5931\u8d25\uff08%s\uff09\u2192 \u6362\u6210\u5f92\u624b\u6316 %s\uff08\u5df2\u5bf9\u51c6\u65b9\u5757\uff09", shulker ? "\u6316\u56de\u6f5c\u5f71\u76d2" : "\u6316\u56de\u672b\u5f71\u7bb1", this.mineRetries, 3, why, SupplyTask.posText(pos));
+            return;
+        }
+        this.mineBackFailReason = why;
+        FOElytraLog.warn("%s\u6ca1\u80fd\u6536\u56de\uff1a%s\uff08%s\uff09\u2014\u2014 \u8bf7\u81ea\u5df1\u53bb\u62ff", shulker ? "\u6f5c\u5f71\u76d2" : "\u672b\u5f71\u7bb1", SupplyTask.posText(pos), why);
+        if (shulker) {
+            this.leaveShulkerBehind(why);
+        } else {
+            this.giveUpEnderChest(why);
+        }
+    }
+
+    private void rescueSupplyDrops(MinecraftClient mc, boolean blockGone, int backpackNow) {
+        boolean progressed;
+        if (!blockGone) {
+            this.rescueTicks = 0;
+            this.rescueTarget = null;
+            return;
+        }
+        DropEvidence ev = this.nearbySupplyDrops(mc);
+        boolean bl = progressed = this.rescueBackpackSeen >= 0 && (backpackNow > this.rescueBackpackSeen || ev.count() > 0 && ev.count() < this.rescueDropSeen);
+        if (progressed) {
+            FOElytraLog.detail("\u8ffd\u6389\u843d\u7269\u6709\u8fdb\u5c55\uff1a\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u2192 %d\uff5c\u9644\u8fd1\u6389\u843d\u7269 %d \u4e2a\uff0c\u7ee7\u7eed\u7b49", this.rescueBackpackSeen, backpackNow, ev.count());
+            this.rescueProgressTick = this.waitTicks;
+        }
+        this.rescueBackpackSeen = backpackNow;
+        this.rescueDropSeen = ev.count();
+        ++this.rescueTicks;
+        if (ev.count() <= 0) {
+            if (this.rescueTarget != null) {
+                this.rescueTarget = null;
+                FOElytraLog.detail("\u9644\u8fd1\u5df2\u7ecf\u6ca1\u6709\u76f8\u5173\u6389\u843d\u7269\u4e86\uff08\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u4e2a\uff09", backpackNow);
+            }
+            return;
+        }
+        if (this.rescueTicks % 10 != 1 && this.rescueTarget != null) {
+            return;
+        }
+        BlockPos pos = ev.nearestPos();
+        if (pos == null) {
+            return;
+        }
+        if (pos.equals((Object)this.rescueTarget)) {
+            FOElytraLog.detail("\u8ffd\u6389\u843d\u7269\uff1a\u8fd8\u5728 %s\uff08\u6700\u8fd1 %.1f \u683c\uff0c\u5171 %d \u4e2a\uff09\uff0c\u7ee7\u7eed\u7b49\u5b83\u8fdb\u80cc\u5305", SupplyTask.posText(pos), ev.nearest(), ev.count());
+            return;
+        }
+        this.rescueTarget = pos.toImmutable();
+        this.rescueProgressTick = this.waitTicks;
+        if (!BaritoneHook.ready()) {
+            FOElytraLog.detail("\u8ffd\u6389\u843d\u7269\uff1aBaritone \u4e0d\u53ef\u7528\uff0c\u53ea\u80fd\u7b49\u539f\u5730\u81ea\u52a8\u6361\u53d6\uff08%s\uff0c\u6700\u8fd1 %.1f \u683c\uff09", SupplyTask.posText(pos), ev.nearest());
+            return;
+        }
+        FOElytraLog.info("\u8865\u7ed9\u7bb1\u6389\u843d\u7269\u5728 %s\uff08\u6700\u8fd1 %.1f \u683c\uff0c\u5171 %d \u4e2a\uff09\uff1a\u8ba9 Baritone \u8d70\u8fc7\u53bb\u6361", SupplyTask.posText(pos), ev.nearest(), ev.count());
+        BaritoneHook.stop();
+        BaritoneHook.command("goto " + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+    }
+
+    private DropEvidence nearbySupplyDrops(MinecraftClient mc) {
+        return this.dropsNear(mc, this.shulkerPos, false);
+    }
+
+    private DropEvidence dropsNear(MinecraftClient mc, BlockPos origin, boolean ecLoot) {
+        if (mc.world == null || origin == null) {
+            return new DropEvidence(0, -1.0, null);
+        }
+        Box box = new Box(origin).expand(8.0);
+        List<ItemEntity> ents = mc.world.getEntitiesByClass(ItemEntity.class, box, e -> e != null && e.isAlive() && !e.getStack().isEmpty() && (ecLoot ? SupplyTask.isEnderChestLoot(e.getStack()) : SupplyTask.isSupplyLoot(e.getStack())));
+        int count = 0;
+        double nearest = -1.0;
+        BlockPos nearestPos = null;
+        for (ItemEntity e2 : ents) {
+            count += e2.getStack().getCount();
+            double d = e2.squaredDistanceTo((double)origin.getX() + 0.5, (double)origin.getY() + 0.5, (double)origin.getZ() + 0.5);
+            if (nearestPos != null && !(d < nearest)) continue;
+            nearest = d;
+            nearestPos = e2.getBlockPos();
+        }
+        if (nearestPos == null) {
+            return new DropEvidence(0, -1.0, null);
+        }
+        return new DropEvidence(count, Math.sqrt(nearest), nearestPos.toImmutable());
+    }
+
+    private static boolean isEnderChestLoot(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return false;
+        }
+        return stack.isOf(Items.ENDER_CHEST) || stack.isOf(Items.OBSIDIAN);
+    }
+
+    private static boolean isSupplyLoot(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return false;
+        }
+        if (ItemHelper.isShulkerBox(stack)) {
+            return true;
+        }
+        if (stack.isOf(Items.FIREWORK_ROCKET) || stack.isOf(Items.EXPERIENCE_BOTTLE) || stack.isOf(Items.TOTEM_OF_UNDYING) || stack.isOf(Items.ELYTRA)) {
+            return true;
+        }
+        return ItemHelper.isFood(stack);
+    }
+
+    private void recordLostShulker(String why) {
+        ++this.runLostShulkers;
+        String pos = SupplyTask.posText(this.shulkerPos);
+        this.runLostPos = this.runLostPos.isEmpty() ? pos : this.runLostPos + "\u3001" + pos;
+        ++pendingLostShulkers;
+        pendingLostPos = pendingLostPos.isEmpty() ? pos : pendingLostPos + "\u3001" + pos;
+        FOElytraLog.warn("\u6f5c\u5f71\u76d2\u6ca1\u6536\u56de\uff08%s\uff09\uff0c\u8bb0\u4e3a\u4e22\u5931 1 \u4e2a\uff1a%s", why, pos);
+    }
+
     private void returnShulker(MinecraftClient mc) {
-        HandledScreen<?> screen = InvHelper.currentContainerScreen(ecTitle);
+        HandledScreen<?> screen = InvHelper.currentContainerScreen(this.ecTitle);
         if (screen == null) {
-            fail("放回盒子时末影箱界面已关闭");
+            this.fail("\u653e\u56de\u76d2\u5b50\u65f6\u672b\u5f71\u7bb1\u754c\u9762\u5df2\u5173\u95ed");
             return;
         }
         ScreenHandler handler = mc.player.currentScreenHandler;
-        int rawHotbar = InvHelper.playerSlotId(handler, mc.player, shulkerHotbarSlot);
-        if (rawHotbar < 0 || shulkerRawSlot < 0) {
-            fail("放回盒子的槽位映射失败");
+        int inv = this.findShulkerAnywhere(mc);
+        int boxes = ItemHelper.countShulkers((PlayerEntity)mc.player);
+        int raw = this.findShulkerRawAnywhere(mc, handler);
+        if (raw < 0) {
+            FOElytraLog.warn("\u653e\u56de\u524d\u627e\u4e0d\u5230\u80fd\u64cd\u4f5c\u7684\u6f5c\u5f71\u76d2\uff08\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u4e2a\uff5c\u627e\u5230\u7684\u80cc\u5305\u683c #%d\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d %d\uff5c\u53ef\u66ff\u6362\u5feb\u6377\u680f %d\uff5c\u5bb9\u5668\u7a7a\u4f4d %d\uff09\u2192 \u8fd9\u6b21\u8df3\u8fc7\u653e\u56de\uff0c\u628a\u672b\u5f71\u7bb1\u6536\u597d\u5c31\u8d70", boxes, inv, this.countEmptyHotbar(mc), this.countReplaceableHotbar(mc), this.countEmptyContainer(handler, -1));
+            this.pendingReturn = false;
+            this.next(State.CLOSE_EC, this.opts.actionDelay());
             return;
         }
-        if (!ItemHelper.isShulkerBox(mc.player.getInventory().getStack(shulkerHotbarSlot))) {
-            FOElytraLog.warn("手里没有潜影盒可放回，跳过本步");
-            pendingReturn = false;
-            next(State.CLOSE_EC, opts.actionDelay());
-            return;
-        }
-        InvHelper.moveStack(handler, rawHotbar, shulkerRawSlot);
-        FOElytraLog.tip("潜影盒已放回末影箱槽位 %d", shulkerRawSlot);
-        pendingReturn = false;
-        shulkerHotbarSlot = -1;
-        next(State.CLOSE_EC, opts.actionDelay());
+        this.returnVerifyBefore = boxes;
+        this.returnVerifyTicks = 0;
+        this.returnAttempt = -1;
+        this.returnTargetSlot = this.shulkerRawSlot;
+        this.shulkerHotbarSlot = inv >= 0 && inv < 9 ? inv : this.shulkerHotbarSlot;
+        this.issueReturn(mc, handler, raw);
+        this.next(State.VERIFY_RETURN, 1);
     }
-    private void nextShulker(MinecraftClient mc) {
-        String needsBefore = needs.toString();
-        computeNeeds(mc);
-        if (!needsBefore.equals(needs.toString())) {
-            FOElytraLog.detail("NEXT_SH 需求按背包重算：%s → %s（增量账与背包不一致时以背包为准）",
-                needsBefore, needs);
-        }
-        boolean exhaustedMarked = false;
-        if (!boxTookAnything) {
-            if (shulkerRawSlot >= 0 && boxBlacklist.add(shulkerRawSlot)) {
-                FOElytraLog.detail("跳过盒子 槽位%d（上次没取到东西，本次补给不再选它）", shulkerRawSlot);
-            }
-            emptyBoxStrikes++;
-            if (emptyBoxStrikes >= 2) {
-                FOElytraLog.warn("连续 %d 盒都没取到东西，停止取物（%s）", emptyBoxStrikes,
-                    needs.isEmpty() ? "需求其实已经满足" : "仍有缺口：" + needs);
-                markExhausted();
-                exhaustedMarked = true;
-                needs.fireworkStacks = 0;
-                needs.xpBottles = 0;
-                needs.elytra = 0;
-                planIndex = plan.size();
+
+    private void issueReturn(MinecraftClient mc, ScreenHandler handler, int raw) {
+        ++this.returnAttempt;
+        StringBuilder how = new StringBuilder();
+        if (this.returnAttempt == 0) {
+            how.append("\u6574\u645e\u642c\u8fd0\uff08SHIFT \u70b9\u51fb\uff09\u8fdb\u672b\u5f71\u7bb1");
+            InvHelper.quickMove(handler, raw);
+        } else if (this.returnAttempt == 1) {
+            int empty;
+            int n = empty = this.countEmptyContainer(handler, -1) > 0 ? this.firstEmptyContainer(handler) : -1;
+            if (empty >= 0) {
+                this.returnTargetSlot = empty;
+                how.append("\u4e24\u6bb5\u5f0f\u70b9\u8fdb\u5bb9\u5668\u7a7a\u69fd ").append(empty);
+                InvHelper.moveStack(handler, raw, empty);
+            } else {
+                int swapWith;
+                this.returnAttempt = 2;
+                this.returnTargetSlot = swapWith = this.pickSwapTarget(handler);
+                how.append((String)(swapWith >= 0 ? "\u4e09\u65b9\u4ea4\u6362\uff1a\u548c\u5bb9\u5668\u69fd " + swapWith + " \u4e92\u6362\u5185\u5bb9\uff08\u539f\u6765\u90a3\u4ef6\u4e1c\u897f\u4f1a\u843d\u56de\u6211\u7684\u80cc\u5305\u683c\uff0c\u4e0d\u4f1a\u4e22\uff09" : "\u4e09\u65b9\u4ea4\u6362\u5931\u8d25\uff1a\u5bb9\u5668\u91cc\u6ca1\u6709\u53ef\u6362\u7684\u69fd\u4f4d"));
+                if (swapWith >= 0) {
+                    InvHelper.moveStack(handler, raw, swapWith);
+                }
             }
         } else {
-            emptyBoxStrikes = 0;
-        }
-        planIndex++;
-        if (planIndex < plan.size() && needs.needsAnyItem() && emptyBoxStrikes < 2) {
-            shScreenWaitTicks = 0;
-            pendingReturn = false;
-            next(State.OPEN_EC, 0);
-            return;
-        }
-        if (!needs.isEmpty() && !exhaustedMarked) {
-            markExhausted();
-            FOElytraLog.warn("补给结束，但仍有缺口：%s", needs);
-        } else if (!needs.isEmpty()) {
-            FOElytraLog.warn("补给结束，但仍有缺口：%s（这些项本轮暂时取不到，已在前面登记）", needs);
-        }
-        next(State.BREAK_EC, opts.actionDelay());
-    }
-    private void breakEnderChest(MinecraftClient mc) {
-        InvHelper.closeScreen();
-        if (!opts.autoPickupEnderChest()) {
-            next(State.DONE, 0);
-            return;
-        }
-        if (ecPos == null || mc.world.getBlockState(ecPos).isAir()) {
-            next(State.DONE, 0);
-            return;
-        }
-        if (!breakRequested) {
-            breakTicks = 0;
-            pickupWait = 0;
-            ecBreakWaitTicks = 0;
-            freeSlotDrops = 0;
-            ecItemBefore = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
-            obsidianBefore = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
-            boolean silk = hasSilkTouch(mc);
-            ecBreakTarget = (silk ? ecItemBefore : obsidianBefore) + 1;
-            if (silk) {
-                FOElytraLog.tip("检测到精准采集镐：末影箱会掉末影箱本身，按「末影箱 %d 个」校验", ecBreakTarget);
+            int swapWith;
+            this.returnTargetSlot = swapWith = this.pickSwapTarget(handler);
+            how.append((String)(swapWith >= 0 ? "\u4e09\u65b9\u4ea4\u6362\uff1a\u548c\u5bb9\u5668\u69fd " + swapWith + " \u4e92\u6362\u5185\u5bb9\uff08\u539f\u6765\u90a3\u4ef6\u4e1c\u897f\u4f1a\u843d\u56de\u6211\u7684\u80cc\u5305\u683c\uff0c\u4e0d\u4f1a\u4e22\uff09" : "\u4e09\u65b9\u4ea4\u6362\u5931\u8d25\uff1a\u5bb9\u5668\u91cc\u6ca1\u6709\u53ef\u6362\u7684\u69fd\u4f4d"));
+            if (swapWith >= 0) {
+                InvHelper.moveStack(handler, raw, swapWith);
             }
-            Block block = mc.world.getBlockState(ecPos).getBlock();
-            if (opts.useBaritoneMine() && BaritoneHook.available() && hasPickaxe(mc)) {
-                if (BaritoneHook.mine(ecBreakTarget, block)) {
-                    breakRequested = true;
-                    if (!silk) FOElytraLog.tip("让 Baritone 挖回末影箱（目标：黑曜石 %d 个）", ecBreakTarget);
-                    ecBreakWaitTicks = 0;
-                    next(State.WAIT_BREAK_EC, 1);
+        }
+        FOElytraLog.detail("\u653e\u56de\u6f5c\u5f71\u76d2\uff08\u7b2c %d \u6b21\u5c1d\u8bd5\uff09\uff1a%s\uff5c\u6e90 raw=%d\uff5c\u76ee\u6807\u69fd %d\uff5c\u5bb9\u5668\u7a7a\u4f4d %d\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d %d", this.returnAttempt + 1, how, raw, this.returnTargetSlot, this.countEmptyContainer(handler, this.returnTargetSlot), this.countEmptyHotbar(mc));
+    }
+
+    private int pickSwapTarget(ScreenHandler handler) {
+        if (this.shulkerRawSlot >= 0 && this.shulkerRawSlot < SupplyTask.containerSlots(handler)) {
+            return this.shulkerRawSlot;
+        }
+        int limit = SupplyTask.containerSlots(handler);
+        for (int i = 0; i < limit; ++i) {
+            if (!ItemHelper.isShulkerBox(((Slot)handler.slots.get(i)).getStack())) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private int firstEmptyContainer(ScreenHandler handler) {
+        int limit = SupplyTask.containerSlots(handler);
+        for (int i = 0; i < limit; ++i) {
+            if (!((Slot)handler.slots.get(i)).getStack().isEmpty()) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private int countEmptyContainer(ScreenHandler handler, int ignore) {
+        if (handler == null) {
+            return 0;
+        }
+        int limit = SupplyTask.containerSlots(handler);
+        int n = 0;
+        for (int i = 0; i < limit; ++i) {
+            if (i == ignore || !((Slot)handler.slots.get(i)).getStack().isEmpty()) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private int countEmptyHotbar(MinecraftClient mc) {
+        int n = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private int countReplaceableHotbar(MinecraftClient mc) {
+        int n = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (!this.isJunkNow(mc.player.getInventory().getStack(i))) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private int findShulkerAnywhere(MinecraftClient mc) {
+        for (int i = 0; i < 36; ++i) {
+            if (!ItemHelper.isShulkerBox(mc.player.getInventory().getStack(i))) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private int findShulkerRawAnywhere(MinecraftClient mc, ScreenHandler handler) {
+        int raw;
+        if (handler == null) {
+            return -1;
+        }
+        int inv = this.findShulkerAnywhere(mc);
+        if (inv >= 0 && (raw = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, inv)) >= 0) {
+            return raw;
+        }
+        for (int i = 0; i < handler.slots.size(); ++i) {
+            Slot slot = (Slot)handler.slots.get(i);
+            if (!(slot.inventory instanceof PlayerInventory) || !ItemHelper.isShulkerBox(slot.getStack())) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private void verifyReturn(MinecraftClient mc) {
+        HandledScreen<?> screen = InvHelper.currentContainerScreen(this.ecTitle);
+        if (screen == null) {
+            this.fail("\u653e\u56de\u76d2\u5b50\u65f6\u672b\u5f71\u7bb1\u754c\u9762\u5df2\u5173\u95ed");
+            return;
+        }
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        boolean inEc = this.returnTargetSlot >= 0 && this.returnTargetSlot < handler.slots.size() && ItemHelper.isShulkerBox(handler.getSlot(this.returnTargetSlot).getStack());
+        int now = ItemHelper.countShulkers((PlayerEntity)mc.player);
+        if (inEc || now < this.returnVerifyBefore) {
+            FOElytraLog.tip("\u6f5c\u5f71\u76d2\u5df2\u653e\u56de\u672b\u5f71\u7bb1\u69fd\u4f4d %d\uff08\u80cc\u5305 %d \u2192 %d \u4e2a\uff09", this.returnTargetSlot, this.returnVerifyBefore, now);
+            this.pendingReturn = false;
+            this.shulkerHotbarSlot = -1;
+            this.nextBoxAfterReturn(mc);
+            return;
+        }
+        ++this.returnVerifyTicks;
+        if (this.returnVerifyTicks <= 30) {
+            return;
+        }
+        if (this.returnAttempt < 2) {
+            int raw = this.findShulkerRawAnywhere(mc, handler);
+            if (raw < 0) {
+                this.failReturnBox(mc, handler, "\u80cc\u5305\u91cc\u5df2\u7ecf\u627e\u4e0d\u5230\u90a3\u4e2a\u76d2\u5b50\u4e86\uff08\u53ef\u80fd\u88ab\u522b\u7684\u64cd\u4f5c\u632a\u8d70\uff09");
+                return;
+            }
+            FOElytraLog.warn("\u653e\u56de\u7b2c %d \u6b21\u6ca1\u751f\u6548\uff08\u80cc\u5305\u6f5c\u5f71\u76d2\u4ecd %d \u4e2a\uff09\u2192 \u6362\u65b9\u5f0f\u518d\u653e\u4e00\u6b21", this.returnAttempt + 1, now);
+            this.returnVerifyTicks = 0;
+            this.issueReturn(mc, handler, raw);
+            return;
+        }
+        this.failReturnBox(mc, handler, "\u4e09\u79cd\u653e\u56de\u65b9\u5f0f\u90fd\u6ca1\u751f\u6548\uff08\u53ef\u80fd\u5bb9\u5668\u69fd\u4f4d\u88ab\u670d\u52a1\u5668\u9501\u4f4f\uff09");
+    }
+
+    private void failReturnBox(MinecraftClient mc, ScreenHandler handler, String why) {
+        int inv = this.findShulkerAnywhere(mc);
+        FOElytraLog.warn("\u6f5c\u5f71\u76d2\u653e\u56de\u5931\u8d25\uff1a%s\uff5c\u80cc\u5305\u6f5c\u5f71\u76d2 %d \u4e2a\uff5c\u627e\u5230\u7684\u80cc\u5305\u683c #%d\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d %d\uff5c\u53ef\u66ff\u6362\u5feb\u6377\u680f %d\uff5c\u5bb9\u5668\u7a7a\u4f4d %d", why, ItemHelper.countShulkers((PlayerEntity)mc.player), inv, this.countEmptyHotbar(mc), this.countReplaceableHotbar(mc), this.countEmptyContainer(handler, -1));
+        this.fail("\u6f5c\u5f71\u76d2\u6ca1\u80fd\u653e\u56de\u672b\u5f71\u7bb1\uff08" + why + "\uff09\uff1b\u76d2\u5b50\u8fd8\u5728\u80cc\u5305\u91cc\uff0c\u6ca1\u4e22");
+    }
+
+    private void nextBoxAfterReturn(MinecraftClient mc) {
+        ++this.planIndex;
+        this.resetBoxTakeCounters();
+        this.computeNeeds(mc);
+        if (this.planIndex < this.plan.size() && this.needs.needsAnyItem()) {
+            this.waitTicks = 0;
+            this.pendingReturn = false;
+            int nextSlot = this.plan.get(this.planIndex).rawSlot();
+            FOElytraLog.info("\u76d2\u5b50\u5df2\u653e\u56de\uff0c\u672b\u5f71\u7bb1\u754c\u9762\u8fd8\u5f00\u7740\uff1a\u63a5\u7740\u5f00\u6e05\u5355\u91cc\u7684\u4e0b\u4e00\u4e2a\u76d2\u5b50 \u69fd\u4f4d%d\uff08\u7b2c %d/%d \u4e2a\uff09", nextSlot, this.planIndex + 1, this.plan.size());
+            this.next(State.TAKE_SHULKER, this.opts.actionDelay());
+            return;
+        }
+        this.next(State.CLOSE_EC, this.opts.actionDelay());
+    }
+
+    private void nextShulker(MinecraftClient mc) {
+        String needsBefore = this.needs.toString();
+        this.computeNeeds(mc);
+        if (!needsBefore.equals(this.needs.toString())) {
+            FOElytraLog.detail("NEXT_SH \u9700\u6c42\u6309\u80cc\u5305\u91cd\u7b97\uff1a%s \u2192 %s\uff08\u589e\u91cf\u8d26\u4e0e\u80cc\u5305\u4e0d\u4e00\u81f4\u65f6\u4ee5\u80cc\u5305\u4e3a\u51c6\uff09", needsBefore, this.needs);
+        }
+        if (!this.needs.isEmpty()) {
+            if (!this.plan.isEmpty() && this.takeRounds < 3) {
+                ++this.takeRounds;
+                this.planIndex = 0;
+                FOElytraLog.warn("\u6e05\u5355\u91cc\u7684\u76d2\u5b50\u90fd\u5f00\u5b8c\u4e86\u4f46\u4ecd\u6709\u7f3a\u53e3\uff1a%s \u2192 \u518d\u5f00\u4e00\u8f6e\uff08\u7b2c %d/%d \u8f6e\uff1a\u628a\u591a\u51fa\u6765\u7684\u7269\u8d44/\u6742\u7269\u6362\u8fdb\u76d2\u5b50\u817e\u683c\u5b50\uff0c\u518d\u53d6\u5c11\u7684\uff0c\u76f4\u5230\u548c\u9884\u8bbe\u6570\u91cf\u4e00\u81f4\uff09", this.needs, this.takeRounds, 3);
+                this.next(State.SCAN, this.opts.actionDelay());
+                return;
+            }
+            this.markExhausted();
+            FOElytraLog.warn("\u6e05\u5355\u91cc\u7684\u76d2\u5b50\u90fd\u5f00\u5b8c\u4e86\uff0c\u4f46\u4ecd\u6709\u7f3a\u53e3\uff1a%s", this.needs);
+        } else {
+            FOElytraLog.info("\u6e05\u5355\u53d6\u5b8c\uff0c\u9700\u6c42\u5df2\u7ecf\u6ee1\u8db3\uff08\u672c\u76d2\u53d6\u5230 \u70df\u82b1 %d \u7ec4/\u74f6 %d/\u98df\u7269 %d/\u56fe\u817e %d/\u9798\u7fc5 %d\uff09", this.boxFwTaken, this.boxXpTaken, this.boxFoodTaken, this.boxTotemTaken, this.boxElytraTaken);
+        }
+        this.warnUnopenedPlanBoxes("\u672c\u8f6e\u53d6\u7269\u6536\u5c3e");
+        this.next(State.BREAK_EC, this.opts.actionDelay());
+    }
+
+    private void breakEnderChest(MinecraftClient mc) {
+        this.noSneak("\u6316\u672b\u5f71\u7bb1\u524d");
+        InvHelper.closeScreen();
+        if (!this.opts.autoPickupEnderChest()) {
+            this.next(State.DONE, 0);
+            return;
+        }
+        if (this.ecPos == null || mc.world.getBlockState(this.ecPos).isAir()) {
+            this.next(State.DONE, 0);
+            return;
+        }
+        if (!this.breakRequested) {
+            this.breakTicks = 0;
+            this.pickupWait = 0;
+            this.mineIdleTicks = 0;
+            this.mineRetries = 0;
+            this.manualBreakRetries = 0;
+            this.mineManual = false;
+            this.mineBackFailReason = "";
+            this.ecBlockGone = false;
+            this.ecItemBefore = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST);
+            this.obsidianBefore = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.OBSIDIAN);
+            boolean silk = this.hasSilkTouch(mc);
+            this.ecBreakTarget = (silk ? this.ecItemBefore : this.obsidianBefore) + 1;
+            if (silk) {
+                FOElytraLog.tip("\u68c0\u6d4b\u5230\u7cbe\u51c6\u91c7\u96c6\u9550\uff1a\u672b\u5f71\u7bb1\u4f1a\u6389\u672b\u5f71\u7bb1\u672c\u8eab\uff0c\u6309\u300c\u672b\u5f71\u7bb1 %d \u4e2a\u300d\u6821\u9a8c", this.ecBreakTarget);
+            }
+            Block block = mc.world.getBlockState(this.ecPos).getBlock();
+            if (this.opts.useBaritoneMine() && BaritoneHook.available() && this.hasPickaxe(mc)) {
+                if (BaritoneHook.mine(this.ecBreakTarget, block)) {
+                    this.breakRequested = true;
+                    if (!silk) {
+                        FOElytraLog.tip("\u8ba9 Baritone \u6316\u56de\u672b\u5f71\u7bb1\uff08\u76ee\u6807\uff1a\u9ed1\u66dc\u77f3 %d \u4e2a\uff09", this.ecBreakTarget);
+                    }
+                    this.waitTicks = 0;
+                    this.next(State.WAIT_BREAK_EC, 1);
                     return;
                 }
-            } else if (!hasPickaxe(mc)) {
-                FOElytraLog.warn("快捷栏里没有镐，末影箱会留在原地");
-                next(State.DONE, 0);
+            } else if (!this.hasPickaxe(mc)) {
+                FOElytraLog.warn("\u6ca1\u6709\u9550\u5b50\uff0c\u672b\u5f71\u7bb1\u5f92\u624b\u6316\u4e0d\u6389\u843d\uff08\u6316\u4e86\u5c31\u662f\u767d\u6254\uff09\u2192 \u5148\u7559\u7740 %s\uff08\u672b\u5f71\u7bb1 %d \u4e2a / \u9ed1\u66dc\u77f3 %d \u4e2a\uff09", SupplyTask.posText(this.ecPos), this.ecItemBefore, this.obsidianBefore);
+                if (this.recoverNeeded()) {
+                    FOElytraLog.warn("\u4e16\u754c\u91cc\u8fd8\u6709\u6211\u65b9\u653e\u4e0b\u7684\u672b\u5f71\u7bb1 \u2192 \u8fd9\u6b21\u8865\u7ed9\u5230\u6b64\u4e3a\u6b62\uff0c\u5148\u628a\u7559\u4e0b\u7684\u6536\u56de\u6765\uff08\u6216\u81ea\u5df1\u62ff\uff09", new Object[0]);
+                    this.beginRecover("\u6ca1\u6709\u9550\u5b50\uff0c\u672b\u5f71\u7bb1\u6316\u4e0d\u56de\u6765");
+                    return;
+                }
+                this.next(State.DONE, 0);
                 return;
             }
-            FOElytraLog.warn("Baritone 挖掘不可用，改用渐进破坏");
-            breakRequested = true;
+            FOElytraLog.warn("Baritone \u6316\u6398\u4e0d\u53ef\u7528\uff0c\u6539\u7528\u6e10\u8fdb\u7834\u574f", new Object[0]);
+            this.breakRequested = true;
         }
-        if (BlockBreaker.tick(ecPos)) {
-            breakRequested = false;
-            if (!mc.world.getBlockState(ecPos).isAir()) {
-                FOElytraLog.warn("末影箱没能挖掉，它留在了原地");
-                next(State.DONE, 0);
+        if (BlockBreaker.tick(this.ecPos)) {
+            this.breakRequested = false;
+            if (!mc.world.getBlockState(this.ecPos).isAir()) {
+                if (this.manualBreakRetries < 2) {
+                    ++this.manualBreakRetries;
+                    BlockBreaker.reset();
+                    InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)this.ecPos));
+                    FOElytraLog.warn("\u672b\u5f71\u7bb1\u6ca1\u6316\u6389\uff08%s\uff09\u2192 \u6362\u4e2a\u89d2\u5ea6\u518d\u6316\u4e00\u6b21\uff08\u7b2c %d/2 \u6b21\uff09", SupplyTask.posText(this.ecPos), this.manualBreakRetries);
+                    this.breakRequested = true;
+                    this.delay = this.opts.actionDelay();
+                    return;
+                }
+                FOElytraLog.warn("\u672b\u5f71\u7bb1\u6316\u4e86 2 \u6b21\u90fd\u6ca1\u6316\u6389\uff0c\u8fd8\u7559\u5728\u539f\u5730 %s", SupplyTask.posText(this.ecPos));
+                this.giveUpEnderChest("\u6316\u4e86 2 \u6b21\u6ca1\u6316\u6389\uff08\u65b9\u5757\u6ca1\u6d88\u5931\uff09");
                 return;
             }
-            ecBreakWaitTicks = 0;
-            next(State.WAIT_BREAK_EC, 2);
+            this.waitTicks = 0;
+            this.next(State.WAIT_BREAK_EC, 2);
         }
     }
+
     private void waitBreakEnderChest(MinecraftClient mc) {
-        boolean gone = mc.world.getBlockState(ecPos).isAir();
-        int ecNow = ItemHelper.countInInventory(mc.player, Items.ENDER_CHEST);
-        int obsidianNow = ItemHelper.countInInventory(mc.player, Items.OBSIDIAN);
-        boolean gotIt = ecNow > ecItemBefore || obsidianNow > obsidianBefore;
-        if (threatActive) {
-            ecBreakWaitTicks = 0;   // 被火球纠缠时不推进挖掘超时
-        } else {
-            ecBreakWaitTicks++;
-        }
-        MineWaitLogic.Outcome outcome =
-            MineWaitLogic.evaluate(gone, gotIt, ecBreakWaitTicks, MineWaitLogic.ENDER_CHEST_TIMEOUT_TICKS);
-        if (outcome == MineWaitLogic.Outcome.COLLECTED) {
+        boolean gotIt;
+        boolean gone = mc.world.getBlockState(this.ecPos).isAir();
+        int ecNow = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST);
+        int obsidianNow = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.OBSIDIAN);
+        boolean bl = gotIt = ecNow > this.ecItemBefore || obsidianNow > this.obsidianBefore;
+        if (gone && gotIt) {
             BaritoneHook.stop();
-            breakRequested = false;
-            FOElytraLog.tip("末影箱已收回（末影箱 %d 个 / 黑曜石 %d 个）", ecNow, obsidianNow);
-            next(State.DONE, 0);
+            this.breakRequested = false;
+            FOElytraLog.tip("\u672b\u5f71\u7bb1\u5df2\u6536\u56de\uff08\u672b\u5f71\u7bb1 %d \u4e2a / \u9ed1\u66dc\u77f3 %d \u4e2a\uff09", ecNow, obsidianNow);
+            this.next(State.DONE, 0);
             return;
         }
-        // 末影箱同理：方块没了但还没进背包，先腾位（V5.2）
-        if (gone && !gotIt) freeSlotForPickup(mc);
-        // 同潜影盒：方块还在就交给 Baritone 慢慢挖（黑曜石很硬），方块没了才进拾取窗口收尾。
-        stopMiningAfterPickupWindow(gone);
-        if (outcome == MineWaitLogic.Outcome.TIMED_OUT) {
-            FOElytraLog.warn("末影箱可能没捡起来（背包满？掉在远处？用的是精准采集但没捡到末影箱？）");
+        if (!gone) {
+            this.waitBreakEnderChestMining(mc, ecNow, obsidianNow);
+            return;
+        }
+        if (!this.ecBlockGone) {
+            this.ecBlockGone = true;
+            this.waitTicks = 0;
+            this.mineIdleTicks = 0;
+            FOElytraLog.detail("\u672b\u5f71\u7bb1\u5df2\u7ecf\u6316\u6389\uff08%s\uff09\uff0c\u5f00\u59cb\u7b49\u6389\u843d\u7269\u8fdb\u80cc\u5305", SupplyTask.posText(this.ecPos));
+        }
+        this.stopMiningAfterPickupWindow(true);
+        ++this.waitTicks;
+        if (this.waitTicks > 200) {
+            FOElytraLog.warn("\u672b\u5f71\u7bb1\u5df2\u7ecf\u6316\u6389\uff08%s\uff09\u4f46\u6ca1\u8fdb\u80cc\u5305\uff1a\u672b\u5f71\u7bb1 %d \u4e2a / \u9ed1\u66dc\u77f3 %d \u4e2a\uff08\u80cc\u5305\u6ee1\uff1f\u6389\u8fdc\u5904\uff1f\u7cbe\u51c6\u91c7\u96c6\u6ca1\u6361\u5230\uff1f\uff09", SupplyTask.posText(this.ecPos), ecNow, obsidianNow);
             BaritoneHook.stop();
-            breakRequested = false;
-            next(State.DONE, 0);
+            this.breakRequested = false;
+            this.next(State.DONE, 0);
         }
     }
+
+    private void waitBreakEnderChestMining(MinecraftClient mc, int ecNow, int obsidianNow) {
+        this.stopMiningAfterPickupWindow(false);
+        if (this.fireballNearby(mc)) {
+            if (this.waitTicks > 40 || this.mineIdleTicks > 0) {
+                FOElytraLog.detail("\u9644\u8fd1\u6709\u706b\u7403\uff0c\u6316\u672b\u5f71\u7bb1\u7684\u7b49\u5f85\u8ba1\u65f6\u5148\u6e05\u96f6\uff08%s\uff09", SupplyTask.posText(this.ecPos));
+            }
+            this.waitTicks = 0;
+            this.mineIdleTicks = 0;
+        }
+        ++this.waitTicks;
+        if (this.mineManual) {
+            boolean breakerDone = BlockBreaker.tick(this.ecPos);
+            if (!mc.world.getBlockState(this.ecPos).isAir()) {
+                if (!breakerDone) {
+                    return;
+                }
+                this.retryMineBack(mc, this.ecPos, false, this.hasPickaxe(mc) ? "\u5f92\u624b\u6316\u6ca1\u6316\u6389\uff08\u65b9\u5757\u6ca1\u6d88\u5931\uff09" : "\u6ca1\u6709\u9550\u5b50\uff0c\u672b\u5f71\u7bb1\u6316\u4e0d\u6389");
+                return;
+            }
+            this.mineManual = false;
+            return;
+        }
+        if (BaritoneHook.isMining()) {
+            this.mineIdleTicks = 0;
+            if (this.waitTicks % 100 == 0) {
+                FOElytraLog.info("\u6316\u672b\u5f71\u7bb1\u4e2d\u2026\u5df2 %d \u79d2\uff08\u65b9\u5757\u8fd8\u5728 %s\uff0cBaritone \u6b63\u5728\u6316\uff09", this.waitTicks / 20, SupplyTask.posText(this.ecPos));
+            }
+        } else {
+            ++this.mineIdleTicks;
+            if (this.mineIdleTicks >= 60) {
+                this.mineIdleTicks = 0;
+                if (this.mineRetries >= 3) {
+                    String why = this.hasPickaxe(mc) ? "\u6316\u77ff\u8fdb\u7a0b\u53cd\u590d\u505c\u6389/\u65b9\u5757\u6ca1\u6d88\u5931" : "\u6ca1\u6709\u9550\u5b50\uff0c\u672b\u5f71\u7bb1\u5f92\u624b\u6316\u4e0d\u6389\u843d";
+                    FOElytraLog.warn("\u672b\u5f71\u7bb1\u6316\u4e0d\u52a8\uff08\u5df2\u91cd\u8bd5 %d \u6b21\uff09\uff1a%s", this.mineRetries, why);
+                    this.giveUpEnderChest(why);
+                    return;
+                }
+                if (!this.mineManual && this.opts.useBaritoneMine() && BaritoneHook.available() && this.hasPickaxe(mc)) {
+                    ++this.mineRetries;
+                    Block block = mc.world.getBlockState(this.ecPos).getBlock();
+                    boolean issued = BaritoneHook.mine(this.ecBreakTarget, block);
+                    FOElytraLog.warn("\u91cd\u65b0\u4e0b\u53d1\u6316\u672b\u5f71\u7bb1\uff1a\u7b2c %d/%d \u6b21\uff08\u65b9\u5757\u8fd8\u5728 %s\uff09\uff5c\u4e0b\u53d1%s", this.mineRetries, 3, SupplyTask.posText(this.ecPos), issued ? "\u6210\u529f" : "\u5931\u8d25");
+                    if (!issued) {
+                        this.retryMineBack(mc, this.ecPos, false, "\u6316\u77ff\u4e0b\u53d1\u5931\u8d25");
+                        return;
+                    }
+                } else {
+                    this.retryMineBack(mc, this.ecPos, false, this.hasPickaxe(mc) ? "\u6316\u77ff\u8fdb\u7a0b\u53cd\u590d\u505c\u6389" : "\u6ca1\u6709\u9550\u5b50");
+                    return;
+                }
+            }
+        }
+        if (this.waitTicks > 400) {
+            FOElytraLog.warn("\u7b49\u6316\u672b\u5f71\u7bb1\u7b49\u5230 %d \u79d2\u8fd8\u6ca1\u6316\u6389\uff08\u65b9\u5757\u8fd8\u5728 %s\uff0c\u91cd\u53d1\u6316\u77ff %d \u6b21\uff09", 20, SupplyTask.posText(this.ecPos), this.mineRetries);
+            this.giveUpEnderChest("\u7b49 20 \u79d2\u6ca1\u6316\u6389");
+        }
+    }
+
+    private void giveUpEnderChest(String why) {
+        FOElytraLog.warn("\u672b\u5f71\u7bb1\u6ca1\u6316\u6389\uff0c\u8fd8\u7559\u5728 %s \u2014\u2014 \u5df2\u505c\u624b\uff08\u4f60\u53ef\u4ee5\u81ea\u5df1\u6316\uff0c\u6216\u4e0b\u6b21\u8865\u7ed9\u518d\u6765\uff09\uff5c\u539f\u56e0\uff1a%s", SupplyTask.posText(this.ecPos), why);
+        BaritoneHook.stop();
+        this.breakRequested = false;
+        if (this.recoverNeeded()) {
+            FOElytraLog.warn("\u4e16\u754c\u91cc\u8fd8\u6709\u6211\u65b9\u653e\u4e0b\u7684\u4e1c\u897f \u2192 \u8fd9\u6b21\u8865\u7ed9\u5230\u6b64\u4e3a\u6b62\uff0c\u5148\u628a\u7559\u4e0b\u7684\u5168\u6536\u56de\u6765", new Object[0]);
+            this.beginRecover("\u672b\u5f71\u7bb1\u6ca1\u6316\u56de\u6765\uff1a" + why);
+            return;
+        }
+        this.next(State.DONE, 0);
+    }
+
+    public boolean recoverNeeded() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null || mc.world == null) {
+            return false;
+        }
+        return SupplyTask.blockIsShulker(mc, this.shulkerPos) || SupplyTask.blockIsEnderChest(mc, this.ecPos);
+    }
+
+    public boolean isRecovering() {
+        return this.state == State.RECOVER && this.status == TaskStatus.RUNNING;
+    }
+
+    private static boolean blockIsShulker(MinecraftClient mc, BlockPos pos) {
+        if (mc == null || mc.world == null || pos == null) {
+            return false;
+        }
+        try {
+            return SupplyTask.isShulkerBoxBlock(mc.world.getBlockState(pos).getBlock());
+        }
+        catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static boolean blockIsEnderChest(MinecraftClient mc, BlockPos pos) {
+        if (mc == null || mc.world == null || pos == null) {
+            return false;
+        }
+        try {
+            return mc.world.getBlockState(pos).getBlock() == Blocks.ENDER_CHEST;
+        }
+        catch (Throwable t) {
+            return false;
+        }
+    }
+
+    public boolean beginRecover(String reason) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc == null || mc.player == null || mc.world == null) {
+            return false;
+        }
+        if (!this.recoverNeeded()) {
+            return false;
+        }
+        this.recoverReason = reason == null ? "" : reason;
+        this.recoverTicks = 0;
+        this.recoverStage = 0;
+        this.recoverStageTicks = 0;
+        this.recoverDropTicks = 0;
+        this.recoverDropTarget = null;
+        this.recoverShulkerDone = false;
+        this.recoverEcDone = false;
+        this.mineIdleTicks = 0;
+        this.mineRetries = 0;
+        this.manualBreakRetries = 0;
+        this.mineManual = false;
+        this.mineBackFailReason = "";
+        this.rescueTicks = 0;
+        this.rescueTarget = null;
+        this.recoverShulkerTarget = ItemHelper.countShulkers((PlayerEntity)mc.player) + (SupplyTask.blockIsShulker(mc, this.shulkerPos) ? 1 : 0);
+        this.recoverEcBefore = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST);
+        this.recoverObsidianBefore = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.OBSIDIAN);
+        this.recoverEcTarget = this.recoverEcBefore + 1;
+        this.releaseKeys();
+        BlockBreaker.cancel();
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.state = State.RECOVER;
+        this.status = TaskStatus.RUNNING;
+        this.delay = 0;
+        FOElytraLog.warn("\u5f00\u59cb\u5f52\u4f4d\uff08%s\uff09\uff1a\u628a\u653e\u4e0b\u7684%s\u6316\u56de\u6765\uff0c\u6700\u591a\u7b49 %d \u79d2", this.recoverReason, SupplyTask.blockIsShulker(mc, this.shulkerPos) && SupplyTask.blockIsEnderChest(mc, this.ecPos) ? "\u6f5c\u5f71\u76d2\u548c\u672b\u5f71\u7bb1" : (SupplyTask.blockIsShulker(mc, this.shulkerPos) ? "\u6f5c\u5f71\u76d2" : "\u672b\u5f71\u7bb1"), 20);
+        return true;
+    }
+
+    private void recoverTick(MinecraftClient mc) {
+        ++this.recoverTicks;
+        ++this.recoverStageTicks;
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        if (this.recoverTicks > 400) {
+            this.recoverFinish(mc);
+            return;
+        }
+        if (this.recoverStage == 0) {
+            this.recoverShulkerStage(mc);
+            if (this.recoverShulkerDone) {
+                this.recoverStage = 1;
+                this.recoverStageTicks = 0;
+            }
+            return;
+        }
+        if (this.recoverStage == 1) {
+            this.recoverEcStage(mc);
+            if (this.recoverEcDone) {
+                this.recoverStage = 2;
+            }
+            return;
+        }
+        this.recoverFinish(mc);
+    }
+
+    private void recoverShulkerStage(MinecraftClient mc) {
+        if (this.shulkerPos == null) {
+            this.recoverShulkerDone = true;
+            return;
+        }
+        if (SupplyTask.blockIsShulker(mc, this.shulkerPos)) {
+            if (this.recoverStageTicks == 1) {
+                FOElytraLog.info("\u5f52\u4f4d\uff1a\u5f00\u59cb\u6316\u56de\u6f5c\u5f71\u76d2 %s", SupplyTask.posText(this.shulkerPos));
+            }
+            if (!this.recoverMine(mc, this.shulkerPos)) {
+                this.recoverLeftover(true, this.shulkerPos, "\u6316\u4e0d\u52a8");
+                this.recoverShulkerDone = true;
+            }
+            return;
+        }
+        if (ItemHelper.countShulkers((PlayerEntity)mc.player) >= this.recoverShulkerTarget) {
+            this.recoverShulkerDone = true;
+            FOElytraLog.info("\u5f52\u4f4d\uff1a\u6f5c\u5f71\u76d2\u5df2\u6536\u56de\uff08\u80cc\u5305 %d \u4e2a\uff09", ItemHelper.countShulkers((PlayerEntity)mc.player));
+            return;
+        }
+        DropEvidence ev = this.dropsNear(mc, this.shulkerPos, false);
+        this.recoverWalkToDrops(mc, this.shulkerPos, false);
+        if (ev.count() > 0 || this.recoverStageTicks <= 200) {
+            if (this.recoverStageTicks % 100 == 0) {
+                FOElytraLog.detail("\u5f52\u4f4d\uff1a\u7b49\u6f5c\u5f71\u76d2\u8fdb\u80cc\u5305\uff08\u9644\u8fd1\u6389\u843d\u7269 %d \u4e2a\uff0c\u6700\u8fd1 %s\uff09", ev.count(), ev.nearestPos() == null ? "\u65e0" : String.format("%.1f \u683c", ev.nearest()));
+            }
+            return;
+        }
+        this.recoverLeftover(true, this.shulkerPos, "\u65b9\u5757\u5df2\u6316\u6389\u4f46\u9644\u8fd1\u6ca1\u6709\u6389\u843d\u7269");
+        this.recoverShulkerDone = true;
+    }
+
+    private void recoverEcStage(MinecraftClient mc) {
+        boolean gotIt;
+        if (this.ecPos == null) {
+            this.recoverEcDone = true;
+            return;
+        }
+        if (SupplyTask.blockIsEnderChest(mc, this.ecPos)) {
+            if (this.recoverStageTicks == 1) {
+                FOElytraLog.info("\u5f52\u4f4d\uff1a\u5f00\u59cb\u6316\u56de\u672b\u5f71\u7bb1 %s", SupplyTask.posText(this.ecPos));
+            }
+            if (!this.recoverMine(mc, this.ecPos)) {
+                this.recoverLeftover(false, this.ecPos, "\u6316\u4e0d\u52a8");
+                this.recoverEcDone = true;
+            }
+            return;
+        }
+        boolean bl = gotIt = ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST) >= this.recoverEcTarget || ItemHelper.countInInventory((PlayerEntity)mc.player, Items.OBSIDIAN) > this.recoverObsidianBefore;
+        if (gotIt) {
+            this.recoverEcDone = true;
+            FOElytraLog.info("\u5f52\u4f4d\uff1a\u672b\u5f71\u7bb1\u5df2\u6536\u56de\uff08\u672b\u5f71\u7bb1 %d \u4e2a / \u9ed1\u66dc\u77f3 %d \u4e2a\uff09", ItemHelper.countInInventory((PlayerEntity)mc.player, Items.ENDER_CHEST), ItemHelper.countInInventory((PlayerEntity)mc.player, Items.OBSIDIAN));
+            return;
+        }
+        DropEvidence ev = this.dropsNear(mc, this.ecPos, true);
+        this.recoverWalkToDrops(mc, this.ecPos, true);
+        if (ev.count() > 0 || this.recoverStageTicks <= 200) {
+            if (this.recoverStageTicks % 100 == 0) {
+                FOElytraLog.detail("\u5f52\u4f4d\uff1a\u7b49\u672b\u5f71\u7bb1/\u9ed1\u66dc\u77f3\u8fdb\u80cc\u5305\uff08\u9644\u8fd1\u6389\u843d\u7269 %d \u4e2a\uff0c\u6700\u8fd1 %s\uff09", ev.count(), ev.nearestPos() == null ? "\u65e0" : String.format("%.1f \u683c", ev.nearest()));
+            }
+            return;
+        }
+        this.recoverLeftover(false, this.ecPos, "\u65b9\u5757\u5df2\u6316\u6389\u4f46\u9644\u8fd1\u6ca1\u6709\u6389\u843d\u7269");
+        this.recoverEcDone = true;
+    }
+
+    private boolean recoverMine(MinecraftClient mc, BlockPos pos) {
+        this.noSneak("\u5f52\u4f4d\u6316\u6398\u524d");
+        if (this.mineManual) {
+            boolean breakerDone = BlockBreaker.tick(pos);
+            if (mc.world.getBlockState(pos).isAir()) {
+                this.mineManual = false;
+                return true;
+            }
+            if (!breakerDone) {
+                return true;
+            }
+            this.mineManual = false;
+            if (this.mineRetries < 3) {
+                ++this.mineRetries;
+                BlockBreaker.reset();
+                InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)pos));
+                FOElytraLog.warn("\u5f52\u4f4d\uff1a\u5f92\u624b\u6316\u6ca1\u6316\u6389 %s \u2192 \u6362\u4e2a\u89d2\u5ea6\u518d\u6765\uff08\u7b2c %d/%d \u6b21\uff09", SupplyTask.posText(pos), this.mineRetries, 3);
+                this.mineManual = true;
+                return true;
+            }
+            this.mineBackFailReason = this.hasPickaxe(mc) ? "\u5f92\u624b\u6316\u591a\u6b21\u6ca1\u6316\u6389\uff08\u65b9\u5757\u6ca1\u6d88\u5931\uff09" : "\u6ca1\u6709\u9550\u5b50\uff0c\u5f92\u624b\u4e5f\u6316\u4e0d\u6389";
+            FOElytraLog.warn("\u5f52\u4f4d\uff1a%s \u6536\u4e0d\u56de\u6765\uff08%s\uff09", SupplyTask.posText(pos), this.mineBackFailReason);
+            return false;
+        }
+        if (BaritoneHook.isMining()) {
+            this.mineIdleTicks = 0;
+            if (this.recoverStageTicks % 100 == 0) {
+                FOElytraLog.info("\u5f52\u4f4d\uff1a\u6b63\u5728\u6316 %s\uff08\u7b2c %d \u79d2\uff09", SupplyTask.posText(pos), this.recoverStageTicks / 20);
+            }
+            return true;
+        }
+        ++this.mineIdleTicks;
+        if (this.mineIdleTicks < 60) {
+            return true;
+        }
+        this.mineIdleTicks = 0;
+        if (this.mineRetries >= 3) {
+            this.mineBackFailReason = this.mineFailClass(mc, "\u65b9\u5757");
+            FOElytraLog.warn("\u5f52\u4f4d\uff1a\u6316\u4e0d\u52a8 %s\uff08\u5df2\u91cd\u8bd5 %d \u6b21\uff09\uff1a%s", SupplyTask.posText(pos), this.mineRetries, this.mineBackFailReason);
+            return false;
+        }
+        if (this.opts.useBaritoneMine() && BaritoneHook.available() && this.hasPickaxe(mc)) {
+            ++this.mineRetries;
+            Block block = mc.world.getBlockState(pos).getBlock();
+            boolean issued = BaritoneHook.mine(1, block);
+            FOElytraLog.warn("\u5f52\u4f4d\uff1a\u91cd\u65b0\u4e0b\u53d1\u6316 %s\uff08\u7b2c %d/%d \u6b21\uff09\uff5c\u4e0b\u53d1%s", SupplyTask.posText(pos), this.mineRetries, 3, issued ? "\u6210\u529f" : "\u5931\u8d25");
+            if (issued) {
+                return true;
+            }
+        }
+        ++this.mineRetries;
+        this.mineManual = true;
+        BaritoneHook.stop();
+        BlockBreaker.reset();
+        InvHelper.lookAt((PlayerEntity)mc.player, Vec3d.ofCenter((Vec3i)pos));
+        FOElytraLog.warn("\u5f52\u4f4d\uff1aBaritone \u6316\u4e0d\u52a8 %s\uff08%s\uff09\u2192 \u6539\u5f92\u624b\u6316\uff08\u7b2c %d/%d \u6b21\uff09", SupplyTask.posText(pos), this.hasPickaxe(mc) ? "\u6316\u77ff\u8fdb\u7a0b\u53cd\u590d\u505c\u6389" : "\u6ca1\u6709\u9550\u5b50", this.mineRetries, 3);
+        return true;
+    }
+
+    private void recoverWalkToDrops(MinecraftClient mc, BlockPos origin, boolean ecLoot) {
+        DropEvidence ev = this.dropsNear(mc, origin, ecLoot);
+        BlockPos nearest = ev.nearestPos();
+        if (nearest == null) {
+            this.recoverDropTarget = null;
+            return;
+        }
+        if (nearest.equals((Object)this.recoverDropTarget)) {
+            return;
+        }
+        this.recoverDropTarget = nearest;
+        if (!BaritoneHook.ready()) {
+            return;
+        }
+        FOElytraLog.info("\u5f52\u4f4d\uff1a\u8d70\u8fc7\u53bb\u6361\u6389\u843d\u7269 %s\uff08\u6700\u8fd1 %.1f \u683c\uff0c\u5171 %d \u4e2a\uff09", SupplyTask.posText(nearest), ev.nearest(), ev.count());
+        BaritoneHook.stop();
+        BaritoneHook.command("goto " + nearest.getX() + " " + nearest.getY() + " " + nearest.getZ());
+    }
+
+    private void recoverFinish(MinecraftClient mc) {
+        boolean shulkerLeft = SupplyTask.blockIsShulker(mc, this.shulkerPos);
+        boolean ecLeft = SupplyTask.blockIsEnderChest(mc, this.ecPos);
+        if (this.recoverTicks > 400) {
+            if (shulkerLeft) {
+                this.recoverLeftover(true, this.shulkerPos, "\u5f52\u4f4d\u8d85\u65f6 20 \u79d2\u8fd8\u6ca1\u6316\u6389");
+            }
+            if (ecLeft) {
+                this.recoverLeftover(false, this.ecPos, "\u5f52\u4f4d\u8d85\u65f6 20 \u79d2\u8fd8\u6ca1\u6316\u6389");
+            }
+            FOElytraLog.warn("\u5f52\u4f4d\u8d85\u65f6\u7ed3\u675f\uff08%d \u79d2\uff09\uff1a\u6f5c\u5f71\u76d2 %s\uff5c\u672b\u5f71\u7bb1 %s", 20, shulkerLeft ? "\u8fd8\u5728 " + SupplyTask.posText(this.shulkerPos) : "\u5df2\u5904\u7406", ecLeft ? "\u8fd8\u5728 " + SupplyTask.posText(this.ecPos) : "\u5df2\u5904\u7406");
+        } else {
+            Object[] objectArray = new Object[2];
+            Object object = this.shulkerPos == null ? "\u672c\u6765\u5c31\u6ca1\u653e\u4e0b" : (objectArray[0] = shulkerLeft ? "\u8fd8\u5728 " + SupplyTask.posText(this.shulkerPos) : "\u5df2\u6536\u56de");
+            objectArray[1] = this.ecPos == null ? "\u672c\u6765\u5c31\u6ca1\u653e\u4e0b" : (ecLeft ? "\u8fd8\u5728 " + SupplyTask.posText(this.ecPos) : "\u5df2\u6536\u56de");
+            FOElytraLog.tip("\u5f52\u4f4d\u5b8c\u6210\uff1a\u6f5c\u5f71\u76d2 %s\uff5c\u672b\u5f71\u7bb1 %s", objectArray);
+        }
+        BaritoneHook.stop();
+        BlockBreaker.cancel();
+        this.releaseKeys();
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        PlayerAction.clearStuckSneak();
+        this.state = State.DONE;
+        this.status = TaskStatus.DONE;
+        this.delay = 0;
+    }
+
+    private void recoverLeftover(boolean shulker, BlockPos pos, String why) {
+        String what = shulker ? "\u6f5c\u5f71\u76d2" : "\u672b\u5f71\u7bb1";
+        String at = SupplyTask.posText(pos);
+        if (shulker) {
+            ++this.runLeftShulkers;
+            this.runLeftPos = this.runLeftPos.isEmpty() ? at : this.runLeftPos + "\u3001" + at;
+            ++pendingLeftShulkers;
+            String string = pendingLeftPos = pendingLeftPos.isEmpty() ? at : pendingLeftPos + "\u3001" + at;
+            if (pos != null) {
+                this.placeRejected.add(pos.toImmutable());
+            }
+        } else {
+            ++this.runLeftEnderChests;
+            this.runLeftEcPos = this.runLeftEcPos.isEmpty() ? at : this.runLeftEcPos + "\u3001" + at;
+            ++pendingLeftEnderChests;
+            pendingLeftEcPos = pendingLeftEcPos.isEmpty() ? at : pendingLeftEcPos + "\u3001" + at;
+        }
+        FOElytraLog.warn("%s\u6ca1\u80fd\u6536\u56de\uff1a%s\uff08%s\uff09\u2014\u2014 \u8bf7\u81ea\u5df1\u53bb\u62ff", what, at, why);
+    }
+
     private void stopMiningAfterPickupWindow(boolean blockGone) {
         if (!blockGone) {
-            pickupWait = 0;
+            this.pickupWait = 0;
             return;
         }
-        pickupWait++;
-        if (MineWaitLogic.shouldStopMining(true, pickupWait, MineWaitLogic.PICKUP_WINDOW_TICKS,
-            BaritoneHook.isMining())) {
+        ++this.pickupWait;
+        if (this.pickupWait == 40 && BaritoneHook.isMining()) {
             BaritoneHook.stop();
-            FOElytraLog.debug("方块已消失，停挖等掉落物进背包");
+            FOElytraLog.debug("\u65b9\u5757\u5df2\u6d88\u5931\uff0c\u505c\u6389\u6316\u6398\u8fdb\u7a0b\u7b49\u6389\u843d\u7269\u8fdb\u80cc\u5305", new Object[0]);
         }
     }
-    /** 把四个「等待」计数器一起清零（每个状态进入前都会自己清零，这里是开局兜底）。 */
-    private void waitTicksReset() {
-        ecScreenWaitTicks = 0;
-        shScreenWaitTicks = 0;
-        shBreakWaitTicks = 0;
-        ecBreakWaitTicks = 0;
-    }
-    /**
-     * 由「自动鞘翅飞行」每 tick 告知：当前是否正被火球纠缠。
-     *
-     * <p>被火球打断的时候挖掘本来就推进不下去，不该把这个时间算进挖掘超时里，
-     * 否则「一边挨火球一边挖」会被误判成「挖不动了」。</p>
-     */
-    public void setThreatActive(boolean active) {
-        this.threatActive = active;
-    }
-    /** 按槽位统计潜影盒数量（V5.2 用来做槽位差判定）。 */
-    private InventoryPickupLogic.Snapshot snapshotShulkers(MinecraftClient mc) {
-        int[] perSlot = new int[36];
-        if (mc.player != null) {
-            var inv = mc.player.getInventory();
-            for (int i = 0; i < 36; i++) {
-                ItemStack s = inv.getStack(i);
-                perSlot[i] = ItemHelper.isShulkerBox(s) ? s.getCount() : 0;
-            }
-        }
-        return InventoryPickupLogic.of(perSlot);
-    }
-    /** 丢弃腾位时「绝对不丢」的物品。沿用 FO 已有的必需品判断，再补上鞘翅与满摞经验瓶。 */
-    private boolean isDropProtected(ItemStack s) {
-        if (s.isEmpty()) return true;
-        if (s.isOf(Items.ELYTRA)) return true;
-        if (s.isOf(Items.EXPERIENCE_BOTTLE) && s.getCount() >= s.getMaxCount()) return true;
-        return isEssentialHotbar(s);
-    }
-    /**
-     * 背包满、东西捡不起来时，丢掉一个杂物腾出格子（V5.2）。
-     *
-     * <p>安全闸（任何一条不满足就什么都不做）：</p>
-     * <ol>
-     *   <li>开关打开；</li>
-     *   <li><b>当前没有开任何容器</b> —— 否则同一批原始槽位号指向别的东西，点下去会误操作；</li>
-     *   <li>背包确实一格空位都没有（有空位就不用丢）；</li>
-     *   <li>本次挖回还没丢满 {@link #MAX_FREE_SLOT_DROPS} 件。</li>
-     * </ol>
-     */
-    private void freeSlotForPickup(MinecraftClient mc) {
-        if (!opts.freeSlotWhenFull()) return;
-        if (mc.player == null || mc.interactionManager == null) return;
-        // 开着容器时原始槽位号会指向容器那半边，绝对不能动手
-        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler) return;
-        if (freeSlotDrops >= MAX_FREE_SLOT_DROPS) return;
 
-        boolean[] empty = new boolean[FreeSlotLogic.INVENTORY_SIZE];
-        boolean[] protectedSlot = new boolean[FreeSlotLogic.INVENTORY_SIZE];
-        var inv = mc.player.getInventory();
-        for (int i = 0; i < FreeSlotLogic.INVENTORY_SIZE; i++) {
-            ItemStack s = inv.getStack(i);
-            empty[i] = s.isEmpty();
-            protectedSlot[i] = isDropProtected(s);
-        }
-        if (FreeSlotLogic.hasEmptySlot(empty)) return;   // 还有空位，不需要丢
-
-        int slot = FreeSlotLogic.pickDroppableSlot(empty, protectedSlot, inv.getSelectedSlot());
-        if (slot < 0) {
-            if (freeSlotDrops == 0) {
-                FOElytraLog.warn("背包满了，但剩下的全是保护物品（镐/剑/食物/图腾/烟花/鞘翅/末影箱/潜影盒），没有东西可以丢来腾位");
-            }
-            return;
-        }
-        int raw = FreeSlotLogic.rawPlayerSlotId(slot);
-        if (raw < 0) return;
-        ItemStack stack = inv.getStack(slot);
-        String name = stack.getName().getString();
-        int count = stack.getCount();
-        try {
-            mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId, raw, 1,
-                net.minecraft.screen.slot.SlotActionType.THROW, mc.player);
-            freeSlotDrops++;
-            FOElytraLog.warn("背包满，丢掉 %s x1 腾位（第 %d/%d 件，格 %d）",
-                name, freeSlotDrops, MAX_FREE_SLOT_DROPS, slot);
-        } catch (Throwable t) {
-            freeSlotDrops = MAX_FREE_SLOT_DROPS;   // 出错就别再试了
-            FOElytraLog.warn("丢弃 %s 腾位失败：%s", name, t);
-        }
-    }
     private boolean hasSilkTouch(MinecraftClient mc) {
         ItemStack selected = mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot());
-        if (isPickaxe(selected) && ItemHelper.hasEnchantment(selected, net.minecraft.enchantment.Enchantments.SILK_TOUCH, 1)) {
+        if (this.isPickaxe(selected) && ItemHelper.hasEnchantment(selected, (RegistryKey<Enchantment>)Enchantments.SILK_TOUCH, 1)) {
             return true;
         }
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < 9; ++i) {
             ItemStack s = mc.player.getInventory().getStack(i);
-            if (isPickaxe(s) && ItemHelper.hasEnchantment(s, net.minecraft.enchantment.Enchantments.SILK_TOUCH, 1)) return true;
-        }
-        return false;
-    }
-    private boolean hasPickaxe(MinecraftClient mc) {
-        for (int i = 0; i < 9; i++) {
-            if (isPickaxe(mc.player.getInventory().getStack(i))) return true;
-        }
-        return false;
-    }
-    private boolean tickBreakBlock(MinecraftClient mc, BlockPos pos) {
-        if (mc.world.getBlockState(pos).isAir()) {
-            breakTicks = 0;
+            if (!this.isPickaxe(s) || !ItemHelper.hasEnchantment(s, (RegistryKey<Enchantment>)Enchantments.SILK_TOUCH, 1)) continue;
             return true;
         }
-        if (!pos.equals(breakTarget)) {
-            breakTarget = pos;
-            breakTicks = 0;
-            breakRequested = false;
+        return false;
+    }
+
+    private boolean hasPickaxe(MinecraftClient mc) {
+        for (int i = 0; i < 9; ++i) {
+            if (!this.isPickaxe(mc.player.getInventory().getStack(i))) continue;
+            return true;
         }
-        if (breakTicks++ > 240) {
-            FOElytraLog.warn("挖方块超时（%d, %d, %d）", pos.getX(), pos.getY(), pos.getZ());
+        return false;
+    }
+
+    private boolean tickBreakBlock(MinecraftClient mc, BlockPos pos) {
+        this.noSneak("\u6316\u65b9\u5757\u4e2d");
+        if (mc.world.getBlockState(pos).isAir()) {
+            this.breakTicks = 0;
+            return true;
+        }
+        if (!pos.equals((Object)this.breakTarget)) {
+            this.breakTarget = pos;
+            this.breakTicks = 0;
+            this.breakRequested = false;
+        }
+        if (this.breakTicks++ > 240) {
+            FOElytraLog.warn("\u6316\u65b9\u5757\u8d85\u65f6\uff08%d, %d, %d\uff09", pos.getX(), pos.getY(), pos.getZ());
             BaritoneHook.stop();
             BlockBreaker.cancel();
-            breakTicks = 0;
+            this.breakTicks = 0;
             return true;
         }
-        if (opts.useBaritoneMine() && BaritoneHook.available()) {
+        if (this.opts.useBaritoneMine() && BaritoneHook.available()) {
             Block block = mc.world.getBlockState(pos).getBlock();
-            if (!breakRequested) {
+            if (!this.breakRequested) {
                 if (!BaritoneHook.mine(1, block)) {
                     return BlockBreaker.tick(pos);
                 }
-                breakRequested = true;
+                this.breakRequested = true;
                 return false;
             }
             if (!BaritoneHook.isMining()) {
@@ -1662,217 +3247,404 @@ public final class SupplyTask {
         }
         return BlockBreaker.tick(pos);
     }
+
     private void computeNeeds(MinecraftClient mc) {
-        needs.fireworkStacks = Math.max(0, opts.targetFireworkStacks()
-            - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)));
-        needs.xpBottles = Math.max(0, opts.targetXpBottles()
-            - ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE));
-        needs.food = Math.max(0, opts.targetFoodCount() - countFood(mc));
-        needs.totems = Math.max(0, opts.targetTotems()
-            - ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING));
-        needs.elytra = Math.max(0, opts.targetElytraCount() - countUsableElytra(mc));
+        this.needs.fireworkStacks = Math.max(0, this.opts.targetFireworkStacks() - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)mc.player, Items.FIREWORK_ROCKET)));
+        this.needs.xpBottles = Math.max(0, this.opts.targetXpBottles() - ItemHelper.countInInventory((PlayerEntity)mc.player, Items.EXPERIENCE_BOTTLE));
+        this.needs.food = Math.max(0, this.opts.targetFoodCount() - this.countFood(mc));
+        this.needs.totems = Math.max(0, this.opts.targetTotems() - ItemHelper.countInInventory((PlayerEntity)mc.player, Items.TOTEM_OF_UNDYING));
+        this.needs.elytra = Math.max(0, this.opts.targetElytraCount() - this.countUsableElytra(mc));
     }
+
     private int countFood(MinecraftClient mc) {
         int n = 0;
-        for (int i = 0; i < 36; i++) {
+        for (int i = 0; i < 36; ++i) {
             ItemStack s = mc.player.getInventory().getStack(i);
-            if (!s.isEmpty() && matchesFood(s)) n += s.getCount();
+            if (s.isEmpty() || !this.matchesFood(s)) continue;
+            n += s.getCount();
         }
         return n;
     }
+
     private int countUsableElytra(MinecraftClient mc) {
         int n = 0;
-        for (int i = 0; i < 41; i++) {
+        for (int i = 0; i < 41; ++i) {
             ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isOf(Items.ELYTRA) && ItemHelper.hasEnchantment(s, net.minecraft.enchantment.Enchantments.UNBREAKING, 3)
-                && s.getDamage() < 15) {
-                n++;
-            }
+            if (!s.isOf(Items.ELYTRA) || !ItemHelper.hasEnchantment(s, (RegistryKey<Enchantment>)Enchantments.UNBREAKING, 3) || s.getDamage() >= 15) continue;
+            ++n;
         }
         return n;
     }
+
     private int findEnderChestHotbar() {
         MinecraftClient mc = MinecraftClient.getInstance();
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isOf(Items.ENDER_CHEST)) return i;
-        }
-        return -1;
-    }
-    private int findShulkerHotbarSlot() {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        for (int i = 6; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isEmpty()) return i;
-        }
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isEmpty()) return i;
-        }
-        return -1;
-    }
-    private boolean ensureShulkerSelected(MinecraftClient mc) {
-        var inv = mc.player.getInventory();
-        if (ItemHelper.isShulkerBox(inv.getStack(shulkerHotbarSlot))) {
-            inv.setSelectedSlot(shulkerHotbarSlot);
-            return true;
-        }
-        int hot = InvHelper.findSlot(s -> ItemHelper.isShulkerBox(s), 0, 9);
-        if (hot >= 0) {
-            shulkerHotbarSlot = hot;
-            inv.setSelectedSlot(hot);
-            FOElytraLog.detail("重放前重新定位手持潜影盒：快捷栏第 %d 格", hot);
-            return true;
-        }
-        int bag = InvHelper.findSlot(s -> ItemHelper.isShulkerBox(s));
-        if (bag >= 0) {
-            int empty = InvHelper.findEmptyHotbarSlot();
-            if (empty < 0) {
-                FOElytraLog.detail("背包第 %d 格有潜影盒，但快捷栏 0-8 没有空位可以放它（此时不能开末影箱腾位："
-                    + "界面已经关了）→ 不放置，交给上层判失败", bag);
-                return false;
-            }
-            InvHelper.moveInvToHotbar(bag, empty);
-            if (!ItemHelper.isShulkerBox(inv.getStack(empty))) {
-                FOElytraLog.detail("换位没生效：槽 %d 上是 %s（不是潜影盒）→ 不放置，交给上层判失败",
-                    empty, inv.getStack(empty).isEmpty() ? "空" : inv.getStack(empty).getName().getString());
-                return false;
-            }
-            shulkerHotbarSlot = empty;
-            inv.setSelectedSlot(empty);
-            FOElytraLog.detail("重放前把背包第 %d 格的潜影盒换到快捷栏第 %d 格", bag, empty);
-            return true;
-        }
-        return false;
-    }
-    private String describeHeld(MinecraftClient mc) {
-        int slot = mc.player.getInventory().getSelectedSlot();
-        return describeStack(mc.player.getInventory().getSelectedStack()) + "（槽 " + slot + "）";
-    }
-    private String describeStack(ItemStack s) {
-        if (s.isEmpty()) return "空";
-        return s.getName().getString() + " x" + s.getCount();
-    }
-    private String describeBlock(MinecraftClient mc, BlockPos pos) {
-        if (pos == null) return "(无坐标)";
-        BlockState st = mc.world.getBlockState(pos);
-        return st.isAir() ? "空气" : st.getBlock().getName().getString();
-    }
-    private int makeHotbarRoom(ScreenHandler handler) {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        int direct = findShulkerHotbarSlot();
-        if (direct >= 0) return direct;
-        for (int h = 0; h < 9; h++) {
-            ItemStack s = mc.player.getInventory().getStack(h);
-            if (s.isEmpty() || isEssentialHotbar(s)) continue;
-            int empty = emptyBackpackIndex(mc);
-            if (empty < 0) break;
-            if (movePlayerSlot(handler, h, empty, "腾位：杂物进背包")) return h;
-        }
-        for (int h = 0; h < 9; h++) {
-            ItemStack s = mc.player.getInventory().getStack(h);
-            if (s.isEmpty() || isEssentialHotbar(s)) continue;
-            int junk = replaceableBackpackIndex(mc);
-            if (junk < 0) break;
-            if (movePlayerSlot(handler, h, junk, "腾位：换走背包杂物")) return h;
-        }
-        int fwSlots = 0;
-        for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) fwSlots++;
-        if (fwSlots >= 2) {
-            for (int h = 0; h < 9; h++) {
-                if (!mc.player.getInventory().getStack(h).isOf(Items.FIREWORK_ROCKET)) continue;
-                int empty = emptyBackpackIndex(mc);
-                int target = empty >= 0 ? empty : replaceableBackpackIndex(mc);
-                if (target < 0) break;
-                if (movePlayerSlot(handler, h, target, "腾位：多余的烟花进背包")) return h;
-            }
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (!s.isEmpty() && sb.length() < 90) sb.append(i).append('=').append(s.getName().getString()).append(' ');
-        }
-        FOElytraLog.warn("快捷栏 9 格全占满且腾不出位置：%s（背包空位 %d 个）", sb, countEmptyBackpack(mc));
-        return -1;
-    }
-    private boolean isEssentialHotbar(ItemStack s) {
-        if (s.isEmpty()) return true;
-        return isPickaxe(s) || isSword(s) || s.isOf(Items.ENDER_CHEST)
-            || s.isOf(Items.TOTEM_OF_UNDYING) || matchesFood(s) || ItemHelper.isShulkerBox(s)
-            || s.isOf(Items.FIREWORK_ROCKET);
-    }
-    private int emptyBackpackIndex(MinecraftClient mc) {
-        for (int i = 9; i < 36; i++) {
-            if (mc.player.getInventory().getStack(i).isEmpty()) return i;
-        }
-        return -1;
-    }
-    private int countEmptyBackpack(MinecraftClient mc) {
-        int n = 0;
-        for (int i = 9; i < 36; i++) if (mc.player.getInventory().getStack(i).isEmpty()) n++;
-        return n;
-    }
-    private int replaceableBackpackIndex(MinecraftClient mc) {
-        for (int i = 9; i < 36; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isEmpty()) return i;
-            if (isEssentialHotbar(s)) continue;
-            if (s.isOf(Items.EXPERIENCE_BOTTLE) && s.getCount() >= s.getMaxCount()) continue;
-            if (s.isOf(Items.ELYTRA)) continue;
+        for (int i = 0; i < 9; ++i) {
+            if (!mc.player.getInventory().getStack(i).isOf(Items.ENDER_CHEST)) continue;
             return i;
         }
         return -1;
     }
-    private boolean movePlayerSlot(ScreenHandler handler, int a, int b, String why) {
+
+    private int findShulkerHotbarSlot() {
+        int i;
         MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player == null) return false;
-        int rawA = InvHelper.playerSlotId(handler, mc.player, a);
-        int rawB = InvHelper.playerSlotId(handler, mc.player, b);
-        if (rawA < 0 || rawB < 0) return false;
-        InvHelper.moveStack(handler, rawA, rawB);
-        FOElytraLog.tip("%s（快捷栏 %d ↔ 背包 %d；潜影盒马上放进来）", why, a, b);
-        FOElytraLog.detail("%s：#%d → #%d（raw %d → %d）", why, a, b, rawA, rawB);
+        for (i = 6; i < 9; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            return i;
+        }
+        for (i = 0; i < 9; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private boolean ensureShulkerSelected(MinecraftClient mc) {
+        PlayerInventory inv = mc.player.getInventory();
+        if (ItemHelper.isShulkerBox(inv.getStack(this.shulkerHotbarSlot))) {
+            InvHelper.selectSlot(this.shulkerHotbarSlot);
+            return true;
+        }
+        int found = this.findShulkerAnywhere(mc);
+        if (found < 0) {
+            this.shulkerSelectFailReason = "\u624b\u4e0a\u548c\u80cc\u5305\u91cc\u90fd\u6ca1\u6709\u6f5c\u5f71\u76d2\uff08\u80cc\u5305\u6f5c\u5f71\u76d2 " + ItemHelper.countShulkers((PlayerEntity)mc.player) + " \u4e2a\uff09";
+            return false;
+        }
+        if (found < 9) {
+            this.shulkerHotbarSlot = found;
+            InvHelper.selectSlot(found);
+            FOElytraLog.detail("\u91cd\u653e\u524d\u91cd\u65b0\u5b9a\u4f4d\u624b\u6301\u6f5c\u5f71\u76d2\uff1a\u5feb\u6377\u680f\u7b2c %d \u683c", found);
+            return true;
+        }
+        int target = InvHelper.findEmptyHotbarSlot();
+        boolean swapped = false;
+        if (target < 0) {
+            for (int h = 0; h < 9; ++h) {
+                if (!this.isJunkNow(inv.getStack(h))) continue;
+                target = h;
+                swapped = true;
+                break;
+            }
+        }
+        if (target < 0) {
+            FOElytraLog.warn("\u5feb\u6377\u680f 35 \u683c\u5168\u662f\u8981\u7559\u7684\u4e1c\u897f\uff0c\u6362\u4e0d\u51fa\u4f4d\u7f6e\u653e\u6f5c\u5f71\u76d2\uff08\u76d2\u5b50\u5728\u80cc\u5305\u7b2c %d \u683c\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d %d\uff5c\u53ef\u66ff\u6362 %d\uff09", found, this.countEmptyHotbar(mc), this.countReplaceableHotbar(mc));
+            this.shulkerSelectFailReason = "\u5feb\u6377\u680f 35 \u683c\u5168\u662f\u8981\u7559\u7684\u4e1c\u897f\uff0c\u6362\u4e0d\u51fa\u4f4d\u7f6e\u653e\u6f5c\u5f71\u76d2";
+            return false;
+        }
+        InvHelper.moveInvToHotbar(found, target);
+        if (!ItemHelper.isShulkerBox(inv.getStack(target))) {
+            FOElytraLog.warn("\u6362\u4f4d\u6ca1\u751f\u6548\uff1a\u5feb\u6377\u680f %d \u4e0a\u73b0\u5728\u662f %s\uff08\u4e0d\u662f\u6f5c\u5f71\u76d2\uff09", target, this.describeStack(inv.getStack(target)));
+            this.shulkerSelectFailReason = "\u6f5c\u5f71\u76d2\u6362\u5230\u5feb\u6377\u680f\u6ca1\u751f\u6548\uff08\u69fd " + target + " \u4e0a\u73b0\u5728\u662f " + this.describeStack(inv.getStack(target)) + "\uff09";
+            return false;
+        }
+        this.shulkerHotbarSlot = target;
+        InvHelper.selectSlot(target);
+        FOElytraLog.detail("\u628a\u80cc\u5305\u7b2c %d \u683c\u7684\u6f5c\u5f71\u76d2\u6362\u5230\u5feb\u6377\u680f\u7b2c %d \u683c\uff08%s\uff09", found, target, swapped ? "\u6362\u6389\u4e00\u4e2a\u53ef\u66ff\u6362\u69fd\u4f4d" : "\u7528\u7a7a\u69fd");
         return true;
     }
+
+    private String describeHeld(MinecraftClient mc) {
+        int slot = mc.player.getInventory().getSelectedSlot();
+        return this.describeStack(mc.player.getInventory().getSelectedStack()) + "\uff08\u69fd " + slot + "\uff09";
+    }
+
+    private String describeStack(ItemStack s) {
+        if (s.isEmpty()) {
+            return "\u7a7a";
+        }
+        return s.getName().getString() + " x" + s.getCount();
+    }
+
+    private String describeBlock(MinecraftClient mc, BlockPos pos) {
+        if (pos == null) {
+            return "(\u65e0\u5750\u6807)";
+        }
+        BlockState st = mc.world.getBlockState(pos);
+        return st.isAir() ? "\u7a7a\u6c14" : st.getBlock().getName().getString();
+    }
+
+    private int makeHotbarRoom(ScreenHandler handler) {
+        int empty;
+        ItemStack s;
+        int h;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        int direct = this.findShulkerHotbarSlot();
+        if (direct >= 0) {
+            return direct;
+        }
+        for (h = 0; h < 9; ++h) {
+            s = mc.player.getInventory().getStack(h);
+            if (s.isEmpty() || this.isEssentialHotbar(s)) continue;
+            empty = this.emptyBackpackIndex(mc);
+            if (empty < 0) break;
+            if (!this.movePlayerSlot(handler, h, empty, "\u817e\u4f4d\uff1a\u6742\u7269\u8fdb\u80cc\u5305")) continue;
+            return h;
+        }
+        for (h = 0; h < 9; ++h) {
+            s = mc.player.getInventory().getStack(h);
+            if (s.isEmpty() || this.isEssentialHotbar(s)) continue;
+            int junk = this.replaceableBackpackIndex(mc);
+            if (junk < 0) break;
+            if (!this.movePlayerSlot(handler, h, junk, "\u817e\u4f4d\uff1a\u6362\u8d70\u80cc\u5305\u6742\u7269")) continue;
+            return h;
+        }
+        int fwSlots = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (!mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) continue;
+            ++fwSlots;
+        }
+        if (fwSlots >= 2) {
+            for (int h2 = 0; h2 < 9; ++h2) {
+                int target;
+                if (!mc.player.getInventory().getStack(h2).isOf(Items.FIREWORK_ROCKET)) continue;
+                empty = this.emptyBackpackIndex(mc);
+                int n = target = empty >= 0 ? empty : this.replaceableBackpackIndex(mc);
+                if (target < 0) break;
+                if (!this.movePlayerSlot(handler, h2, target, "\u817e\u4f4d\uff1a\u591a\u4f59\u7684\u70df\u82b1\u8fdb\u80cc\u5305")) continue;
+                return h2;
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 9; ++i) {
+            ItemStack s2 = mc.player.getInventory().getStack(i);
+            if (s2.isEmpty() || sb.length() >= 90) continue;
+            sb.append(i).append('=').append(s2.getName().getString()).append(' ');
+        }
+        FOElytraLog.detail("\u817e\u4f4d\uff1a\u80cc\u5305\u91cc\u65e2\u6ca1\u6709\u7a7a\u4f4d\u4e5f\u6ca1\u6709\u80fd\u6362\u8d70\u7684\u6742\u7269\uff08%s\uff1b\u80cc\u5305\u7a7a\u4f4d %d \u4e2a\uff09\u2192 \u6539\u8bd5\u53ef\u66ff\u6362\u5feb\u6377\u680f\u4e92\u6362\uff08\u6309\u53ef\u66ff\u6362\u6e05\u5355\uff0c\u4e0d\u52a8\u8981\u7559\u7684\u4e1c\u897f\uff09", sb, this.countEmptyBackpack(mc));
+        return -1;
+    }
+
+    private int swapOutReplaceableHotbar(ScreenHandler handler) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (handler == null || mc.player == null) {
+            return -1;
+        }
+        if (this.shulkerRawSlot < 0 || this.shulkerRawSlot >= handler.slots.size()) {
+            return -1;
+        }
+        ItemStack box = ((Slot)handler.slots.get(this.shulkerRawSlot)).getStack();
+        if (!ItemHelper.isShulkerBox(box)) {
+            FOElytraLog.warn("\u76d2\u5b50\u69fd %d \u4e0a\u73b0\u5728\u662f %s\uff08\u4e0d\u662f\u6f5c\u5f71\u76d2\uff09\uff0c\u6362\u4f4d\u53d6\u76d2\u505a\u4e0d\u4e86", this.shulkerRawSlot, this.describeStack(box));
+            return -1;
+        }
+        for (int h = 0; h < 9; ++h) {
+            ItemStack s = mc.player.getInventory().getStack(h);
+            if (!this.isJunkNow(s)) continue;
+            if (!ItemHelper.isShulkerBox(((Slot)handler.slots.get(this.shulkerRawSlot)).getStack())) {
+                return -1;
+            }
+            int rawHotbar = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, h);
+            if (rawHotbar < 0) continue;
+            InvHelper.moveStack(handler, this.shulkerRawSlot, rawHotbar);
+            ItemStack nowHotbar = mc.player.getInventory().getStack(h);
+            if (ItemHelper.isShulkerBox(nowHotbar)) {
+                FOElytraLog.tip("\u5feb\u6377\u680f\u585e\u6ee1\uff1a\u62ff\u5feb\u6377\u680f\u7b2c %d \u683c\u7684 %s \u548c\u672b\u5f71\u7bb1\u69fd %d \u4e92\u6362\u5185\u5bb9\uff0c\u8fd9\u683c\u817e\u51fa\u6765\u653e\u76d2\u5b50\uff08\u4e92\u6362\u4e0d\u4e22\u4e1c\u897f\uff09", h, this.describeStack(s), this.shulkerRawSlot);
+                return h;
+            }
+            ItemStack nowBox = ((Slot)handler.slots.get(this.shulkerRawSlot)).getStack();
+            FOElytraLog.detail("\u6362\u4f4d\u540e\u8fd8\u6ca1\u770b\u5230\u76d2\u5b50\uff1a\u5feb\u6377\u680f\u7b2c %d \u683c\uff1d%s\uff5c\u76d2\u69fd %d\uff1d%s", h, this.describeStack(nowHotbar), this.shulkerRawSlot, this.describeStack(nowBox));
+            if (ItemHelper.isShulkerBox(nowBox)) continue;
+            FOElytraLog.detail("\u76d2\u69fd %d \u91cc\u7684\u76d2\u5b50\u5df2\u7ecf\u4e0d\u5728\u539f\u5904\u4e86\uff0c\u8fd9\u6b21\u6362\u4f4d\u770b\u6765\u751f\u6548\u4e86\uff0c\u4ea4\u7ed9\u4e0b\u4e00 tick \u7684\u53d6\u76d2\u590d\u6838\u786e\u8ba4", this.shulkerRawSlot);
+            return h;
+        }
+        FOElytraLog.warn("\u5feb\u6377\u680f 9 \u683c\u91cc\u6ca1\u6709\u53ef\u66ff\u6362\u7684\u683c\u5b50\uff08\u56fe\u817e\u3001\u70df\u82b1\u3001\u7ecf\u9a8c\u74f6\u3001\u9798\u7fc5\u3001\u98df\u7269\u3001\u672b\u5f71\u7bb1\u3001\u9550\u5251\u3001\u6f5c\u5f71\u76d2\u90fd\u4e0d\u6362\uff09\uff5c\u5feb\u6377\u680f\u7a7a\u4f4d %d\uff5c\u53ef\u66ff\u6362 %d", this.countEmptyHotbar(mc), this.countReplaceableHotbar(mc));
+        return -1;
+    }
+
+    private boolean isEssentialHotbar(ItemStack s) {
+        if (s.isEmpty()) {
+            return true;
+        }
+        return this.isPickaxe(s) || this.isSword(s) || s.isOf(Items.ENDER_CHEST) || s.isOf(Items.TOTEM_OF_UNDYING) || this.matchesFood(s) || ItemHelper.isShulkerBox(s) || s.isOf(Items.FIREWORK_ROCKET);
+    }
+
+    private int emptyBackpackIndex(MinecraftClient mc) {
+        for (int i = 9; i < 36; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private int countEmptyBackpack(MinecraftClient mc) {
+        int n = 0;
+        for (int i = 9; i < 36; ++i) {
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
+            ++n;
+        }
+        return n;
+    }
+
+    private int replaceableBackpackIndex(MinecraftClient mc) {
+        for (int i = 9; i < 36; ++i) {
+            ItemStack s = mc.player.getInventory().getStack(i);
+            if (s.isEmpty()) {
+                return i;
+            }
+            if (this.isEssentialHotbar(s) || s.isOf(Items.EXPERIENCE_BOTTLE) && s.getCount() >= s.getMaxCount() || s.isOf(Items.ELYTRA)) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private boolean movePlayerSlot(ScreenHandler handler, int a, int b, String why) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) {
+            return false;
+        }
+        int rawA = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, a);
+        int rawB = InvHelper.playerSlotId(handler, (PlayerEntity)mc.player, b);
+        if (rawA < 0 || rawB < 0) {
+            return false;
+        }
+        InvHelper.moveStack(handler, rawA, rawB);
+        FOElytraLog.tip("%s\uff08\u5feb\u6377\u680f %d \u2194 \u80cc\u5305 %d\uff1b\u6f5c\u5f71\u76d2\u9a6c\u4e0a\u653e\u8fdb\u6765\uff09", why, a, b);
+        FOElytraLog.detail("%s\uff1a#%d \u2192 #%d\uff08raw %d \u2192 %d\uff09", why, a, b, rawA, rawB);
+        return true;
+    }
+
     private void next(State next, int wait) {
         if (next != this.state) {
-            FOElytraLog.detail("补给状态 %s → %s（等 %d tick）｜需求 %s", this.state, next, Math.max(0, wait), needs);
+            FOElytraLog.detail("\u8865\u7ed9\u72b6\u6001 %s \u2192 %s\uff08\u7b49 %d tick\uff09\uff5c\u9700\u6c42 %s", new Object[]{this.state, next, Math.max(0, wait), this.needs});
         }
+        this.noSneak("\u5207\u72b6\u6001 \u2192 " + String.valueOf((Object)next));
         this.state = next;
         this.delay = Math.max(0, wait);
-        if (next == State.DONE) status = TaskStatus.DONE;
-        if (next == State.FAILED) status = TaskStatus.FAILED;
-    }
-    private void fail(String reason) {
-        failReason = reason;
-        lastMessage = reason;
-        FOElytraLog.err("补给失败：%s", reason);
-        releaseKeys();
-        BlockBreaker.cancel();
-        if (BaritoneHook.isMining()) BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        FOElytraLog.detail("补给失败收尾：Baritone 已停=%s｜界面已关=%s｜状态 %s｜需求 %s",
-            !BaritoneHook.isMining(), !InvHelper.hasContainerOpen(), state, needs);
-        state = State.FAILED;
-        status = TaskStatus.FAILED;
-    }
-    private void releaseKeys() {
-        if (walkPressed) {
-            PlayerAction.pressForward(false);
-            walkPressed = false;
+        if (next == State.DONE) {
+            this.status = TaskStatus.DONE;
+            this.clearStuckSneak("\u8865\u7ed9\u6536\u5c3e");
+            if (this.runLostShulkers > 0) {
+                FOElytraLog.warn("\u672c\u6b21\u8865\u7ed9\u4e22\u5931\u6f5c\u5f71\u76d2 %d \u4e2a\uff08\u4f4d\u7f6e %s\uff09", this.runLostShulkers, this.runLostPos);
+            }
+            if (this.runLeftShulkers > 0) {
+                FOElytraLog.warn("\u672c\u6b21\u8865\u7ed9\u6709 %d \u4e2a\u6f5c\u5f71\u76d2\u7559\u5728\u539f\u5730\uff08\u4f4d\u7f6e %s\uff09", this.runLeftShulkers, this.runLeftPos);
+            }
+            if (this.runLeftEnderChests > 0) {
+                FOElytraLog.warn("\u672c\u6b21\u8865\u7ed9\u6709 %d \u4e2a\u672b\u5f71\u7bb1\u7559\u5728\u539f\u5730\uff08\u4f4d\u7f6e %s\uff09", this.runLeftEnderChests, this.runLeftEcPos);
+            }
+        }
+        if (next == State.FAILED) {
+            this.status = TaskStatus.FAILED;
         }
     }
-    private String describeTargets() {
-        return "烟花 " + opts.targetFireworkStacks() + " 组 / 经验瓶 " + opts.targetXpBottles()
-            + " / 食物 " + opts.targetFoodCount() + " / 图腾 " + opts.targetTotems()
-            + " / 备用鞘翅 " + opts.targetElytraCount();
+
+    private void clearStuckSneak(String where) {
+        boolean cleared = PlayerAction.clearStuckSneak();
+        FOElytraLog.detail("\u6e05\u6389\u6b8b\u7559\u6f5c\u884c\uff1a%s\uff08%s\uff09", cleared ? "\u662f" : "\u5426", where);
     }
+
+    private void noSneak(String where) {
+        if (PlayerAction.forceNoSneak()) {
+            FOElytraLog.detail("\u5f3a\u5236\u677e\u5f00\u6f5c\u884c\uff08\u8865\u7ed9\u91cc\u4e0d\u8bb8\u6f5c\u884c\uff09\uff1a%s", where);
+        }
+    }
+
+    private static boolean isContainerState(State s) {
+        return switch (s.ordinal()) {
+            case 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 25 -> true;
+            default -> false;
+        };
+    }
+
+    private void fail(String reason) {
+        this.failReason = reason;
+        this.lastMessage = reason;
+        FOElytraLog.err("\u8865\u7ed9\u5931\u8d25\uff1a%s", reason);
+        this.releaseKeys();
+        BlockBreaker.cancel();
+        if (BaritoneHook.isMining()) {
+            BaritoneHook.stop();
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        FOElytraLog.detail("\u8865\u7ed9\u5931\u8d25\u6536\u5c3e\uff1aBaritone \u5df2\u505c=%s\uff5c\u754c\u9762\u5df2\u5173=%s\uff5c\u72b6\u6001 %s\uff5c\u9700\u6c42 %s", new Object[]{!BaritoneHook.isMining(), !InvHelper.hasContainerOpen(), this.state, this.needs});
+        this.clearStuckSneak("\u8865\u7ed9\u5931\u8d25");
+        this.state = State.FAILED;
+        this.status = TaskStatus.FAILED;
+    }
+
+    private void releaseKeys() {
+        if (this.walkPressed) {
+            PlayerAction.pressForward(false);
+            this.walkPressed = false;
+        }
+        PlayerAction.forceNoSneak();
+    }
+
+    private String describeTargets() {
+        return "\u70df\u82b1 " + this.opts.targetFireworkStacks() + " \u7ec4 / \u7ecf\u9a8c\u74f6 " + this.opts.targetXpBottles() + " / \u98df\u7269 " + this.opts.targetFoodCount() + " / \u56fe\u817e " + this.opts.targetTotems() + " / \u5907\u7528\u9798\u7fc5 " + this.opts.targetElytraCount();
+    }
+
     public static int containerSlots(ScreenHandler handler) {
-        if (handler == null) return 27;
+        if (handler == null) {
+            return 27;
+        }
         int c = handler.slots.size() - 36;
         return c <= 0 ? 27 : c;
     }
+
     public static boolean isShulkerBoxBlock(Block block) {
         return block instanceof ShulkerBoxBlock || block == Blocks.SHULKER_BOX;
     }
+
     public Needs needs() {
-        return needs;
+        return this.needs;
+    }
+
+    static {
+        pendingLostPos = "";
+        pendingLeftPos = "";
+        pendingLeftEcPos = "";
+    }
+
+    public static enum State {
+        IDLE("\u7a7a\u95f2"),
+        WALK_CENTER("\u8d70\u4f4d\u5230\u4e2d\u5fc3"),
+        SORT_INV("\u6574\u7406\u80cc\u5305"),
+        EVALUATE("\u8bc4\u4f30"),
+        PUT_OUT_FIRE("\u706d\u706b"),
+        PLACE_EC("\u653e\u672b\u5f71\u7bb1"),
+        OPEN_EC("\u5f00\u672b\u5f71\u7bb1"),
+        WAIT_EC("\u7b49\u5f85\u672b\u5f71\u7bb1"),
+        SCAN("\u626b\u63cf"),
+        TAKE_SHULKER("\u53d6\u6f5c\u5f71\u76d2"),
+        VERIFY_TAKE("\u9a8c\u8bc1\u53d6\u76d2"),
+        PLACE_SH("\u653e\u6f5c\u5f71\u76d2"),
+        OPEN_SH("\u5f00\u6f5c\u5f71\u76d2"),
+        WAIT_SH("\u7b49\u5f85\u6f5c\u5f71\u76d2"),
+        MOVE_ITEMS("\u8f6c\u79fb\u7269\u54c1"),
+        CLOSE_SH("\u5173\u6f5c\u5f71\u76d2"),
+        BREAK_SH("\u6316\u6f5c\u5f71\u76d2"),
+        WAIT_BREAK_SH("\u7b49\u5f85\u6316\u76d2"),
+        REOPEN_EC("\u91cd\u5f00\u672b\u5f71\u7bb1"),
+        WAIT_EC_RETURN("\u7b49\u5f85\u56de\u672b\u5f71\u7bb1"),
+        RETURN_SH("\u5f52\u8fd8\u6f5c\u5f71\u76d2"),
+        CLOSE_EC("\u5173\u672b\u5f71\u7bb1"),
+        NEXT_SH("\u4e0b\u4e00\u4e2a\u6f5c\u5f71\u76d2"),
+        BREAK_EC("\u6316\u672b\u5f71\u7bb1"),
+        WAIT_BREAK_EC("\u7b49\u5f85\u6316\u672b\u5f71\u7bb1"),
+        VERIFY_RETURN("\u9a8c\u8bc1\u5f52\u8fd8"),
+        RECOVER("\u6062\u590d"),
+        DONE("\u5b8c\u6210"),
+        FAILED("\u5931\u8d25");
+
+
+        private final String label;
+
+        State(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    private record PlanItem(int rawSlot, int fireworkStacks, int second, boolean xpMode, String title) {
+    }
+
+    private record TakeVerify(Item item, int srcSlot, int beforeInv, int beforeBox, int kind, int takenCount) {
+    }
+
+    private record DropEvidence(int count, double nearest, BlockPos nearestPos) {
     }
 }
+

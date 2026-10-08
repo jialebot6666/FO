@@ -1,27 +1,42 @@
 package com.fo.addon.elytra.modules;
 
+import baritone.api.Settings;
 import com.fo.addon.elytra.FOElytraModule;
 import com.fo.addon.elytra.core.BaritoneHook;
 import com.fo.addon.elytra.core.BlockBreaker;
+import com.fo.addon.elytra.core.BounceProbe;
 import com.fo.addon.elytra.core.EatController;
 import com.fo.addon.elytra.core.FindPathToOpen;
 import com.fo.addon.elytra.core.FireballDeflector;
 import com.fo.addon.elytra.core.FoodPriority;
 import com.fo.addon.elytra.core.FOElytraLog;
-import com.fo.addon.elytra.core.InventoryRestocker;
 import com.fo.addon.elytra.core.InvHelper;
+import com.fo.addon.elytra.core.InventoryRestocker;
 import com.fo.addon.elytra.core.ItemHelper;
+import com.fo.addon.elytra.core.JunkDropper;
 import com.fo.addon.elytra.core.LavaEscape;
 import com.fo.addon.elytra.core.LavaPredictor;
 import com.fo.addon.elytra.core.MendTask;
 import com.fo.addon.elytra.core.Needs;
+import com.fo.addon.elytra.core.OrderedItemListSetting;
+import com.fo.addon.elytra.core.OrderedItemListWidget;
 import com.fo.addon.elytra.core.PlayerAction;
 import com.fo.addon.elytra.core.SettingHelper;
 import com.fo.addon.elytra.core.StuckEscape;
 import com.fo.addon.elytra.core.SupplyOptions;
-import com.fo.addon.elytra.core.TerrainProbe;
 import com.fo.addon.elytra.core.SupplyTask;
 import com.fo.addon.elytra.core.TaskStatus;
+import com.fo.addon.elytra.core.TimelinessCounter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.WLabel;
@@ -40,328 +55,428 @@ import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.AbstractClientPlayerEntity;
+import net.minecraft.client.network.ClientPlayNetworkHandler;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.mob.Monster;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
+import net.minecraft.util.Util;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.Vec3i;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkStatus;
 
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-public class AutoElytraFlight extends FOElytraModule {
-
-    public enum Mode {
-
-        Waypoints("按航点列表"),
-
-        SingleTarget("单一坐标"),
-
-        Direction("朝向方向");
-
-        public final String label;
-
-        Mode(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/下拉框/提示均显示中文（Meteor EnumSetting 走 toString，必须覆写否则显示英文枚举名） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    public enum State {
-        IDLE("空闲"),
-        PREPARE("准备"),
-        TAKEOFF("起飞"),
-        FLYING("飞行中"),
-        LANDING("降落"),
-        SUPPLY("补给"),
-        MEND("修鞘翅"),
-        DONE("完成"),
-        FAILED("失败");
-
-        public final String label;
-
-        State(String label) {
-            this.label = label;
-        }
-
-        /** 前端 UI/提示均显示中文（模块列表、日志、聊天输出都会打印这个状态） */
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    private enum TakeoffPhase {
-
-        INIT("初始化"),
-
-        LAUNCH("原地起跳"),
-
-        CLEAR_HEAD("清除头顶障碍"),
-
-        FLY_TO_OPEN("飞向开阔地"),
-
-        ASCEND("爬升"),
-
-        WAIT_ARRIVE("等待 Baritone 接管");
-
-        public final String label;
-
-        TakeoffPhase(String label) {
-            this.label = label;
-        }
-
-        @Override
-        public String toString() {
-            return label;
-        }
-    }
-
-    private final SettingGroup sgTarget = settings.createGroup("目标");
-    private final SettingGroup sgFlight = settings.createGroup("飞行");
-    private final SettingGroup sgBaritone = settings.createGroup("Baritone 飞行");
-    private final SettingGroup sgFireball = settings.createGroup("反击火球");
-    private final SettingGroup sgLava = settings.createGroup("逃离岩浆");
-
-    private final SettingGroup sgLavaPredict = settings.createGroup("岩浆预测（实验性）");
-    private final SettingGroup sgSupplyTrigger = settings.createGroup("补给触发");
-    private final SettingGroup sgSupplyAmount = settings.createGroup("补给数量");
-    private final SettingGroup sgSupplyExec = settings.createGroup("补给执行");
-    private final SettingGroup sgEat = settings.createGroup("自动进食");
-    private final SettingGroup sgMend = settings.createGroup("修鞘翅");
-    private final SettingGroup sgSafety = settings.createGroup("安全");
-    private final SettingGroup sgTerrain = settings.createGroup("地形绕开");
-    private final SettingGroup sgLandSafety = settings.createGroup("降落安全");
-    private final SettingGroup sgDebug = settings.createGroup("调试");
-
-    private final EnumSetting<Mode> mode = SettingHelper.enum_(sgTarget, "模式","Waypoints=按航点列表顺序飞；SingleTarget=只飞一个坐标；Direction=朝启动时的视角方向跑图。",
-        Mode.Waypoints);
-
-    private final StringListSetting waypoints = SettingHelper.stringList(sgTarget, "航点列表",
-        "每行一个坐标，格式 x,z（也接受 x z 或 x, z）。",
-        List.of("1000,1000", "1000,-1000", "-1000,-1000"));
-
-    private final IntSetting targetX = SettingHelper.intRaw(sgTarget, "目标 X","SingleTarget 模式的 X 坐标。默认 0。", 0, -30000000, 30000000);
-
-    private final IntSetting targetZ = SettingHelper.intRaw(sgTarget, "目标 Z","SingleTarget 模式的 Z 坐标。默认 0。", 0, -30000000, 30000000);
-
-    private final IntSetting segmentDistance = SettingHelper.intRaw(sgTarget, "单段距离","定向跑图每一段推进的距离（格）。默认 2000。",
-        2000, 100, 100000);
-
-    private final IntSetting arriveRadius = SettingHelper.int_(sgTarget, "到达判定半径","Baritone 停下后与目标的水平距离小于该值才算「到达」，否则记为一次失败段。默认 32。", 32, 4, 512);
-
-    private final BoolSetting loop = SettingHelper.bool(sgTarget, "循环航点","航点列表飞完后从头再来。默认开。", true);
-
-    private static String headingName(float yaw) {
-        float y = ((yaw % 360) + 360) % 360;
-        if (y < 45 || y >= 315) return "正南 +Z";
-        if (y < 135) return "正西 -X";
-        if (y < 225) return "正北 -Z";
-        return "正东 +X";
-    }
-
-    private final BoolSetting autoTakeoff = SettingHelper.bool(sgFlight, "自动起飞","本插件自己起跳并展开鞘翅（做法：原地跳两下 → 头顶挡了就挖开 → 再不行就找开阔航线）。默认开。", true);
-
-    private final IntSetting takeoffTimeout = SettingHelper.int_(sgFlight, "起飞看门狗","整个起飞流程（原地起跳 → 清障 → 找开阔航线 → 飞往开阔地）最多跑多少 tick 就判失败，20 tick = 1 秒。默认 120。", 120, 20, 1200);
-
-    private final BoolSetting takeoffAutoJumpFallback = SettingHelper.bool(sgFlight, "起飞失败交给 Baritone","本插件的起飞流程（原地起跳 + 开阔地搜索）全部失败后，临时把 Baritone 的 elytraAutoJump 打开再试一次。默认开。",
-        true);
-
-    private final DoubleSetting takeoffPitch = SettingHelper.double_(sgFlight, "起飞俯仰角","起跳前看向的角度，-30 是设计值（略微抬头，起跳后容易展开）。默认 -30.0。", -30.0, -90.0, 0.0);
-
-    private final BoolSetting openAreaSearch = SettingHelper.bool(sgFlight, "开阔地搜索起飞","原地起跳失败时，用 512 个方向找一条开阔航线飞过去。默认开。", true);
-
-    private final DoubleSetting openSearchDist = SettingHelper.double_(sgFlight, "开阔地搜索距离","航线搜索往前推多少格（默认 25）。", 25.0, 5.0, 64.0);
-
-    private final DoubleSetting openSafeDist = SettingHelper.double_(sgFlight, "开阔地安全距离",
-        "评分时每条射线最多看多远，越大越偏好「大空地」（默认 20）。", 20.0, 4.0, 48.0);
-
-    private final IntSetting openTries = SettingHelper.int_(sgFlight, "飞往开阔地尝试次数",
-        "朝开阔地来回冲几次还没让 Baritone 接管就判起飞失败（默认 6）。", 6, 1, 12);
-
-    private final BoolSetting allowAscend = SettingHelper.bool(sgFlight, "允许先抬升再找航线","四周都被挡死时先抬头垂直上升，从 +3.0 格一路试到 +10.5 格（每 0.5 格一次）再重新找航线。默认开。", true);
-
-    private final IntSetting jumpBeforeOpen = SettingHelper.int_(sgFlight, "原地起跳尝试次数",
-        "站在地上起跳几次还没展开鞘翅，就转去「飞往开阔地」（默认 3 次）。", 3, 1, 10);
-
-    private final BoolSetting clearHeadBlock = SettingHelper.bool(sgFlight, "头顶障碍自动清除","起跳前头顶有方块挡着时，让 Baritone 把头顶 2×2×2 挖开再起跳（清障做法）。默认开。", true);
-
-    private final BoolSetting fireworkRefill = SettingHelper.bool(sgFlight, "自动补充快捷栏烟花","快捷栏烟花少于阈值时，从背包把整摞烟花换到快捷栏（不开界面，直接发包）。默认开。", true);
-
-    private final IntSetting fireworkHotbarMin = SettingHelper.int_(sgFlight, "快捷栏烟花阈值","快捷栏（9 格）里的烟花少于这个数量就从背包补充。默认 8。", 8, 1, 64);
-
-    private final BoolSetting takeoffFirework = SettingHelper.bool(sgFlight, "起飞后立刻放烟花","起飞成功后立刻补一发烟花给推力。默认开。", true);
-
-    private final BoolSetting chunkWait = SettingHelper.bool(sgFlight, "区块加载等待","未加载区块比例过高时暂停 Baritone 原地盘旋，等区块追上来再继续，避免撞进未加载地形。默认开。", true);
-
-    private final DoubleSetting unloadedRatio = SettingHelper.double_(sgFlight, "未加载比例阈值",
-        "视野范围内未加载区块占比超过该值就进入等待。默认 0.4。", 0.4, 0.05, 1.0);
-
-    private final IntSetting chunkRadius = SettingHelper.int_(sgFlight, "区块检查半径","检查周围多少区块的加载状态（会被客户端视距上限限制）。默认 5。", 5, 1, 12);
-
-    private final IntSetting hoverFirework = SettingHelper.int_(sgFlight, "盘旋补烟花间隔","等待区块 / 拦截火球 / 让行玩家时，每隔多少 tick 补一发烟花避免掉高度。默认 40。", 40, 0, 200);
-
-    private final IntSetting hoverTimeout = SettingHelper.int_(sgFlight, "等待区块超时","「未加载区块太多」而暂停飞行最多持续多少 tick，超时强制恢复飞行（20 tick = 1 秒）。默认 1200。", 1200, 100, 12000);
-
-    private final BoolSetting stuckFix = SettingHelper.bool(sgFlight, "卡住自救","定期检查是否原地绕圈/停滞，必要时重置 Baritone 鞘翅进程。默认开。", true);
-
-    private final BoolSetting stuckEscape = SettingHelper.bool(sgFlight, "卡住检测与脱离","撞墙/卡天花板后水平速度几乎为零、位置不动就算卡住：停烟花 → Baritone 走出去 → 对准开口再飞。默认开。", true);
-
-    private final IntSetting stuckHoldTicks = SettingHelper.int_(sgFlight, "卡住判定 tick","连续这么多 tick 没推进就算卡住。默认 40。", 40, 10, 400);
-
-    private final DoubleSetting stuckSpeedThreshold = SettingHelper.double_(sgFlight, "卡住速度阈值","水平速度低于该值算「没在推进」。默认 0.08。", 0.08, 0.01, 1.0);
-
-    private final DoubleSetting stuckMoveThreshold = SettingHelper.double_(sgFlight, "卡住位移阈值","20 tick 内水平位移小于该值算「没在推进」（格）。默认 1.0。", 1.0, 0.2, 10.0);
-
-    private final DoubleSetting stuckHealthGuard = SettingHelper.double_(sgFlight, "卡住时血量保护","卡住期间血量掉到这个值以下就停止推进并找地方落地。默认 12.0。", 12.0, 1.0, 20.0);
-
-    private final BoolSetting avoidCaves = SettingHelper.bool(sgTerrain, "绕开下方洞穴","前方或下方探到洞穴/峡谷就插临时航点绕开（偏航向或抬高）。默认开。", true);
-
-    private final IntSetting probeDepth = SettingHelper.int_(sgTerrain, "探测深度","往下探多少格判断是不是洞穴。默认 24。", 24, 8, 48);
-
-    private final IntSetting probeInterval = SettingHelper.int_(sgTerrain, "探测间隔 tick","每隔这么多 tick 探一次地形。默认 20。", 20, 5, 200);
-
-    private final IntSetting probeDistance = SettingHelper.int_(sgTerrain, "前方探测距离","沿当前航向往前探多远（按 1/3、2/3、全长取三点）。默认 60。", 60, 20, 200);
-
-    private final IntSetting landSafeRadius = SettingHelper.int_(sgLandSafety, "降落安全半径","降落点这个半径内有敌对生物就不落。默认 8。", 8, 2, 48);
-
-    private final BoolSetting landAvoidMobs = SettingHelper.bool(sgLandSafety, "周围有怪就换降落点","候选降落点按距离排序，跳过半径内有怪的；全都有怪就继续飞。默认开。", true);
-
-    private final BoolSetting landSkipWhenCrowded = SettingHelper.bool(sgLandSafety, "怪物太多就跳过这次补给","24 格内敌对生物 ≥ 5 只就不降落，直接继续飞。默认开。", true);
-
-    private final BoolSetting hurtAbortSupply = SettingHelper.bool(sgLandSafety, "被打就中断补给起飞","补给中受到伤害就中止补给、清现场、立刻起飞，这次补给 30 秒内不再试。默认开。", true);
-
-    private final BoolSetting torchBeforeSupply = SettingHelper.bool(sgLandSafety, "补给前先插火把","降落点脚下放一支火把或灯笼降低刷怪（背包里有时）。默认关。", false);
-
-    private final IntSetting stuckTicks = SettingHelper.int_(sgFlight, "停滞检测间隔","多少 tick 检查一次位移（20 tick = 1 秒）。默认 400。", 400, 100, 2400);
-
-    private final DoubleSetting stuckDistance = SettingHelper.double_(sgFlight, "停滞判定距离","一个检测周期内水平位移小于该值就算停滞（格）。默认 25.0。", 25.0, 3.0, 200.0);
-
-    private final BoolSetting pauseOnPlayers = SettingHelper.bool(sgFlight, "有玩家时让行","附近有别的玩家时暂停飞行原地盘旋，玩家走远后自动继续。默认关。", false);
-
-    private final DoubleSetting playerRange = SettingHelper.double_(sgFlight, "让行距离","触发让行的玩家距离（格）。默认 64.0。", 64.0, 8.0, 256.0);
-
-    private final BoolSetting infinityElytra = SettingHelper.bool(sgFlight, "无尽鞘翅（每 12 tick 重发）","无尽鞘翅模式：每 12 tick 重新展开一次鞘翅。默认关。", false);
-
-    private final BoolSetting btTermsAccepted = btBool("elytraTermsAccepted", "同意鞘翅条款",
-        "Baritone 的 elytraTermsAccepted：不同意时鞘翅进程拒绝工作。");
-
-    private final BoolSetting btAutoJump = btBool("elytraAutoJump", "自动起跳",
-        "交给 Baritone 起跳：它会先找一条「走到某个能往下跳的台阶」的步行路线，平原/室内会直接报 "
-            + "Failed to compute a walking path to a spot to jump off from 并拒绝起飞（日志里那句提示就是它）。"
-            + "这一项默认就是关着的：本插件在跑图时会强制压掉它，起跳由自己完成（原地跳两下 → 头顶挡了就挖开 → "
-            + "512 个方向找开阔航线）；只有「起飞失败交给 Baritone」兜底触发时才临时打开。"
-            + "点「保存并设为默认」会把当前值写进 baritone/settings.txt，建议保持关闭。");
-
-    private final DoubleSetting btFireworkSpeed = btDouble("elytraFireworkSpeed", "烟花速度",
-        "鞘翅烟花的最低速度要求：越小越省烟花、越大越快。Baritone 出厂默认 1.2；这里的默认值 0.5（更省烟花）。",
-        0.05, 2.0);
-
-    private final BoolSetting btConserveFireworks = btBool("elytraConserveFireworks", "节省烟花",
-        "尽量避免用烟花（能滑翔就不放），赶路速度会变慢。");
-
-    private final BoolSetting btAutoSwap = btBool("elytraAutoSwap", "自动换取鞘翅",
-        "鞘翅耐久不够时自动换背包里的备用鞘翅。");
-
-    private final BoolSetting btPredictTerrain = btBool("elytraPredictTerrain", "预测地形",
-        "按地形高度预测路线（下界/峡谷飞行时很有用，关掉更容易撞地形）。");
-
-    private final BoolSetting btFreeLook = btBool("elytraFreeLook", "自由视角",
-        "飞行时允许视角与前进方向分离（开着更像原版鞘翅手感）。");
-
-    private final BoolSetting btSmoothLook = btBool("elytraSmoothLook", "平滑视角",
-        "平滑过渡视角（关掉会让视角更硬更快）。");
-
-    private final IntSetting btPitchRange = btInt("elytraPitchRange", "俯仰范围",
-        "允许的俯仰角变化范围（度）。", 0, 180);
-
-    private final IntSetting btSimulationTicks = btInt("elytraSimulationTicks", "模拟 tick 数",
-        "每次决策向前模拟多少 tick；越大越聪明也越吃 CPU。", 1, 100);
-
-    private final DoubleSetting btMinimumAvoidance = btDouble("elytraMinimumAvoidance", "最小规避强度",
-        "遇到障碍时至少偏移多少，越大越保守。", 0.0, 10.0);
-
-    private final BoolSetting btAllowEmergencyLand = btBool("elytraAllowEmergencyLand", "允许紧急降落",
-        "没烟花/耐久不够时允许 Baritone 紧急降落；无限鞘翅玩法可以关掉。");
-
-    private final IntSetting btMinFireworksBeforeLanding = btInt("elytraMinFireworksBeforeLanding", "降落前最少烟花",
-        "剩余烟花少于这个数量时不再尝试远距离飞行。", 0, 256);
-
-    private final IntSetting btMinimumDurability = btInt("elytraMinimumDurability", "最低鞘翅耐久",
-        "鞘翅剩余耐久低于这个值就准备降落（配合自动换鞘翅使用）。", 0, 1000);
-
-    private final BoolSetting btAllowLandOnNetherFortress = btBool("elytraAllowLandOnNetherFortress", "允许落在下界要塞",
-        "是否允许把下界要塞当降落点（要塞上有烈焰人，谨慎打开）。");
-
-    private final BoolSetting btChatSpam = btBool("elytraChatSpam", "Baritone 聊天刷屏",
-        "让 Baritone 把飞行决策打印到聊天栏；想要干净聊天栏就关掉。");
-
-    private final BoolSetting btRenderSimulation = btBool("elytraRenderSimulation", "渲染模拟路径",
-        "把 Baritone 的飞行模拟画出来（纯调试用，正式跑图建议关掉）。");
-
-    private final KeybindSetting baritoneSaveKey = SettingHelper.keybind(sgBaritone, "一键保存快捷键",
-        "按下 = 应用面板里的 Baritone 设置并保存为默认（等价于点面板上的「保存并设为默认」）。");
-
+public class AutoElytraFlight
+extends FOElytraModule {
+    private final SettingGroup sgTarget;
+    private final SettingGroup sgFlight;
+    private final SettingGroup sgBaritone;
+    private final SettingGroup sgBtSafety;
+    private final SettingGroup sgFireball;
+    private final SettingGroup sgLava;
+    private final SettingGroup sgLavaPredict;
+    private final SettingGroup sgSupplyTrigger;
+    private final SettingGroup sgSupplyAmount;
+    private final SettingGroup sgSupplyExec;
+    private final SettingGroup sgEat;
+    private final SettingGroup sgMend;
+    private final SettingGroup sgSafety;
+    private final SettingGroup sgNether;
+    private final SettingGroup sgLandSafety;
+    private final SettingGroup sgJunk;
+    private final SettingGroup sgDebug;
+    private final EnumSetting<Mode> mode;
+    private final StringListSetting waypoints;
+    private final IntSetting targetX;
+    private final IntSetting targetZ;
+    private final IntSetting segmentDistance;
+    private final IntSetting arriveRadius;
+    private final BoolSetting loop;
+    private final BoolSetting autoTakeoff;
+    private final IntSetting takeoffTimeout;
+    private final BoolSetting takeoffAutoJumpFallback;
+    private final BoolSetting openAreaSearch;
+    private final DoubleSetting openSearchDist;
+    private final DoubleSetting openSafeDist;
+    private final IntSetting openTries;
+    private final BoolSetting allowAscend;
+    private final IntSetting jumpBeforeOpen;
+    private final BoolSetting clearHeadBlock;
+    private final BoolSetting fireworkRefill;
+    private final IntSetting fireworkHotbarMin;
+    private final BoolSetting takeoffFirework;
+    private final BoolSetting takeoffByBaritone;
+    private final BoolSetting chunkWait;
+    private final DoubleSetting unloadedRatio;
+    private final IntSetting chunkRadius;
+    private final IntSetting hoverTimeout;
+    private final BoolSetting btSafetyTakeover;
+    private final DoubleSetting btAvoidMargin;
+    private final IntSetting btLookahead;
+    private final IntSetting netherReplanSeconds;
+    private final BoolSetting netherPredictOff;
+    private final BoolSetting noSupplyInBasaltDeltas;
+    private final IntSetting landSafeRadius;
+    private final BoolSetting landAvoidMobs;
+    private final BoolSetting landSkipWhenCrowded;
+    private final BoolSetting hurtAbortSupply;
+    private final BoolSetting torchBeforeSupply;
+    private final BoolSetting pauseOnPlayers;
+    private final DoubleSetting playerRange;
+    private final BoolSetting infinityElytra;
+    private final BoolSetting btTermsAccepted;
+    private final BoolSetting btAutoJump;
+    private final DoubleSetting btFireworkSpeed;
+    private final BoolSetting btConserveFireworks;
+    private final BoolSetting btAutoSwap;
+    private final BoolSetting btPredictTerrain;
+    private final BoolSetting btFreeLook;
+    private final BoolSetting btSmoothLook;
+    private final IntSetting btPitchRange;
+    private final BoolSetting btAllowEmergencyLand;
+    private final IntSetting btMinFireworksBeforeLanding;
+    private final IntSetting btMinimumDurability;
+    private final BoolSetting btAllowLandOnNetherFortress;
+    private final BoolSetting btChatSpam;
+    private final BoolSetting btRenderSimulation;
+    private final KeybindSetting baritoneSaveKey;
     private WLabel baritoneStatusLabel;
-
     private WLabel logPathLabel;
     private boolean baritoneKeyWasPressed;
+    private final BoolSetting deflectFireballs;
+    private final DoubleSetting fireballRange;
+    private final IntSetting fireballMax;
+    private final BoolSetting fireballPauseBaritone;
+    private final BoolSetting fireballFailOnMultiple;
+    private final BoolSetting lavaEscape;
+    private final BoolSetting lavaIgnoreGlidingFire;
+    private final BoolSetting lavaSwimToSafety;
+    private final IntSetting lavaSearchRadius;
+    private final BoolSetting lavaDrinkFireRes;
+    private final DoubleSetting lavaLookPitch;
+    private final BoolSetting lavaUseFirework;
+    private final BoolSetting lavaFailAbort;
+    private final BoolSetting lavaPredictEnabled;
+    private final DoubleSetting lavaPredictHorizon;
+    private final DoubleSetting lavaPredictUrgent;
+    private final IntSetting lavaPredictLateral;
+    private final IntSetting lavaPredictReturn;
+    private final IntSetting lavaPredictCooldown;
+    private final BoolSetting lavaPredictWarnOnly;
+    private final BoolSetting lavaPredictPauseBaritone;
+    private final DoubleSetting lavaPredictDeflect;
+    private final BoolSetting autoSupply;
+    private final BoolSetting supplyBeforeSegment;
+    private final IntSetting minFireworkStacks;
+    private final IntSetting minFoodCount;
+    private final IntSetting minXpBottles;
+    private final IntSetting minTotems;
+    private final IntSetting minElytraDurability;
+    private final BoolSetting landForSupply;
+    private final IntSetting maxSupplyRetries;
+    private final IntSetting supplyErrorRetries;
+    private final IntSetting supplyRetryDelay;
+    private final BoolSetting autoRestock;
+    private final ItemListSetting restockItems;
+    private final IntSetting restockStacks;
+    private final IntSetting restockInterval;
+    private final BoolSetting restockKeepHeld;
+    private final BoolSetting restockTriggerSupply;
+    private final BoolSetting fullSupplyOnStart;
+    private final KeybindSetting supplyKey;
+    private final IntSetting targetFireworkStacks;
+    private final IntSetting targetXpBottles;
+    private final IntSetting targetFoodCount;
+    private final IntSetting targetTotems;
+    private final IntSetting targetElytraCount;
+    private final IntSetting minEnderChests;
+    private final IntSetting maxShulkers;
+    private final IntSetting actionDelay;
+    private final IntSetting placeRadius;
+    private final BoolSetting autoPlaceEnderChest;
+    private final BoolSetting autoPickupEnderChest;
+    private final BoolSetting useBaritoneMine;
+    private final BoolSetting storeLoot;
+    private final ItemListSetting storeItems;
+    private final ItemListSetting supplyFoodItems;
+    private final BoolSetting autoEat;
+    private final IntSetting hungerThreshold;
+    private final DoubleSetting healthThreshold;
+    private final BoolSetting eatWhileGliding;
+    private final DoubleSetting eatMinRise;
+    private final ItemListSetting foodWhitelist;
+    private final OrderedItemListSetting foodPriorityOrdered;
+    private final StringSetting foodPriority;
+    private final BoolSetting junkDrop;
+    private final BoolSetting junkOnlyLava;
+    private final IntSetting junkRadius;
+    private final ItemListSetting junkItems;
+    private final BoolSetting autoMend;
+    private final IntSetting mendDurability;
+    private final KeybindSetting mendKey;
+    private final IntSetting maxMendRetries;
+    private final IntSetting minBottles;
+    private final IntSetting repairToDamage;
+    private final BoolSetting requireGround;
+    private final IntSetting landingTimeout;
+    private final DoubleSetting mendPitch;
+    private final IntSetting throwDelay;
+    private final IntSetting maxThrows;
+    private final BoolSetting requireMending;
+    private final BoolSetting requireNetherWastes;
+    private final BoolSetting autoLogout;
+    private final DoubleSetting logoutHealth;
+    private final IntSetting logoutTotemMin;
+    private final BoolSetting logoutOnFailure;
+    private final BoolSetting logoutOnSupplyFail;
+    private final BoolSetting logoutOnArrive;
+    private final BoolSetting disableOnFinish;
+    private final IntSetting noElytraWaitSec;
+    private final BoolSetting debugMessages;
+    private final BoolSetting hudInfo;
+    private final BoolSetting statusMonitor;
+    private final BoolSetting detailLog;
+    private final BoolSetting logSteps;
+    private final IntSetting logKeep;
+    private final EatController eat;
+    private final FireballDeflector fireballs;
+    private LavaEscape lava;
+    private boolean lavaWasEscaping;
+    private int lavaCacheRadius;
+    private boolean lavaCacheIgnoreGliding;
+    private boolean lavaCacheSwim;
+    private boolean lavaCachePotion;
+    private boolean lavaCacheFirework;
+    private double lavaCachePitch;
+    private LavaPredictor lavaPredictor;
+    private boolean pdCacheEnabled;
+    private double pdCacheHorizon;
+    private double pdCacheUrgent;
+    private int pdCacheLateral;
+    private int pdCacheReturn;
+    private int pdCacheCooldown;
+    private boolean pdCacheWarnOnly;
+    private boolean pdCachePauseBaritone;
+    private double pdCacheDeflect;
+    private SupplyTask supplyTask;
+    private MendTask mendTask;
+    private boolean manualTask;
+    private final InventoryRestocker restocker;
+    private final JunkDropper junkDropper;
+    private boolean startFullSupplyDone;
+    private boolean startFullSupplyPending;
+    private boolean supplyFailPhase;
+    private final Set<Item> exhaustedItems;
+    private boolean foodExhaustedCache;
+    private int exhaustedCooldown;
+    private static final int SUPPLY_EXHAUSTED_COOLDOWN = 2400;
+    private static final int SUPPLY_NO_PROGRESS_LIMIT = 1;
+    private String lastSupplyStockSignature;
+    private int supplyNoProgressRounds;
+    private boolean logFileOwned;
+    private int noElytraWaitTicks;
+    private boolean suppressLogout;
+    private int supplyTicks;
+    private State state;
+    private String failReason;
+    private final List<BlockPos> route;
+    private int routeIndex;
+    private BlockPos segmentTarget;
+    private boolean directionInitialised;
+    private float directionFrozen;
+    private int tickCounter;
+    private int waitTicks;
+    private int takeoffTicks;
+    private TakeoffPhase takeoffPhase;
+    private int jumpSeq;
+    private int jumpSeqTicks;
+    private int jumpAttempts;
+    private int jumpAttemptTick;
+    private int jumpPhase;
+    private int jumpIteration;
+    private int takeoffDelayTicks;
+    private int takeoffReArmCount;
+    private int takeoffFireworkPending;
+    private int btTakeoffWaitTick;
+    private boolean btTakeoffFallbackLogged;
+    private BlockPos shaftColumn;
+    private int shaftTicks;
+    private int airJumpHold;
+    private final TimelinessCounter fakeGlideWindow;
+    private int fakeGlideRecovers;
+    private int fakeGlidePhase;
+    private int fakeGlidePhaseTicks;
+    private String takeoffFlowOwner;
+    private int takeoffFlowHoldTicks;
+    private int controlTicks;
+    private int lostControlCycles;
+    private int airborneTicks;
+    private int notGlidingAirTicks;
+    private int fireworkSeenTotal;
+    private int mendSkipLogTick;
+    private int usingItemTicks;
+    private int usingItemLogTick;
+    private final TimelinessCounter openLavaWindow;
+    private int lastFireworkConsumeTick;
+    private int fireworkStallLogTick;
+    private int activityTicks;
+    private double lastActivityDistance;
+    private int fallTicks;
+    private int launchWait;
+    private int glidingLostTicks;
+    private int openTriesDone;
+    private int clearWaited;
+    private boolean clearingHead;
+    private double ascendTargetY;
+    private int ascendTicks;
+    private BlockPos openEnd;
+    private double openStartY;
+    private int hopTicks;
+    private int openSearchFails;
+    private boolean ascendingSearch;
+    private double searchYh;
+    private int viewHoldTicks;
+    private boolean hovering;
+    private boolean pausedByPlayer;
+    private int lastCheckX;
+    private int lastCheckZ;
+    private final TimelinessCounter segFailWindow;
+    private final TimelinessCounter spinWindow;
+    private int spinPauseTicks;
+    private BlockPos lastSpinPos;
+    private int lowFireworkWarnTick;
+    private boolean segResetDone;
+    private boolean forceFlyToOpen;
+    private int supplyRetries;
+    private int supplyErrorRetryCount;
+    private int supplyCooldown;
+    private int mendRetries;
+    private int mendCooldown;
+    private int hoverStart;
+    private boolean fireballTooManyWarned;
+    private boolean supplyKeyWasPressed;
+    private boolean mendKeyWasPressed;
+    private boolean flightSettingsApplied;
+    private boolean takeoffAutoJumpUsed;
+    private boolean baritoneAutoJumpForced;
+    private int supplyHurtNoLand;
+    private int eatHoldTicks;
+    private boolean lavaPriorityActive;
+    private double landingY;
+    private double landingAngle;
+    private double landingTargetX;
+    private double landingTargetZ;
+    private int landingTicks;
+    private static final float CHUNK_WAIT_EXIT_RATIO = 0.05f;
+    private static final int FIREWORK_LOW_TOTAL = 128;
+    private static final int FIREWORK_STALL_TICKS = 600;
+    private static final int FIREWORK_STALL_LOG_INTERVAL = 200;
+    private static final double LANDING_SPIRAL_MIN_RADIUS = 4.0;
+    private static final double LANDING_SPIRAL_DIVISOR = 8.0;
+    private static final double LANDING_NO_FIREWORK_ABOVE = 20.0;
+    private static final double LANDING_SPIRAL_STEP = 0.25;
+    private static final int LANDING_UNREACHABLE_COOLDOWN = 600;
+    private static final int BASALT_DELTAS_NO_SUPPLY_COOLDOWN = 600;
+    private static final int RECOVER_WATCHDOG_TICKS = 500;
+    private static final int NETHER_RESET_MIN_TICKS = 200;
+    private static final int FAKE_GLIDE_CONFIRM_TICKS = 20;
+    private static final int FAKE_GLIDE_RECOVER_MAX = 3;
+    private static final int FAKE_GLIDE_RELEASE_TICKS = 5;
+    private static final int FAKE_GLIDE_JUMP_HOLD_TICKS = 2;
+    private static final int FAKE_GLIDE_CHECK_TICKS = 15;
+    private static final int TAKEOFF_FLOW_HOLD_TICKS = 20;
+    private static final int REPLAN_MIN_TICKS = 60;
+    private static final double RUST_FIREWORK_SPEED = 0.5;
+    private static final int BT_TAKEOFF_WAIT_TICKS = 120;
+    private int lastReplanTick;
+    private boolean replanEver;
+    private int lastResetTick;
+    private Object prevNetherSeed;
+    private boolean netherSeedSaved;
+    private boolean btSafetySaved;
+    private Boolean lastForcedAutoJump;
+    private Double prevBtAvoid;
+    private Integer prevBtLookahead;
+    private Double lastAppliedAvoid;
+    private Integer lastAppliedLook;
+    private int mobHitsInSegment;
+    private int landSkippedThreat;
+    private int landSkippedBasalt;
+    private int landSkippedUnsafe;
+    private int landSkippedAbove;
+    private boolean basaltSkipHandled;
+    private boolean basaltBiomeUnknown;
+    private boolean recoverArmed;
+    private int recoverWatchdog;
+    private RecoverAfter recoverAfter;
+    private Object recoverRunner;
+    private String pendingFailReason;
+    private String pendingFinishMessage;
+    private boolean recoveryJustRan;
+    private double lastHurtHealth;
+    private boolean torchPlacedThisLanding;
+    private static final int LAND_THREAT_CROWD_RADIUS = 24;
+    private static final int LAND_THREAT_CROWD_COUNT = 5;
+    private static final int LAND_UNDER_SCAN = 10;
+    private static final int LAND_SAFE_ABOVE = 3;
+    private static final int LAND_NO_SAFE_SPOT_COOLDOWN = 600;
+    private static final int LAND_ABORT_CHECK_TICKS = 10;
+    private static final int EAT_LAVA_HOLD_TICKS = 60;
+    private static final int THREAT_VERTICAL_BAND = 8;
+    private static final int SUPPLY_HURT_COOLDOWN = 600;
+    private static final List<String> CONFLICT_FLIGHT = List.of("ElytraFly", "Flight", "ElytraBoost", "TridentBoost");
+    private static final List<String> CONFLICT_ITEMS = List.of("AutoEat", "AutoMend", "AutoReplenish", "ChestSwap", "InventoryTweaks");
+    private String foodPriorityRaw;
+    private List<Item> foodPriorityParsed;
+
+    private static String headingName(float yaw) {
+        float y = (yaw % 360.0f + 360.0f) % 360.0f;
+        if (y < 45.0f || y >= 315.0f) {
+            return "\u6b63\u5357 +Z";
+        }
+        if (y < 135.0f) {
+            return "\u6b63\u897f -X";
+        }
+        if (y < 225.0f) {
+            return "\u6b63\u5317 -Z";
+        }
+        return "\u6b63\u4e1c +X";
+    }
 
     private BoolSetting btBool(String btName, String label, String desc) {
         boolean def = BaritoneHook.btDefaultBool(btName, false);
-        return sgBaritone.add(new BoolSetting.Builder()
-            .name(label)
-            .description(desc + "  [Baritone: " + btName + "]")
-            .defaultValue(def)
-            .onChanged(v -> BaritoneHook.btSet(btName, v))
-            .onModuleActivated(s -> s.set(BaritoneHook.btBool(btName, def)))
-            .build());
+        return (BoolSetting)this.sgBaritone.add((Setting)((BoolSetting.Builder)((BoolSetting.Builder)((BoolSetting.Builder)((BoolSetting.Builder)((BoolSetting.Builder)new BoolSetting.Builder().name(label)).description(desc + "  [Baritone: " + btName + "]")).defaultValue(def)).onChanged(v -> BaritoneHook.btSet(btName, v))).onModuleActivated(s -> s.set(BaritoneHook.btBool(btName, def)))).build());
     }
 
     private IntSetting btInt(String btName, String label, String desc, int min, int max) {
-        int def = clamp(BaritoneHook.btDefaultInt(btName, min), min, max);
-        return sgBaritone.add(new IntSetting.Builder()
-            .name(label)
-            .description(desc + "  [Baritone: " + btName + "]")
-            .defaultValue(def)
-            .min(min).max(max).sliderRange(min, max)
-            .onChanged(v -> BaritoneHook.btSet(btName, v))
-            .onModuleActivated(s -> s.set(clamp(BaritoneHook.btInt(btName, def), min, max)))
-            .build());
+        int def = AutoElytraFlight.clamp(BaritoneHook.btDefaultInt(btName, min), min, max);
+        return (IntSetting)this.sgBaritone.add((Setting)((IntSetting.Builder)((IntSetting.Builder)((IntSetting.Builder)((IntSetting.Builder)((IntSetting.Builder)new IntSetting.Builder().name(label)).description(desc + "  [Baritone: " + btName + "]")).defaultValue(def)).min(min).max(max).sliderRange(min, max).onChanged(v -> BaritoneHook.btSet(btName, v))).onModuleActivated(s -> s.set(AutoElytraFlight.clamp(BaritoneHook.btInt(btName, def), min, max)))).build());
     }
 
     private DoubleSetting btDouble(String btName, String label, String desc, double min, double max) {
-        double def = clamp(BaritoneHook.btDefaultDouble(btName, min), min, max);
-        return sgBaritone.add(new DoubleSetting.Builder()
-            .name(label)
-            .description(desc + "  [Baritone: " + btName + "]")
-            .defaultValue(def)
-            .min(min).max(max).sliderRange(min, max).decimalPlaces(2)
-            .onChanged(v -> BaritoneHook.btSet(btName, v))
-            .onModuleActivated(s -> s.set(clamp(BaritoneHook.btDouble(btName, def), min, max)))
-            .build());
+        double def = AutoElytraFlight.clamp(BaritoneHook.btDefaultDouble(btName, min), min, max);
+        return (DoubleSetting)this.sgBaritone.add((Setting)((DoubleSetting.Builder)((DoubleSetting.Builder)((DoubleSetting.Builder)((DoubleSetting.Builder)new DoubleSetting.Builder().name(label)).description(desc + "  [Baritone: " + btName + "]")).defaultValue(def).min(min).max(max).sliderRange(min, max).decimalPlaces(2).onChanged(v -> BaritoneHook.btSet(btName, v))).onModuleActivated(s -> s.set(AutoElytraFlight.clamp(BaritoneHook.btDouble(btName, def), min, max)))).build());
     }
 
     private static int clamp(int v, int min, int max) {
@@ -373,47 +488,39 @@ public class AutoElytraFlight extends FOElytraModule {
     }
 
     private List<Map.Entry<String, Setting<?>>> baritoneBindings() {
-        List<Map.Entry<String, Setting<?>>> list = new ArrayList<>();
-        list.add(Map.entry("elytraTermsAccepted", btTermsAccepted));
-        list.add(Map.entry("elytraAutoJump", btAutoJump));
-        list.add(Map.entry("elytraFireworkSpeed", btFireworkSpeed));
-        list.add(Map.entry("elytraConserveFireworks", btConserveFireworks));
-        list.add(Map.entry("elytraAutoSwap", btAutoSwap));
-        list.add(Map.entry("elytraPredictTerrain", btPredictTerrain));
-        list.add(Map.entry("elytraFreeLook", btFreeLook));
-        list.add(Map.entry("elytraSmoothLook", btSmoothLook));
-        list.add(Map.entry("elytraPitchRange", btPitchRange));
-        list.add(Map.entry("elytraSimulationTicks", btSimulationTicks));
-        list.add(Map.entry("elytraMinimumAvoidance", btMinimumAvoidance));
-        list.add(Map.entry("elytraAllowEmergencyLand", btAllowEmergencyLand));
-        list.add(Map.entry("elytraMinFireworksBeforeLanding", btMinFireworksBeforeLanding));
-        list.add(Map.entry("elytraMinimumDurability", btMinimumDurability));
-        list.add(Map.entry("elytraAllowLandOnNetherFortress", btAllowLandOnNetherFortress));
-        list.add(Map.entry("elytraChatSpam", btChatSpam));
-        list.add(Map.entry("elytraRenderSimulation", btRenderSimulation));
+        ArrayList list = new ArrayList();
+        list.add(Map.entry("elytraTermsAccepted", this.btTermsAccepted));
+        list.add(Map.entry("elytraAutoJump", this.btAutoJump));
+        list.add(Map.entry("elytraFireworkSpeed", this.btFireworkSpeed));
+        list.add(Map.entry("elytraConserveFireworks", this.btConserveFireworks));
+        list.add(Map.entry("elytraAutoSwap", this.btAutoSwap));
+        list.add(Map.entry("elytraPredictTerrain", this.btPredictTerrain));
+        list.add(Map.entry("elytraFreeLook", this.btFreeLook));
+        list.add(Map.entry("elytraSmoothLook", this.btSmoothLook));
+        list.add(Map.entry("elytraPitchRange", this.btPitchRange));
+        list.add(Map.entry("elytraAllowEmergencyLand", this.btAllowEmergencyLand));
+        list.add(Map.entry("elytraMinFireworksBeforeLanding", this.btMinFireworksBeforeLanding));
+        list.add(Map.entry("elytraMinimumDurability", this.btMinimumDurability));
+        list.add(Map.entry("elytraAllowLandOnNetherFortress", this.btAllowLandOnNetherFortress));
+        list.add(Map.entry("elytraChatSpam", this.btChatSpam));
+        list.add(Map.entry("elytraRenderSimulation", this.btRenderSimulation));
         return list;
     }
 
-    @Override
     public WWidget getWidget(GuiTheme theme) {
         WTable table = theme.table();
-
-        WButton apply = table.add(theme.button("应用 Baritone 设置")).expandX().minWidth(120).widget();
-        apply.action = () -> applyBaritoneFromPanel(false);
+        WButton apply = (WButton)table.add((WWidget)theme.button("\u5e94\u7528 Baritone \u8bbe\u7f6e")).expandX().minWidth(120.0).widget();
+        apply.action = () -> this.applyBaritoneFromPanel(false);
         table.row();
-
-        WButton save = table.add(theme.button("保存并设为默认")).expandX().minWidth(120).widget();
-        save.action = () -> applyBaritoneFromPanel(true);
+        WButton save = (WButton)table.add((WWidget)theme.button("\u4fdd\u5b58\u5e76\u8bbe\u4e3a\u9ed8\u8ba4")).expandX().minWidth(120.0).widget();
+        save.action = () -> this.applyBaritoneFromPanel(true);
         table.row();
-
-        WButton openLog = table.add(theme.button("打开日志文件夹")).expandX().minWidth(120).widget();
+        WButton openLog = (WButton)table.add((WWidget)theme.button("\u6253\u5f00\u65e5\u5fd7\u6587\u4ef6\u5939")).expandX().minWidth(120.0).widget();
         openLog.action = this::openLogFolder;
         table.row();
-
-        logPathLabel = table.add(theme.label(logPathText())).expandCellX().widget();
+        this.logPathLabel = (WLabel)table.add((WWidget)theme.label(this.logPathText())).expandCellX().widget();
         table.row();
-
-        baritoneStatusLabel = table.add(theme.label(baritoneStatus())).expandCellX().widget();
+        this.baritoneStatusLabel = (WLabel)table.add((WWidget)theme.label(this.baritoneStatus())).expandCellX().widget();
         return table;
     }
 
@@ -422,1062 +529,905 @@ public class AutoElytraFlight extends FOElytraModule {
     }
 
     private String logPathText() {
-        if (!detailLog.get()) return "详细日志：已关闭（打开上面的开关就会开始写文件）";
+        if (!((Boolean)this.detailLog.get()).booleanValue()) {
+            return "\u8be6\u7ec6\u65e5\u5fd7\uff1a\u5df2\u5173\u95ed\uff08\u6253\u5f00\u4e0a\u9762\u7684\u5f00\u5173\u5c31\u4f1a\u5f00\u59cb\u5199\u6587\u4ef6\uff09";
+        }
         Path cur = FOElytraLog.currentFile();
-        return cur == null
-            ? "详细日志：目录 " + logDirectory()
-            : "详细日志：" + logDirectory().getFileName() + "/" + cur.getFileName();
+        return cur == null ? "\u8be6\u7ec6\u65e5\u5fd7\uff1a\u76ee\u5f55 " + String.valueOf(this.logDirectory()) : "\u8be6\u7ec6\u65e5\u5fd7\uff1a" + String.valueOf(this.logDirectory().getFileName()) + "/" + String.valueOf(cur.getFileName());
     }
 
     private void openLogFolder() {
         try {
-            Path dir = logDirectory();
-            Files.createDirectories(dir);
-
-            net.minecraft.util.Util.getOperatingSystem().open(dir.toFile());
-            FOElytraLog.info("已打开日志目录：%s", dir);
-        } catch (Throwable t) {
-            FOElytraLog.warn("打不开日志目录（%s）—— 手动去这里看：%s", t, logDirectory());
+            Path dir = this.logDirectory();
+            Files.createDirectories(dir, new FileAttribute[0]);
+            Util.getOperatingSystem().open(dir.toFile());
+            FOElytraLog.info("\u5df2\u6253\u5f00\u65e5\u5fd7\u76ee\u5f55\uff1a%s", dir);
         }
-        if (logPathLabel != null) logPathLabel.set(logPathText());
+        catch (Throwable t) {
+            FOElytraLog.warn("\u6253\u4e0d\u5f00\u65e5\u5fd7\u76ee\u5f55\uff08%s\uff09\u2014\u2014 \u624b\u52a8\u53bb\u8fd9\u91cc\u770b\uff1a%s", t, this.logDirectory());
+        }
+        if (this.logPathLabel != null) {
+            this.logPathLabel.set(this.logPathText());
+        }
     }
 
     private void applyBaritoneFromPanel(boolean saveAsDefault) {
         if (!BaritoneHook.available()) {
-            error("没有检测到 Baritone：这些设置无法写入。");
-            refreshBaritoneStatus();
+            this.error("\u6ca1\u6709\u68c0\u6d4b\u5230 Baritone\uff1a\u8fd9\u4e9b\u8bbe\u7f6e\u65e0\u6cd5\u5199\u5165\u3002", new Object[0]);
+            this.refreshBaritoneStatus();
             return;
         }
-
         int applied = 0;
-        for (Map.Entry<String, Setting<?>> binding : baritoneBindings()) {
-            if (BaritoneHook.btSet(binding.getKey(), binding.getValue().get())) applied++;
+        for (Map.Entry<String, Setting<?>> binding : this.baritoneBindings()) {
+            if (!BaritoneHook.btSet(binding.getKey(), binding.getValue().get())) continue;
+            ++applied;
         }
-
         if (saveAsDefault) {
             boolean saved = BaritoneHook.saveBaritone();
             try {
                 Modules.get().save();
-            } catch (Throwable t) {
-                LOG.warn("保存 Meteor 配置失败", t);
+            }
+            catch (Throwable t) {
+                LOG.warn("\u4fdd\u5b58 Meteor \u914d\u7f6e\u5931\u8d25", t);
             }
             if (saved) {
-                info("已应用 %d 项并保存为默认（baritone/settings.txt + Meteor 配置）", applied);
+                this.info("\u5df2\u5e94\u7528 %d \u9879\u5e76\u4fdd\u5b58\u4e3a\u9ed8\u8ba4\uff08baritone/settings.txt + Meteor \u914d\u7f6e\uff09", new Object[]{applied});
             } else {
-                warning("已应用 %d 项，但写入 baritone/settings.txt 失败（看日志）", applied);
+                this.warning("\u5df2\u5e94\u7528 %d \u9879\uff0c\u4f46\u5199\u5165 baritone/settings.txt \u5931\u8d25\uff08\u770b\u65e5\u5fd7\uff09", new Object[]{applied});
             }
         } else {
-            info("已应用 %d 项 Baritone 设置（仅本次运行，重启后恢复）", applied);
+            this.info("\u5df2\u5e94\u7528 %d \u9879 Baritone \u8bbe\u7f6e\uff08\u4ec5\u672c\u6b21\u8fd0\u884c\uff0c\u91cd\u542f\u540e\u6062\u590d\uff09", new Object[]{applied});
         }
-        refreshBaritoneStatus();
+        this.refreshBaritoneStatus();
     }
 
     private String baritoneStatus() {
-        if (!BaritoneHook.available()) return "Baritone: 未检测到 —— 这些设置不会生效";
+        if (!BaritoneHook.available()) {
+            return "Baritone: \u672a\u68c0\u6d4b\u5230 \u2014\u2014 \u8fd9\u4e9b\u8bbe\u7f6e\u4e0d\u4f1a\u751f\u6548";
+        }
         int modified = BaritoneHook.modifiedCount();
-        return modified >= 0
-            ? "Baritone: 已加载，当前有 " + modified + " 项与出厂默认值不同"
-            : "Baritone: 已加载";
+        return modified >= 0 ? "Baritone: \u5df2\u52a0\u8f7d\uff0c\u5f53\u524d\u6709 " + modified + " \u9879\u4e0e\u51fa\u5382\u9ed8\u8ba4\u503c\u4e0d\u540c" : "Baritone: \u5df2\u52a0\u8f7d";
     }
 
     private void refreshBaritoneStatus() {
-        if (baritoneStatusLabel != null) baritoneStatusLabel.set(baritoneStatus());
+        if (this.baritoneStatusLabel != null) {
+            this.baritoneStatusLabel.set(this.baritoneStatus());
+        }
     }
 
     private void baritoneKeyTick() {
-        boolean pressed = baritoneSaveKey.get() != null && baritoneSaveKey.get().isPressed();
-        if (pressed && !baritoneKeyWasPressed) {
-            applyBaritoneFromPanel(true);
+        boolean pressed;
+        boolean bl = pressed = this.baritoneSaveKey.get() != null && ((Keybind)this.baritoneSaveKey.get()).isPressed();
+        if (pressed && !this.baritoneKeyWasPressed) {
+            this.applyBaritoneFromPanel(true);
         }
-        baritoneKeyWasPressed = pressed;
+        this.baritoneKeyWasPressed = pressed;
     }
-
-    private final BoolSetting deflectFireballs = SettingHelper.bool(sgFireball, "反击火球","把飞向自己的火球打回去：暂停飞行 → 看向火球 → 打一拳 → 火球消失后恢复飞行。默认开。", true);
-
-    private final DoubleSetting fireballRange = SettingHelper.double_(sgFireball, "拦截距离","火球探测半径（格）；0 = 按实体交互距离自动算。默认 0。", 0.0, 0.0, 16.0);
-
-    private final IntSetting fireballMax = SettingHelper.int_(sgFireball, "最多同时拦几个",
-        "同时存在的火球超过这个数量就放弃拦截（默认 1，即 2 个就放弃）。", 1, 1, 8);
-
-    private final BoolSetting fireballPauseBaritone = SettingHelper.bool(sgFireball, "拦截时暂停飞行","拦截期间暂停 Baritone，打回火球后恢复飞行。默认开。", true);
-
-    private final BoolSetting fireballFailOnMultiple = SettingHelper.bool(sgFireball, "拦不过来就判失败","火球数量超过上限时直接判任务失败（设计行为）。默认关。", false);
-
-    private final BoolSetting lavaEscape = SettingHelper.bool(sgLava, "逃离岩浆","真的泡在岩浆里时自动抬头、开鞘翅、放烟花脱离。默认开。", true);
-
-    private final IntSetting lavaTriggerTicks = SettingHelper.int_(sgLava, "着火触发 tick",
-        "连续待在岩浆里超过这么多 tick（滑翔中）就触发自救。默认 20。", 20, 1, 200);
-
-    private final IntSetting lavaFastTriggerTicks = SettingHelper.int_(sgLava, "非滑翔急触发 tick","不在滑翔时更急：连续待在岩浆里超过这么多 tick 就立刻自救（没有鞘翅撑不住）。默认 5。", 5, 1, 60);
-
-    private final BoolSetting lavaIgnoreGlidingFire = SettingHelper.bool(sgLava, "滑翔时忽略岩浆","滑翔中泡在岩浆里也不自救（危险，别开）。默认关。", false);
-
-    private final IntSetting lavaCooldownTicks = SettingHelper.int_(sgLava, "自救冷却 tick",
-        "自救后进入冷却，冷却走完仍在岩浆里就判一次失败。默认 45。", 45, 5, 400);
-
-    private final BoolSetting lavaSwimToSafety = SettingHelper.bool(sgLava, "兜底：游向安全点","自救冷却期间朝最近的落脚点游过去（水里按住跳会往上浮）。默认开。", true);
-
-    private final IntSetting lavaSearchRadius = SettingHelper.int_(sgLava, "兜底：安全点搜索半径","上面那一项的搜索半径（格）。默认 12。", 12, 3, 24);
-
-    private final BoolSetting lavaDrinkFireRes = SettingHelper.bool(sgLava, "兜底：喝抗火药水","自救冷却期间如果快捷栏里有抗火药水就先喝掉。默认关。", false);
-
-    private final IntSetting lavaMaxRetries = SettingHelper.int_(sgLava, "自救最大重试","冷却走完仍在岩浆里算一次失败，连续失败这么多次才判任务失败。默认 5。", 5, 1, 20);
-
-    private final DoubleSetting lavaPitch = SettingHelper.double_(sgLava, "自救抬头角度","自救时把视角抬到垂直朝上（`setPitch(-90)`）。默认 -90.0。", -90.0, -90.0, -20.0);
-
-    private final BoolSetting lavaUseFirework = SettingHelper.bool(sgLava, "自救时放烟花","自救时从快捷栏放一发烟花把自己推起来。默认开。", true);
-
-    private final BoolSetting lavaFailAbort = SettingHelper.bool(sgLava, "重试耗尽才判失败","自救连续失败「自救最大重试」次后是否判任务失败。默认开。", true);
-
-    private final BoolSetting lavaRestoreView = SettingHelper.bool(sgLava, "脱险后回调视角","自救结束后把视角从「垂直朝上 -90°」转回目标方向。默认开。", true);
-
-    private final DoubleSetting lavaRestorePitch = SettingHelper.double_(sgLava, "脱险后俯仰角","脱险回调视角时的俯仰角，0 = 平视。默认 0。",
-        0.0, -60.0, 60.0);
-
-    private final IntSetting lavaRestoreHold = SettingHelper.int_(sgLava, "回调保持 tick","Baritone 一旦接管就立刻不再插手，避免和它的转向打架。默认 40。", 40, 0, 400);
-
-    private final BoolSetting lavaReplan = SettingHelper.bool(sgLava, "脱险后重新规划路线","脱险后重新下发一次目标路线，必要时重新起飞。默认开。", true);
-
-    private final BoolSetting lavaPredictEnabled = SettingHelper.bool(sgLavaPredict, "岩浆预测：启用预测规避","实验性，默认关：沿当前飞行方向预测 1.5~4 秒，提前绕开岩浆柱/岩浆湖。", false);
-
-    private final DoubleSetting lavaPredictHorizon = SettingHelper.double_(sgLavaPredict, "岩浆预测：预测时长（秒）","往前预测多少秒的飞行轨迹。默认 3.0。", 3.0, 1.5, 4.0);
-
-    private final DoubleSetting lavaPredictUrgent = SettingHelper.double_(sgLavaPredict, "岩浆预测：紧急阈值（秒）","预计在这个时间内撞上岩浆就改用「紧急规避」（暂停 Baritone + 偏转视角 + 放烟花）。默认 1.2。", 1.2, 0.4, 2.0);
-
-    private final IntSetting lavaPredictLateral = SettingHelper.int_(sgLavaPredict, "岩浆预测：侧向绕行距离","绕行航点离危险点往侧面偏多少格。默认 30。",
-        30, 16, 96);
-
-    private final IntSetting lavaPredictReturn = SettingHelper.int_(sgLavaPredict, "岩浆预测：绕行结束距离","离绕行航点多近就算绕过这一段（也可以靠「前方预测变干净」提前结束）。默认 25。", 25, 8, 64);
-
-    private final IntSetting lavaPredictCooldown = SettingHelper.int_(sgLavaPredict, "岩浆预测：规避防抖 tick","两次规避动作之间至少间隔多少 tick，防止在岩浆边缘反复触发。默认 40。", 40, 10, 200);
-
-    private final BoolSetting lavaPredictWarnOnly = SettingHelper.bool(sgLavaPredict, "岩浆预测：只预警不接管","只把预测结果写进日志，不改航点、不碰按键。默认关。", false);
-
-    private final BoolSetting lavaPredictPauseBaritone = SettingHelper.bool(sgLavaPredict, "岩浆预测：紧急时暂停 Baritone","紧急规避期间暂停 Baritone（p），脱离后恢复（r）——不暂停的话它会和我们抢视角。默认开。", true);
-
-    private final DoubleSetting lavaPredictDeflect = SettingHelper.double_(sgLavaPredict, "岩浆预测：紧急偏转角（度）","紧急规避时相对「岩浆反方向」再左右偏多少度，用来在两侧里挑一条更干净的出路。默认 75.0。", 75.0, 30.0, 90.0);
-
-    private final BoolSetting autoSupply = SettingHelper.bool(sgSupplyTrigger, "启用自动补给","缺物资时自动降落，放末影箱、取潜影盒补给。默认开。", true);
-
-    private final BoolSetting supplyBeforeSegment = SettingHelper.bool(sgSupplyTrigger, "每段先做补给检查","每段开始前先跑一次补给判定，什么都不缺就直接起飞。默认开。", true);
-
-    private final IntSetting minFireworkStacks = SettingHelper.int_(sgSupplyTrigger, "烟花最低组数","背包里烟花少于这个组数就触发补给。默认 3。", 3, 0, 27);
-
-    private final IntSetting minFoodCount = SettingHelper.int_(sgSupplyTrigger, "食物最低数量","食物少于这个数量就触发补给。默认 8。", 8, 0, 64);
-
-    private final IntSetting minXpBottles = SettingHelper.int_(sgSupplyTrigger, "经验瓶最低数量","附魔之瓶少于这个数量就触发补给（修鞘翅的前提）。默认 8。", 8, 0, 640);
-
-    private final IntSetting minTotems = SettingHelper.int_(sgSupplyTrigger, "图腾最低数量","不死图腾少于这个数量就触发补给。默认 1。", 1, 0, 8);
-
-    private final IntSetting minElytraDurability = SettingHelper.int_(sgSupplyTrigger, "鞘翅耐久警戒线","所有鞘翅的剩余耐久总和低于该值就触发补给（顺路换新鞘翅）。默认 60。", 60, 0, 400);
-
-    private final BoolSetting landForSupply = SettingHelper.bool(sgSupplyTrigger, "补给前自动降落","让 Baritone 降落到地面后再开始放箱子。默认开。", true);
-
-    private final IntSetting maxSupplyRetries = SettingHelper.int_(sgSupplyTrigger, "最大补给重试次数","补给后物资仍然不达标就退避重试。默认 2。", 2, 1, 10);
-
-    private final IntSetting supplyErrorRetries = SettingHelper.int_(sgSupplyTrigger, "补给出错重试次数","补给过程出错时不判失败，退避重试这么多次。默认 3。", 3, 1, 10);
-
-    private final IntSetting supplyRetryDelay = SettingHelper.int_(sgSupplyTrigger, "补给重试等待","两次补给之间的最小间隔 tick（20 tick = 1 秒）。默认 200。", 200, 20, 2400);
-
-    private final BoolSetting autoRestock = SettingHelper.bool(sgSupplyTrigger, "自动补充物资至物品栏","快捷栏里清单物品不够就从背包换过来（不打开界面）。默认开。", true);
-
-    private final ItemListSetting restockItems = SettingHelper.items(sgSupplyTrigger, "物品栏补充清单","要维持的物品清单。",
-        List.of(Items.FIREWORK_ROCKET), false);
-
-    private final IntSetting restockStacks = SettingHelper.int_(sgSupplyTrigger, "每个物品补到几组","清单里每样物品在快捷栏里保持几组（一组 = 该物品的最大堆叠数：烟花 64、经验瓶 64、图腾 1）。",
-        1, 1, 8);
-
-    private final IntSetting restockInterval = SettingHelper.int_(sgSupplyTrigger, "补充间隔 tick","两次搬运之间的最小间隔（20 tick = 1 秒）。默认 10。", 10, 1, 100);
-
-    private final BoolSetting restockKeepHeld = SettingHelper.bool(sgSupplyTrigger, "补充时不占手持格","换位时跳过你当前拿着的那一格，免得把你正用的东西换走。默认开。", true);
-
-    private final BoolSetting restockTriggerSupply = SettingHelper.bool(sgSupplyTrigger, "背包不足时触发补给","清单里的东西连整个背包都不够时，触发末影箱补给（降落 → 放末影箱 → 开潜影盒取物）。默认开。", true);
-
-    private final BoolSetting fullSupplyOnStart = SettingHelper.bool(sgSupplyTrigger, "任务开始时先补满","任务开始时先做一次完整补给，补满再起飞。默认关。", false);
-
-    private final KeybindSetting supplyKey = SettingHelper.keybind(sgSupplyTrigger, "手动补给键",
-        "按一下立刻做一次补给（不需要打开任何界面）。");
-
-    private final IntSetting targetFireworkStacks = SettingHelper.int_(sgSupplyAmount, "目标烟花组数","补到多少组烟花（1 组 = 64 个）。默认 21。", 21, 0, 36);
-
-    private final IntSetting targetXpBottles = SettingHelper.int_(sgSupplyAmount, "目标经验瓶数量",
-        "补到多少个附魔之瓶（修鞘翅用）。默认 192。", 192, 0, 2560);
-
-    private final IntSetting targetFoodCount = SettingHelper.int_(sgSupplyAmount, "目标食物数量","补到多少个食物。默认 32。", 32, 0, 512);
-
-    private final IntSetting targetTotems = SettingHelper.int_(sgSupplyAmount, "目标图腾数量","补到多少个不死图腾。默认 2。", 2, 0, 16);
-
-    private final IntSetting targetElytraCount = SettingHelper.int_(sgSupplyAmount, "目标备用鞘翅","补到多少条「耐久 3、损伤 < 15」的备用鞘翅。默认 2。", 2, 0, 8);
-
-    private final IntSetting minEnderChests = SettingHelper.int_(sgSupplyAmount, "最少末影箱数量","背包里末影箱少于这个数量时给警告（按设计直接判定失败）。默认 3。", 3, 1, 9);
-
-    private final IntSetting maxShulkers = SettingHelper.int_(sgSupplyAmount, "单次最多取盒数","一次补给最多从末影箱里取几个潜影盒（防止物品太分散）。默认 4。", 4, 1, 27);
-
-    private final IntSetting actionDelay = SettingHelper.int_(sgSupplyExec, "动作间隔 tick","每个点击/放置动作之间的间隔。默认 3。", 3, 1, 20);
-
-    private final IntSetting placeRadius = SettingHelper.int_(sgSupplyExec, "放置搜索半径","在玩家周围多少格内寻找可以放末影箱/潜影盒的位置。默认 2。", 2, 1, 4);
-
-    private final BoolSetting autoPlaceEnderChest = SettingHelper.bool(sgSupplyExec, "自动放置末影箱","从快捷栏拿出末影箱放在脚边。默认开。", true);
-
-    private final BoolSetting autoPickupEnderChest = SettingHelper.bool(sgSupplyExec, "用后回收末影箱","补给完成后把末影箱挖回来（否则会消耗末影箱）。默认开。", true);
-
-    private final BoolSetting useBaritoneMine = SettingHelper.bool(sgSupplyExec, "用 Baritone 挖方块","挖潜影盒/末影箱交给 Baritone 的挖掘进程（它会自己走过去按住挖、并捡回掉落物）。\n"
-        + "默认关：盒子是 FO 自己放在身边 2 格内的，用 FO 自己的挖掘（瞄准 + 逐 tick 破坏 + 200 tick 超时）更可控，\n"
-        + "也不会出现「Baritone 为了凑数量跑去挖别的同类方块」「进程一直 active 被误判成超时」这类问题。\n"
-        + "只有在盒子被放在够不到的地方时才建议打开。", false);
-
-    private final BoolSetting storeLoot = SettingHelper.bool(sgSupplyExec, "顺路存战利品","取物资时，把背包里的杂物（或下面的白名单物品）shift 进当前打开的潜影盒，腾出空间。默认关。", false);
-
-    private final BoolSetting freeSlotWhenFull = SettingHelper.bool(sgSupplyExec, "背包满时丢垃圾腾位","挖回潜影盒/末影箱时如果背包满、盒子捡不起来，就丢掉一个杂物腾出格子。默认开。\n"
-        + "受保护的物品永远不会被丢：镐、剑、食物、不死图腾、烟花、鞘翅、末影箱、潜影盒、满摞的经验瓶，\n"
-        + "以及你当前手上拿着的那一格。丢弃会先在背包(9-35)里找，尽量不动快捷栏。\n"
-        + "每挖回一个盒子最多丢 9 件；开着容器界面时绝不丢（避免点错格子）。", true);
-
-    private final ItemListSetting storeItems = SettingHelper.items(sgSupplyExec, "要存放的物品","只有这些物品会被存进潜影盒。", List.of(), false);
-
-    private final ItemListSetting supplyFoodItems = SettingHelper.items(sgSupplyExec, "补给的食物白名单","补给时补哪些食物。",
-        List.of(Items.GOLDEN_CARROT, Items.COOKED_BEEF, Items.BREAD), true);
-
-    private final BoolSetting autoEat = SettingHelper.bool(sgEat, "启用自动进食","饥饿或血量偏低时自动吃东西。默认开。", true);
-
-    private final IntSetting hungerThreshold = SettingHelper.int_(sgEat, "饥饿阈值","饥饿值低于该值时吃饭（0-20）。默认 16。", 16, 0, 20);
-
-    private final DoubleSetting healthThreshold = SettingHelper.double_(sgEat, "血量阈值","血量低于该值且饥饿值不满时也吃饭（配合自然回血）。默认 15.0。", 15.0, 0.0, 20.0);
-
-    private final BoolSetting eatWhileGliding = SettingHelper.bool(sgEat, "飞行中进食","允许在滑翔途中吃（只在爬升段吃，避免掉高度）。默认开。", true);
-
-    private final DoubleSetting eatMinRise = SettingHelper.double_(sgEat, "爬升速度阈值","垂直速度高于该值才允许在飞行中进食。默认 0.6。", 0.6, 0.0, 3.0);
-
-    private final ItemListSetting foodWhitelist = SettingHelper.items(sgEat, "吃的食物白名单",
-        "留空 = 任何能吃的东西都吃。", List.of(Items.GOLDEN_CARROT, Items.COOKED_BEEF, Items.BREAD), true);
-
-    private final StringSetting foodPriority = SettingHelper.string(sgEat, "食物优先级",
-        "按这个顺序挑食物，物品 id 用逗号隔开，例如 golden_carrot,cooked_beef；留空按默认。",
-        "");
-
-    private final BoolSetting autoMend = SettingHelper.bool(sgMend, "启用自动修鞘翅","鞘翅耐久不足时降落并用附魔之瓶修复。默认开。", true);
-
-    private final IntSetting mendDurability = SettingHelper.int_(sgMend, "修复触发耐久","鞘翅剩余耐久低于该值时触发修复。默认 60。", 60, 8, 400);
-
-    private final KeybindSetting mendKey = SettingHelper.keybind(sgMend, "手动修鞘翅键",
-        "按一下立刻开始一次修复。");
-
-    private final IntSetting maxMendRetries = SettingHelper.int_(sgMend, "最大修复重试次数","连续失败这么多次后自动关掉「启用自动修鞘翅」，避免一直降落又修不了。默认 2。", 2, 1, 10);
-
-    private final IntSetting minBottles = SettingHelper.int_(sgMend, "最少经验瓶","背包里少于这个数量就不启动修复（设计上要求 ≥ 30 个）。默认 32。", 32, 1, 640);
-
-    private final IntSetting repairToDamage = SettingHelper.int_(sgMend, "修复到损伤值","鞘翅损伤降到该值以下就停手（0 = 修满）。默认 20。", 20, 0, 200);
-
-    private final BoolSetting requireGround = SettingHelper.bool(sgMend, "需要落地","先让 Baritone 降落再修。默认开。", true);
-
-    private final IntSetting landingTimeout = SettingHelper.int_(sgMend, "降落超时","等待落地的最长 tick 数（20 tick = 1 秒）。默认 600。", 600, 100, 6000);
-
-    private final DoubleSetting mendPitch = SettingHelper.double_(sgMend, "投掷俯仰角","扔瓶子时的视角角度，90 = 垂直朝下（经验球会落在脚边被自己吸走）。默认 90.0。", 90.0, 45.0, 90.0);
-
-    private final IntSetting throwDelay = SettingHelper.int_(sgMend, "投掷间隔 tick",
-        "两次扔瓶子之间的间隔；调小更快，但设太小服务端会不认这两瓶。默认 4。", 4, 2, 20);
-
-    private final IntSetting maxThrows = SettingHelper.int_(sgMend, "单次最多扔几瓶","一次修复最多扔几瓶附魔之瓶。默认 128。", 128, 1, 1280);
-
-    private final BoolSetting requireMending = SettingHelper.bool(sgMend, "必须有经验修补","鞘翅没有「经验修补」时直接放弃（避免白扔瓶子）。默认开。", true);
-
-    private final BoolSetting requireNetherWastes = SettingHelper.bool(sgMend, "仅下界荒地修复","只在 nether_wastes 生物群系修鞘翅（落地相对安全）。默认关。", false);
-
-    private final BoolSetting autoLogout = SettingHelper.bool(sgSafety, "危险自动登出","血量过低且图腾不足时自动断开连接（保命）。默认开。", true);
-
-    private final DoubleSetting logoutHealth = SettingHelper.double_(sgSafety, "登出血量","血量低于该值且图腾数量不足时登出。默认 8.0。", 8.0, 1.0, 20.0);
-
-    private final IntSetting logoutTotemMin = SettingHelper.int_(sgSafety, "登出图腾阈值","图腾数量少于等于该值时，配合血量条件触发登出。默认 1。", 1, 0, 8);
-
-    private final BoolSetting logoutOnFailure = SettingHelper.bool(sgSafety, "失败自动登出","飞行任务失败时自动断开连接。默认开。", true);
-
-    private final BoolSetting logoutOnSupplyFail = SettingHelper.bool(sgSafety, "补给失败也登出","补给这一路失败（放不了末影箱 / 盒子里没货 / 降落超时）时是否也登出。默认关。", false);
-
-    private final BoolSetting logoutOnArrive = SettingHelper.bool(sgSafety, "到达自动登出","跑完所有航点后自动断开连接（挂机跑图常用）。默认关。", false);
-
-    private final BoolSetting disableOnFinish = SettingHelper.bool(sgSafety, "任务结束关闭模块","跑完 / 失败后自动把本模块关掉。默认开。", true);
-
-    private final IntSetting noElytraWaitSec = SettingHelper.int_(sgSafety, "没有鞘翅时等多久（秒）","身上没有可用鞘翅时先等这么久（刚进服务器物品栏可能还没同步）。默认 60。", 60, 0, 600);
-
-    private final BoolSetting debugMessages = SettingHelper.bool(sgDebug, "调试输出","在聊天栏打印状态机的每一步、潜影盒扫描结果与火球/岩浆细节。默认关。", false);
-
-    private final BoolSetting hudInfo = SettingHelper.bool(sgDebug, "HUD 状态","在模块列表里显示当前状态/距离/烟花数。默认开。", true);
-
-    private final BoolSetting statusMonitor = SettingHelper.bool(sgDebug, "状态监控","每 10 秒在聊天栏打一行当前状态。默认开。", true);
-
-    private final BoolSetting detailLog = SettingHelper.bool(sgDebug, "详细日志（写文件）","把每一步动作写进 fo-elytra-logs 下的日志文件。默认开。", true);
-
-    private final BoolSetting logSteps = SettingHelper.bool(sgDebug, "日志记录每一步动作","连每一次点击/按键/状态迁移都写进日志（文件更大）。默认开。", true);
-
-    private final IntSetting logKeep = SettingHelper.int_(sgDebug, "日志保留份数","fo-elytra-logs 目录最多保留几份日志，老的自动删除。默认 10。", 10, 2, 50);
-
-    private final EatController eat = new EatController();
-    private final FireballDeflector fireballs = new FireballDeflector();
-
-    private LavaEscape lava;
-    private int lavaCacheTrigger = -1;
-    private int lavaCacheFastTrigger = -1;
-    private int lavaCacheCooldown = -1;
-    private int lavaCacheRetries = -1;
-    private int lavaCacheRadius = -1;
-    private boolean lavaCacheIgnoreGliding;
-    private boolean lavaCacheSwim;
-    private boolean lavaCachePotion;
-    private double lavaCachePitch = Double.NaN;
-    private boolean lavaCacheFirework;
-
-    private LavaPredictor lavaPredictor;
-    private boolean pdCacheEnabled;
-    private double pdCacheHorizon = Double.NaN;
-    private double pdCacheUrgent = Double.NaN;
-    private int pdCacheLateral = -1;
-    private int pdCacheReturn = -1;
-    private int pdCacheCooldown = -1;
-    private boolean pdCacheWarnOnly;
-    private boolean pdCachePauseBaritone;
-    private double pdCacheDeflect = Double.NaN;
-
-    private SupplyTask supplyTask;
-    private MendTask mendTask;
-    private boolean manualTask;
-
-    private final InventoryRestocker restocker = new InventoryRestocker();
-
-    private boolean startFullSupplyDone;
-
-    private boolean startFullSupplyPending;
-
-    private boolean supplyFailPhase;
-
-    private final Set<Item> exhaustedItems = new LinkedHashSet<>();
-    private boolean foodExhaustedCache;
-    private int exhaustedCooldown;
-
-    private static final int SUPPLY_EXHAUSTED_COOLDOWN = 2400;
-
-    private static final int SUPPLY_NO_PROGRESS_LIMIT = 1;
-
-    private static final int TAKEOFF_FIREWORK_MAX = 3;
-
-    private static final int TAKEOFF_FIREWORK_RETRY_TICKS = 60;
-
-    private String lastSupplyStockSignature = "";
-
-    private int supplyNoProgressRounds;
-
-    private boolean logFileOwned;
-
-    private int noElytraWaitTicks;
-
-    private boolean suppressLogout;
-
-    private int supplyTicks;
-
-    private State state = State.IDLE;
-    private String failReason = "";
-
-    private final List<BlockPos> route = new ArrayList<>();
-    private int routeIndex;
-    private BlockPos segmentTarget;
-    private boolean directionInitialised;
-    private float directionFrozen;
-
-    private int tickCounter;
-    private int waitTicks;
-
-    private int takeoffTicks;
-
-    private TakeoffPhase takeoffPhase = TakeoffPhase.INIT;
-
-    private int takeoffFireworksUsed;
-    private int takeoffFireworkCooldown;
-    private double takeoffFireworkY = Double.NaN;
-
-    private int jumpSeq;
-    private int jumpSeqTicks;
-
-    private int jumpAttempts;
-
-    private int jumpPhase;
-
-    private int jumpIteration;
-
-    private int takeoffDelayTicks;
-
-    private int takeoffReArmCount;
-
-    private int airJumpHold;
-
-    private int fakeGlideTicks;
-
-    private int controlTicks;
-
-    private int airborneTicks;
-
-    private int activityTicks;
-
-    private double lastActivityDistance = -1;
-
-    private int fallTicks;
-
-    private int launchWait;
-
-    private int glidingLostTicks;
-
-    private int openTriesDone;
-
-    private int clearWaited;
-    private boolean clearingHead;
-
-    private double ascendTargetY;
-    private int ascendTicks;
-
-    private BlockPos openEnd;
-    private double openStartY;
-
-    private int hopTicks;
-
-    private int openSearchFails;
-
-    private boolean ascendingSearch;
-    private double searchYh;
-
-    private int viewHoldTicks;
-    private int hoverTicker;
-    private boolean hovering;
-    private boolean pausedByPlayer;
-    private int lastCheckX;
-    private int lastCheckZ;
-    private int stuckStrikes;
-    private int segFailStrikes;
-    private int flightGrace;
-
-    private int spinTimes;
-    private int spinPauseTicks;
-    private BlockPos lastSpinPos;
-
-    private boolean segResetDone;
-
-    private boolean forceFlyToOpen;
-    private int supplyRetries;
-
-    private int supplyErrorRetryCount;
-    private int supplyCooldown;
-    private int mendRetries;
-    private int mendCooldown;
-    private int hoverStart;
-    private boolean fireballTooManyWarned;
-    private boolean supplyKeyWasPressed;
-    private boolean mendKeyWasPressed;
-    private boolean flightSettingsApplied;
-    private boolean takeoffAutoJumpUsed;
-
-    private boolean baritoneAutoJumpForced;
-
-    private final StuckEscape.Tracker stuckTracker = new StuckEscape.Tracker();
-    private boolean stuckNow;
-    private boolean stuckFireworkHold;
-    private int stuckEscapeMode;
-    private int stuckEscapeTicks;
-    private BlockPos stuckEscapeSpot;
-    private int stuckEscapeFails;
-    private boolean stuckHealthStopped;
-    private double flightStartX;
-    private double flightStartZ;
-    private int flightProgressTicks;
-    private boolean takeoffCeilingChecked;
-    private double landingY = Double.NaN;
-    private double landingAngle;
-    private double landingTargetX;
-    private double landingTargetZ;
-    private int landingTicks;
-
-    private static final int STUCK_ESCAPE_NONE = 0;
-    private static final int STUCK_ESCAPE_WALK = 1;
-    private static final int STUCK_ESCAPE_MAX_FAILS = 3;
-    private static final int STUCK_WALK_TIMEOUT_TICKS = 1200;
-    private static final int STUCK_WALK_REPATH_TICKS = 100;
-    private static final double STUCK_WALK_ARRIVE_DISTANCE = 3.0;
-    private static final int STUCK_OPEN_SPOT_RADIUS = 48;
-    private static final int STUCK_CLEAR_UP = 40;
-    private static final int STUCK_SPOT_BUDGET = 420;
-    private static final int STUCK_CEILING_UP = 3;
-    private static final double ESCAPE_RAY_DISTANCE = 20.0;
-    private static final int NO_PROGRESS_TICKS = 300;
-    private static final double NO_PROGRESS_DISTANCE = 10.0;
-    private static final double LANDING_SPIRAL_MIN_RADIUS = 4.0;
-    private static final double LANDING_SPIRAL_DIVISOR = 8.0;
-    private static final double LANDING_NO_FIREWORK_ABOVE = 20.0;
-    private static final double LANDING_CUTOFF_SECONDS = 3.0;
-    private static final int LANDING_FIREWORK_INTERVAL = 10;
-    private static final double LANDING_SPIRAL_STEP = 0.25;
-
-    private int terrainProbeTicks;
-    private int terrainDetourCooldown;
-    private BlockPos terrainDetour;
-    private int terrainDetourTicks;
-    private int terrainClimbTicks;
-    private double terrainClimbStartY;
-    private boolean terrainClimbPausedBaritone;
-    private final List<TerrainSample> terrainPending = new ArrayList<>();
-    private int terrainPendingTicks;
-    private int landSkippedCave;
-    private int landSkippedThreat;
-    private int terrainDetourCount;
-    private double lastHurtHealth = -1.0;
-    private boolean torchPlacedThisLanding;
-
-    private record TerrainSample(BlockPos pos, int forward, String label) {
-    }
-
-    private static final int TERRAIN_SAMPLE_POINTS = 3;
-    private static final double TERRAIN_DETOUR_ANGLE = 45.0;
-    private static final double TERRAIN_DETOUR_DISTANCE = 80.0;
-    private static final double TERRAIN_CLIMB_HEIGHT = 25.0;
-    private static final int TERRAIN_TRIGGER_COOLDOWN = 400;
-    private static final int TERRAIN_DETOUR_TIMEOUT = 500;
-    private static final int TERRAIN_PROBE_TIMEOUT = 100;
-    private static final int TERRAIN_CLIMB_TICKS = 30;
-    private static final int LAND_THREAT_CROWD_RADIUS = 24;
-    private static final int LAND_THREAT_CROWD_COUNT = 5;
-    private static final int SUPPLY_HURT_COOLDOWN = 600;
-
-    private static final List<String> CONFLICT_FLIGHT = List.of("ElytraFly", "Flight", "ElytraBoost", "TridentBoost");
-    private static final List<String> CONFLICT_ITEMS = List.of("AutoEat", "AutoMend", "AutoReplenish", "ChestSwap", "InventoryTweaks");
 
     public AutoElytraFlight() {
-
-        super("FO 自动鞘翅飞行",
-            "全自动鞘翅跑图：Baritone 飞行 + 末影箱/潜影盒补给 + 自动进食 + 经验瓶修鞘翅 + 反击火球 + 逃离岩浆 + 危险登出。",
-            "elytra", "autofly", "autoelytra", "aef", "foelytra");
+        super("FO \u81ea\u52a8\u9798\u7fc5\u98de\u884c", "\u5168\u81ea\u52a8\u9798\u7fc5\u8dd1\u56fe\uff1aBaritone \u98de\u884c + \u672b\u5f71\u7bb1/\u6f5c\u5f71\u76d2\u8865\u7ed9 + \u81ea\u52a8\u8fdb\u98df + \u7ecf\u9a8c\u74f6\u4fee\u9798\u7fc5 + \u53cd\u51fb\u706b\u7403 + \u9003\u79bb\u5ca9\u6d46 + \u5371\u9669\u767b\u51fa\u3002", "elytra", "autofly", "autoelytra", "aef", "ice");
+        this.sgTarget = this.settings.createGroup("\u76ee\u6807");
+        this.sgFlight = this.settings.createGroup("\u98de\u884c");
+        this.sgBaritone = this.settings.createGroup("Baritone \u98de\u884c");
+        this.sgBtSafety = this.settings.createGroup("Baritone \u5b89\u5168\u53c2\u6570");
+        this.sgFireball = this.settings.createGroup("\u53cd\u51fb\u706b\u7403");
+        this.sgLava = this.settings.createGroup("\u9003\u79bb\u5ca9\u6d46");
+        this.sgLavaPredict = this.settings.createGroup("\u5ca9\u6d46\u9884\u6d4b\uff08\u5b9e\u9a8c\u6027\uff09");
+        this.sgSupplyTrigger = this.settings.createGroup("\u8865\u7ed9\u89e6\u53d1");
+        this.sgSupplyAmount = this.settings.createGroup("\u8865\u7ed9\u6570\u91cf");
+        this.sgSupplyExec = this.settings.createGroup("\u8865\u7ed9\u6267\u884c");
+        this.sgEat = this.settings.createGroup("\u81ea\u52a8\u8fdb\u98df");
+        this.sgMend = this.settings.createGroup("\u4fee\u9798\u7fc5");
+        this.sgSafety = this.settings.createGroup("\u5b89\u5168");
+        this.sgNether = this.settings.createGroup("\u4e0b\u754c\u5b89\u5168");
+        this.sgLandSafety = this.settings.createGroup("\u964d\u843d\u5b89\u5168");
+        this.sgJunk = this.settings.createGroup("\u5783\u573e\u5904\u7406");
+        this.sgDebug = this.settings.createGroup("\u8c03\u8bd5");
+        this.mode = SettingHelper.enum_(this.sgTarget, "\u6a21\u5f0f", "Waypoints=\u6309\u822a\u70b9\u5217\u8868\u987a\u5e8f\u98de\uff1bSingleTarget=\u53ea\u98de\u4e00\u4e2a\u5750\u6807\uff1bDirection=\u671d\u542f\u52a8\u65f6\u7684\u89c6\u89d2\u65b9\u5411\u8dd1\u56fe\u3002", Mode.Waypoints);
+        this.waypoints = SettingHelper.stringList(this.sgTarget, "\u822a\u70b9\u5217\u8868", "\u6bcf\u884c\u4e00\u4e2a\u5750\u6807\uff0c\u683c\u5f0f x,z\uff08\u4e5f\u63a5\u53d7 x z \u6216 x, z\uff09\u3002", List.of("1000,1000", "1000,-1000", "-1000,-1000"));
+        this.targetX = SettingHelper.intRaw(this.sgTarget, "\u76ee\u6807 X", "SingleTarget \u6a21\u5f0f\u7684 X \u5750\u6807\u3002\u9ed8\u8ba4 0\u3002", 0, -30000000, 30000000);
+        this.targetZ = SettingHelper.intRaw(this.sgTarget, "\u76ee\u6807 Z", "SingleTarget \u6a21\u5f0f\u7684 Z \u5750\u6807\u3002\u9ed8\u8ba4 0\u3002", 0, -30000000, 30000000);
+        this.segmentDistance = SettingHelper.intRaw(this.sgTarget, "\u5355\u6bb5\u8ddd\u79bb", "\u5b9a\u5411\u8dd1\u56fe\u6bcf\u4e00\u6bb5\u63a8\u8fdb\u7684\u8ddd\u79bb\uff08\u683c\uff09\u3002\u9ed8\u8ba4 2000\u3002", 2000, 100, 100000);
+        this.arriveRadius = SettingHelper.int_(this.sgTarget, "\u5230\u8fbe\u5224\u5b9a\u534a\u5f84", "Baritone \u505c\u4e0b\u540e\u4e0e\u76ee\u6807\u7684\u6c34\u5e73\u8ddd\u79bb\u5c0f\u4e8e\u8be5\u503c\u624d\u7b97\u300c\u5230\u8fbe\u300d\uff0c\u5426\u5219\u8bb0\u4e3a\u4e00\u6b21\u5931\u8d25\u6bb5\u3002\u9ed8\u8ba4 32\u3002", 32, 4, 512);
+        this.loop = SettingHelper.bool(this.sgTarget, "\u5faa\u73af\u822a\u70b9", "\u822a\u70b9\u5217\u8868\u98de\u5b8c\u540e\u4ece\u5934\u518d\u6765\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.autoTakeoff = SettingHelper.bool(this.sgFlight, "\u81ea\u52a8\u8d77\u98de", "\u672c\u63d2\u4ef6\u81ea\u5df1\u8d77\u8df3\u5e76\u5c55\u5f00\u9798\u7fc5\uff08\u505a\u6cd5\uff1a\u539f\u5730\u8df3\u4e24\u4e0b \u2192 \u5934\u9876\u6321\u4e86\u5c31\u6316\u5f00 \u2192 \u518d\u4e0d\u884c\u5c31\u627e\u5f00\u9614\u822a\u7ebf\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.takeoffTimeout = SettingHelper.int_(this.sgFlight, "\u8d77\u98de\u770b\u95e8\u72d7", "\u6574\u4e2a\u8d77\u98de\u6d41\u7a0b\uff08\u539f\u5730\u8d77\u8df3 \u2192 \u6e05\u969c \u2192 \u627e\u5f00\u9614\u822a\u7ebf \u2192 \u98de\u5f80\u5f00\u9614\u5730\uff09\u6700\u591a\u8dd1\u591a\u5c11 tick \u5c31\u5224\u5931\u8d25\uff0c20 tick = 1 \u79d2\u3002\u9ed8\u8ba4 120\u3002", 120, 20, 1200);
+        this.takeoffAutoJumpFallback = SettingHelper.bool(this.sgFlight, "\u8d77\u98de\u5931\u8d25\u4ea4\u7ed9 Baritone", "\u672c\u63d2\u4ef6\u7684\u8d77\u98de\u6d41\u7a0b\uff08\u539f\u5730\u8d77\u8df3 + \u5f00\u9614\u5730\u641c\u7d22\uff09\u5168\u90e8\u5931\u8d25\u540e\uff0c\u4e34\u65f6\u628a Baritone \u7684 elytraAutoJump \u6253\u5f00\u518d\u8bd5\u4e00\u6b21\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.openAreaSearch = SettingHelper.bool(this.sgFlight, "\u5f00\u9614\u5730\u641c\u7d22\u8d77\u98de", "\u539f\u5730\u8d77\u8df3\u5931\u8d25\u65f6\uff0c\u7528 512 \u4e2a\u65b9\u5411\u627e\u4e00\u6761\u5f00\u9614\u822a\u7ebf\u98de\u8fc7\u53bb\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.openSearchDist = SettingHelper.double_(this.sgFlight, "\u5f00\u9614\u5730\u641c\u7d22\u8ddd\u79bb", "\u822a\u7ebf\u641c\u7d22\u5f80\u524d\u63a8\u591a\u5c11\u683c\uff08\u9ed8\u8ba4 25\uff09\u3002", 25.0, 5.0, 64.0);
+        this.openSafeDist = SettingHelper.double_(this.sgFlight, "\u5f00\u9614\u5730\u5b89\u5168\u8ddd\u79bb", "\u8bc4\u5206\u65f6\u6bcf\u6761\u5c04\u7ebf\u6700\u591a\u770b\u591a\u8fdc\uff0c\u8d8a\u5927\u8d8a\u504f\u597d\u300c\u5927\u7a7a\u5730\u300d\uff08\u9ed8\u8ba4 20\uff09\u3002", 20.0, 4.0, 48.0);
+        this.openTries = SettingHelper.int_(this.sgFlight, "\u98de\u5f80\u5f00\u9614\u5730\u5c1d\u8bd5\u6b21\u6570", "\u671d\u5f00\u9614\u5730\u6765\u56de\u51b2\u51e0\u6b21\u8fd8\u6ca1\u8ba9 Baritone \u63a5\u7ba1\u5c31\u5224\u8d77\u98de\u5931\u8d25\uff08\u9ed8\u8ba4 6\uff09\u3002", 6, 1, 12);
+        this.allowAscend = SettingHelper.bool(this.sgFlight, "\u5141\u8bb8\u5148\u62ac\u5347\u518d\u627e\u822a\u7ebf", "\u56db\u5468\u90fd\u88ab\u6321\u6b7b\u65f6\u5148\u62ac\u5934\u5782\u76f4\u4e0a\u5347\uff0c\u4ece +3.0 \u683c\u4e00\u8def\u8bd5\u5230 +10.5 \u683c\uff08\u6bcf 0.5 \u683c\u4e00\u6b21\uff09\u518d\u91cd\u65b0\u627e\u822a\u7ebf\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.jumpBeforeOpen = SettingHelper.int_(this.sgFlight, "\u539f\u5730\u8d77\u8df3\u5c1d\u8bd5\u6b21\u6570", "\u7ad9\u5728\u5730\u4e0a\u8d77\u8df3\u51e0\u6b21\u8fd8\u6ca1\u5c55\u5f00\u9798\u7fc5\uff0c\u5c31\u8f6c\u53bb\u300c\u98de\u5f80\u5f00\u9614\u5730\u300d\uff08\u9ed8\u8ba4 3 \u6b21\uff09\u3002", 3, 1, 10);
+        this.clearHeadBlock = SettingHelper.bool(this.sgFlight, "\u5934\u9876\u969c\u788d\u81ea\u52a8\u6e05\u9664", "\u8d77\u8df3\u524d\u5934\u9876\u6709\u65b9\u5757\u6321\u7740\u65f6\uff0c\u8ba9 Baritone \u628a\u5934\u9876 2\u00d72\u00d72 \u6316\u5f00\u518d\u8d77\u8df3\uff08\u6e05\u969c\u505a\u6cd5\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.fireworkRefill = SettingHelper.bool(this.sgFlight, "\u81ea\u52a8\u8865\u5145\u5feb\u6377\u680f\u70df\u82b1", "\u5feb\u6377\u680f\u70df\u82b1\u5c11\u4e8e\u9608\u503c\u65f6\uff0c\u4ece\u80cc\u5305\u628a\u6574\u645e\u70df\u82b1\u6362\u5230\u5feb\u6377\u680f\uff08\u4e0d\u5f00\u754c\u9762\uff0c\u76f4\u63a5\u53d1\u5305\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.fireworkHotbarMin = SettingHelper.int_(this.sgFlight, "\u5feb\u6377\u680f\u70df\u82b1\u9608\u503c", "\u5feb\u6377\u680f\uff089 \u683c\uff09\u91cc\u7684\u70df\u82b1\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u5c31\u4ece\u80cc\u5305\u8865\u5145\u3002\u9ed8\u8ba4 64\u3002", 64, 1, 64);
+        this.takeoffFirework = SettingHelper.bool(this.sgFlight, "\u8d77\u98de\u540e\u8865\u4e00\u53d1\u70df\u82b1", "\u6bcf\u6b21\u8d77\u8df3\uff08\u542b\u843d\u5730\u540e\u7684\u81ea\u52a8\u91cd\u8df3\uff09\u9798\u7fc5\u4e00\u5c55\u5f00\u5c31\u81ea\u5df1\u653e\u4e00\u53d1\u70df\u82b1\u7ed9\u63a8\u529b\uff0c\u7136\u540e\u7acb\u523b\u4ea4\u56de Baritone\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.takeoffByBaritone = SettingHelper.bool(this.sgFlight, "\u4f18\u5148 Baritone \u81ea\u52a8\u8d77\u8df3", "\u5148\u7528 Baritone \u7684 elytraAutoJump \u8d77\u8df3\uff08\u5b83\u81ea\u5df1\u627e\u8df3\u53f0\u8d70\u8fc7\u53bb\uff09\uff1b6 \u79d2\u6ca1\u63a5\u7ba1\u5c31\u6539\u7528\u672c\u63d2\u4ef6\u7684\u539f\u5730\u8d77\u8df3 + \u70df\u82b1\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.chunkWait = SettingHelper.bool(this.sgFlight, "\u533a\u5757\u52a0\u8f7d\u7b49\u5f85", "\u672a\u52a0\u8f7d\u533a\u5757\u6bd4\u4f8b\u8fc7\u9ad8\u65f6\u6682\u505c Baritone \u539f\u5730\u76d8\u65cb\uff0c\u7b49\u533a\u5757\u8ffd\u4e0a\u6765\u518d\u7ee7\u7eed\uff0c\u907f\u514d\u649e\u8fdb\u672a\u52a0\u8f7d\u5730\u5f62\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.unloadedRatio = SettingHelper.double_(this.sgFlight, "\u672a\u52a0\u8f7d\u6bd4\u4f8b\u9608\u503c", "\u89c6\u91ce\u8303\u56f4\u5185\u672a\u52a0\u8f7d\u533a\u5757\u5360\u6bd4\u8d85\u8fc7\u8be5\u503c\u5c31\u8fdb\u5165\u7b49\u5f85\u3002\u9ed8\u8ba4 0.4\u3002", 0.4, 0.05, 1.0);
+        this.chunkRadius = SettingHelper.int_(this.sgFlight, "\u533a\u5757\u68c0\u67e5\u534a\u5f84", "\u68c0\u67e5\u5468\u56f4\u591a\u5c11\u533a\u5757\u7684\u52a0\u8f7d\u72b6\u6001\uff08\u4f1a\u88ab\u5ba2\u6237\u7aef\u89c6\u8ddd\u4e0a\u9650\u9650\u5236\uff09\u3002\u9ed8\u8ba4 5\u3002", 5, 1, 12);
+        this.hoverTimeout = SettingHelper.int_(this.sgFlight, "\u7b49\u5f85\u533a\u5757\u8d85\u65f6", "\u300c\u672a\u52a0\u8f7d\u533a\u5757\u592a\u591a\u300d\u800c\u6682\u505c\u98de\u884c\u6700\u591a\u6301\u7eed\u591a\u5c11 tick\uff0c\u8d85\u65f6\u5f3a\u5236\u6062\u590d\u98de\u884c\uff0820 tick = 1 \u79d2\uff09\u3002\u9ed8\u8ba4 1200\u3002", 1200, 100, 12000);
+        this.btSafetyTakeover = (BoolSetting)this.sgBtSafety.add((Setting)((BoolSetting.Builder)((BoolSetting.Builder)((BoolSetting.Builder)new BoolSetting.Builder().name("\u63a5\u7ba1\u907f\u8ba9\u53c2\u6570")).description("\u6a21\u5757\u542f\u7528\u65f6\u628a Baritone \u7684\u907f\u8ba9\u4f59\u91cf/\u524d\u77bb tick \u8c03\u5927\uff0c\u5173\u95ed\u6a21\u5757\u65f6\u8fd8\u539f\u539f\u503c\u3002\u9ed8\u8ba4\u5f00\u3002")).defaultValue(true)).build());
+        this.btAvoidMargin = (DoubleSetting)this.sgBtSafety.add((Setting)((DoubleSetting.Builder)((DoubleSetting.Builder)new DoubleSetting.Builder().name("\u907f\u8ba9\u4f59\u91cf")).description("\u5199\u5165 Baritone \u7684 elytraMinimumAvoidance\uff0c\u8d8a\u5927\u8d8a\u65e9\u7ed5\u5f00\u969c\u788d\u3002\u9ed8\u8ba4 0.8\u3002")).defaultValue(0.8).min(0.2).max(2.0).sliderRange(0.2, 2.0).decimalPlaces(2).build());
+        this.btLookahead = (IntSetting)this.sgBtSafety.add((Setting)((IntSetting.Builder)((IntSetting.Builder)((IntSetting.Builder)new IntSetting.Builder().name("\u524d\u77bb tick")).description("\u5199\u5165 Baritone \u7684 elytraSimulationTicks\uff0c\u8d8a\u5927\u8d8a\u65e9\u770b\u89c1\u5899\u4e5f\u8d8a\u5403 CPU\u3002\u9ed8\u8ba4 35\u3002")).defaultValue(35)).min(20).max(60).sliderRange(20, 60).build());
+        this.netherReplanSeconds = SettingHelper.int_(this.sgNether, "\u4e0b\u754c\u91cd\u89c4\u5212\u6700\u5c0f\u95f4\u9694\uff08\u79d2\uff09", "\u4e0b\u754c\u91cc\u6211\u4eec\u4e3b\u52a8\u91cd\u53d1\u822a\u70b9\u81f3\u5c11\u8981\u9694\u8fd9\u4e48\u4e45\uff0c\u5c11\u6253\u6270 Baritone\u3002\u9ed8\u8ba4 8\u3002", 8, 0, 60);
+        this.netherPredictOff = SettingHelper.bool(this.sgNether, "\u4e0b\u754c\u5173\u95ed Baritone \u5730\u5f62\u9884\u6d4b", "\u628a Baritone \u7684 elytraNetherSeed \u7f6e 0 \u5173\u6389\u5b83\u7684\u4e0b\u754c\u5730\u5f62\u9884\u6d4b\uff0c\u5173\u6a21\u5757\u65f6\u8fd8\u539f\u539f\u503c\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.noSupplyInBasaltDeltas = SettingHelper.bool(this.sgNether, "\u4e0d\u8981\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u8865\u7ed9", "\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u5c31\u4e0d\u964d\u843d\u8865\u7ed9\uff0c\u7ee7\u7eed\u98de\u627e\u522b\u5904\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.landSafeRadius = SettingHelper.int_(this.sgLandSafety, "\u964d\u843d\u5b89\u5168\u534a\u5f84", "\u964d\u843d\u70b9\u8fd9\u4e2a\u534a\u5f84\u5185\u6709\u654c\u5bf9\u751f\u7269\u5c31\u4e0d\u843d\u3002\u9ed8\u8ba4 8\u3002", 8, 2, 48);
+        this.landAvoidMobs = SettingHelper.bool(this.sgLandSafety, "\u5468\u56f4\u6709\u602a\u5c31\u6362\u964d\u843d\u70b9", "\u5019\u9009\u964d\u843d\u70b9\u6309\u8ddd\u79bb\u6392\u5e8f\uff0c\u8df3\u8fc7\u534a\u5f84\u5185\u6709\u602a\u7684\uff1b\u5168\u90fd\u6709\u602a\u5c31\u7ee7\u7eed\u98de\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.landSkipWhenCrowded = SettingHelper.bool(this.sgLandSafety, "\u602a\u7269\u592a\u591a\u5c31\u8df3\u8fc7\u8fd9\u6b21\u8865\u7ed9", "24 \u683c\u5185\u654c\u5bf9\u751f\u7269 \u2265 5 \u53ea\u5c31\u4e0d\u964d\u843d\uff0c\u76f4\u63a5\u7ee7\u7eed\u98de\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.hurtAbortSupply = SettingHelper.bool(this.sgLandSafety, "\u88ab\u6253\u5c31\u4e2d\u65ad\u8865\u7ed9\u8d77\u98de", "\u8865\u7ed9\u4e2d\u53d7\u5230\u4f24\u5bb3\u5c31\u4e2d\u6b62\u8865\u7ed9\u3001\u6e05\u73b0\u573a\u3001\u7acb\u523b\u8d77\u98de\uff0c\u8fd9\u6b21\u8865\u7ed9 30 \u79d2\u5185\u4e0d\u518d\u8bd5\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.torchBeforeSupply = SettingHelper.bool(this.sgLandSafety, "\u8865\u7ed9\u524d\u5148\u63d2\u706b\u628a", "\u964d\u843d\u70b9\u811a\u4e0b\u653e\u4e00\u652f\u706b\u628a\u6216\u706f\u7b3c\u964d\u4f4e\u5237\u602a\uff08\u80cc\u5305\u91cc\u6709\u65f6\uff09\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.pauseOnPlayers = SettingHelper.bool(this.sgFlight, "\u6709\u73a9\u5bb6\u65f6\u8ba9\u884c", "\u9644\u8fd1\u6709\u522b\u7684\u73a9\u5bb6\u65f6\u6682\u505c\u98de\u884c\u539f\u5730\u76d8\u65cb\uff0c\u73a9\u5bb6\u8d70\u8fdc\u540e\u81ea\u52a8\u7ee7\u7eed\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.playerRange = SettingHelper.double_(this.sgFlight, "\u8ba9\u884c\u8ddd\u79bb", "\u89e6\u53d1\u8ba9\u884c\u7684\u73a9\u5bb6\u8ddd\u79bb\uff08\u683c\uff09\u3002\u9ed8\u8ba4 64.0\u3002", 64.0, 8.0, 256.0);
+        this.infinityElytra = SettingHelper.bool(this.sgFlight, "\u65e0\u5c3d\u9798\u7fc5\uff08\u6bcf 12 tick \u91cd\u53d1\uff09", "\u65e0\u5c3d\u9798\u7fc5\u6a21\u5f0f\uff1a\u6bcf 12 tick \u91cd\u65b0\u5c55\u5f00\u4e00\u6b21\u9798\u7fc5\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.btTermsAccepted = this.btBool("elytraTermsAccepted", "\u540c\u610f\u9798\u7fc5\u6761\u6b3e", "Baritone \u7684 elytraTermsAccepted\uff1a\u4e0d\u540c\u610f\u65f6\u9798\u7fc5\u8fdb\u7a0b\u62d2\u7edd\u5de5\u4f5c\u3002");
+        this.btAutoJump = this.btBool("elytraAutoJump", "\u81ea\u52a8\u8d77\u8df3", "\u4ea4\u7ed9 Baritone \u8d77\u8df3\uff1a\u5b83\u4f1a\u5148\u627e\u4e00\u6761\u300c\u8d70\u5230\u67d0\u4e2a\u80fd\u5f80\u4e0b\u8df3\u7684\u53f0\u9636\u300d\u7684\u6b65\u884c\u8def\u7ebf\uff0c\u5e73\u539f/\u5ba4\u5185\u4f1a\u76f4\u63a5\u62a5 Failed to compute a walking path to a spot to jump off from \u5e76\u62d2\u7edd\u8d77\u98de\uff08\u65e5\u5fd7\u91cc\u90a3\u53e5\u63d0\u793a\u5c31\u662f\u5b83\uff09\u3002\u8fd9\u4e00\u9879\u9ed8\u8ba4\u5c31\u662f\u5173\u7740\u7684\uff1a\u672c\u63d2\u4ef6\u5728\u8dd1\u56fe\u65f6\u4f1a\u5f3a\u5236\u538b\u6389\u5b83\uff0c\u8d77\u8df3\u7531\u81ea\u5df1\u5b8c\u6210\uff08\u539f\u5730\u8df3\u4e24\u4e0b \u2192 \u5934\u9876\u6321\u4e86\u5c31\u6316\u5f00 \u2192 512 \u4e2a\u65b9\u5411\u627e\u5f00\u9614\u822a\u7ebf\uff09\uff1b\u53ea\u6709\u300c\u8d77\u98de\u5931\u8d25\u4ea4\u7ed9 Baritone\u300d\u515c\u5e95\u89e6\u53d1\u65f6\u624d\u4e34\u65f6\u6253\u5f00\u3002\u70b9\u300c\u4fdd\u5b58\u5e76\u8bbe\u4e3a\u9ed8\u8ba4\u300d\u4f1a\u628a\u5f53\u524d\u503c\u5199\u8fdb baritone/settings.txt\uff0c\u5efa\u8bae\u4fdd\u6301\u5173\u95ed\u3002");
+        this.btFireworkSpeed = this.btDouble("elytraFireworkSpeed", "\u70df\u82b1\u901f\u5ea6", "\u9798\u7fc5\u70df\u82b1\u7684\u6700\u4f4e\u901f\u5ea6\u8981\u6c42\uff1a\u8d8a\u5c0f\u8d8a\u7701\u70df\u82b1\u3001\u8d8a\u5927\u8d8a\u5feb\u3002Baritone \u51fa\u5382\u9ed8\u8ba4 1.2\u3002", 0.05, 2.0);
+        this.btConserveFireworks = this.btBool("elytraConserveFireworks", "\u8282\u7701\u70df\u82b1", "\u5c3d\u91cf\u907f\u514d\u7528\u70df\u82b1\uff08\u80fd\u6ed1\u7fd4\u5c31\u4e0d\u653e\uff09\uff0c\u8d76\u8def\u901f\u5ea6\u4f1a\u53d8\u6162\u3002");
+        this.btAutoSwap = this.btBool("elytraAutoSwap", "\u81ea\u52a8\u6362\u53d6\u9798\u7fc5", "\u9798\u7fc5\u8010\u4e45\u4e0d\u591f\u65f6\u81ea\u52a8\u6362\u80cc\u5305\u91cc\u7684\u5907\u7528\u9798\u7fc5\u3002");
+        this.btPredictTerrain = this.btBool("elytraPredictTerrain", "\u9884\u6d4b\u5730\u5f62", "\u6309\u5730\u5f62\u9ad8\u5ea6\u9884\u6d4b\u8def\u7ebf\uff08\u4e0b\u754c/\u5ce1\u8c37\u98de\u884c\u65f6\u5f88\u6709\u7528\uff0c\u5173\u6389\u66f4\u5bb9\u6613\u649e\u5730\u5f62\uff09\u3002");
+        this.btFreeLook = this.btBool("elytraFreeLook", "\u81ea\u7531\u89c6\u89d2", "\u98de\u884c\u65f6\u5141\u8bb8\u89c6\u89d2\u4e0e\u524d\u8fdb\u65b9\u5411\u5206\u79bb\uff08\u5f00\u7740\u66f4\u50cf\u539f\u7248\u9798\u7fc5\u624b\u611f\uff09\u3002");
+        this.btSmoothLook = this.btBool("elytraSmoothLook", "\u5e73\u6ed1\u89c6\u89d2", "\u5e73\u6ed1\u8fc7\u6e21\u89c6\u89d2\uff08\u5173\u6389\u4f1a\u8ba9\u89c6\u89d2\u66f4\u786c\u66f4\u5feb\uff09\u3002");
+        this.btPitchRange = this.btInt("elytraPitchRange", "\u4fef\u4ef0\u8303\u56f4", "\u5141\u8bb8\u7684\u4fef\u4ef0\u89d2\u53d8\u5316\u8303\u56f4\uff08\u5ea6\uff09\u3002", 0, 180);
+        this.btAllowEmergencyLand = this.btBool("elytraAllowEmergencyLand", "\u5141\u8bb8\u7d27\u6025\u964d\u843d", "\u6ca1\u70df\u82b1/\u8010\u4e45\u4e0d\u591f\u65f6\u5141\u8bb8 Baritone \u7d27\u6025\u964d\u843d\uff1b\u65e0\u9650\u9798\u7fc5\u73a9\u6cd5\u53ef\u4ee5\u5173\u6389\u3002");
+        this.btMinFireworksBeforeLanding = this.btInt("elytraMinFireworksBeforeLanding", "\u964d\u843d\u524d\u6700\u5c11\u70df\u82b1", "\u5269\u4f59\u70df\u82b1\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u65f6\u4e0d\u518d\u5c1d\u8bd5\u8fdc\u8ddd\u79bb\u98de\u884c\u3002", 0, 256);
+        this.btMinimumDurability = this.btInt("elytraMinimumDurability", "\u6700\u4f4e\u9798\u7fc5\u8010\u4e45", "\u9798\u7fc5\u5269\u4f59\u8010\u4e45\u4f4e\u4e8e\u8fd9\u4e2a\u503c\u5c31\u51c6\u5907\u964d\u843d\uff08\u914d\u5408\u81ea\u52a8\u6362\u9798\u7fc5\u4f7f\u7528\uff09\u3002", 0, 1000);
+        this.btAllowLandOnNetherFortress = this.btBool("elytraAllowLandOnNetherFortress", "\u5141\u8bb8\u843d\u5728\u4e0b\u754c\u8981\u585e", "\u662f\u5426\u5141\u8bb8\u628a\u4e0b\u754c\u8981\u585e\u5f53\u964d\u843d\u70b9\uff08\u8981\u585e\u4e0a\u6709\u70c8\u7130\u4eba\uff0c\u8c28\u614e\u6253\u5f00\uff09\u3002");
+        this.btChatSpam = this.btBool("elytraChatSpam", "Baritone \u804a\u5929\u5237\u5c4f", "\u8ba9 Baritone \u628a\u98de\u884c\u51b3\u7b56\u6253\u5370\u5230\u804a\u5929\u680f\uff1b\u60f3\u8981\u5e72\u51c0\u804a\u5929\u680f\u5c31\u5173\u6389\u3002");
+        this.btRenderSimulation = this.btBool("elytraRenderSimulation", "\u6e32\u67d3\u6a21\u62df\u8def\u5f84", "\u628a Baritone \u7684\u98de\u884c\u6a21\u62df\u753b\u51fa\u6765\uff08\u7eaf\u8c03\u8bd5\u7528\uff0c\u6b63\u5f0f\u8dd1\u56fe\u5efa\u8bae\u5173\u6389\uff09\u3002");
+        this.baritoneSaveKey = SettingHelper.keybind(this.sgBaritone, "\u4e00\u952e\u4fdd\u5b58\u5feb\u6377\u952e", "\u6309\u4e0b = \u5e94\u7528\u9762\u677f\u91cc\u7684 Baritone \u8bbe\u7f6e\u5e76\u4fdd\u5b58\u4e3a\u9ed8\u8ba4\uff08\u7b49\u4ef7\u4e8e\u70b9\u9762\u677f\u4e0a\u7684\u300c\u4fdd\u5b58\u5e76\u8bbe\u4e3a\u9ed8\u8ba4\u300d\uff09\u3002");
+        this.deflectFireballs = SettingHelper.bool(this.sgFireball, "\u53cd\u51fb\u706b\u7403", "\u628a\u98de\u5411\u81ea\u5df1\u7684\u706b\u7403\u6253\u56de\u53bb\uff1a\u6682\u505c\u98de\u884c \u2192 \u770b\u5411\u706b\u7403 \u2192 \u6253\u4e00\u62f3 \u2192 \u706b\u7403\u6d88\u5931\u540e\u6062\u590d\u98de\u884c\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.fireballRange = SettingHelper.double_(this.sgFireball, "\u62e6\u622a\u8ddd\u79bb", "\u706b\u7403\u63a2\u6d4b\u534a\u5f84\uff08\u683c\uff09\uff1b0 = \u6309\u5b9e\u4f53\u4ea4\u4e92\u8ddd\u79bb\u81ea\u52a8\u7b97\u3002\u9ed8\u8ba4 0\u3002", 0.0, 0.0, 16.0);
+        this.fireballMax = SettingHelper.int_(this.sgFireball, "\u6700\u591a\u540c\u65f6\u62e6\u51e0\u4e2a", "\u540c\u65f6\u5b58\u5728\u7684\u706b\u7403\u8d85\u8fc7\u8fd9\u4e2a\u6570\u91cf\u5c31\u653e\u5f03\u62e6\u622a\uff08\u9ed8\u8ba4 1\uff0c\u5373 2 \u4e2a\u5c31\u653e\u5f03\uff09\u3002", 1, 1, 8);
+        this.fireballPauseBaritone = SettingHelper.bool(this.sgFireball, "\u62e6\u622a\u65f6\u6682\u505c\u98de\u884c", "\u62e6\u622a\u671f\u95f4\u6682\u505c Baritone\uff0c\u6253\u56de\u706b\u7403\u540e\u6062\u590d\u98de\u884c\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.fireballFailOnMultiple = SettingHelper.bool(this.sgFireball, "\u62e6\u4e0d\u8fc7\u6765\u5c31\u5224\u5931\u8d25", "\u706b\u7403\u6570\u91cf\u8d85\u8fc7\u4e0a\u9650\u65f6\u76f4\u63a5\u5224\u4efb\u52a1\u5931\u8d25\uff08\u8bbe\u8ba1\u884c\u4e3a\uff09\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.lavaEscape = SettingHelper.bool(this.sgLava, "\u9003\u79bb\u5ca9\u6d46", "\u771f\u7684\u6ce1\u5728\u5ca9\u6d46\u91cc\u65f6\u81ea\u52a8\u62ac\u5934\u3001\u5f00\u9798\u7fc5\u3001\u653e\u70df\u82b1\u8131\u79bb\uff08\u4e25\u683c\u7167\u53c2\u8003\u5b9e\u73b0\u7684\u65f6\u5e8f\uff1a\u89e6\u53d1\u9608\u503c 20 / \u672a\u6ed1\u7fd4 5\uff0c\u51b7\u5374 45 tick\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.lavaIgnoreGlidingFire = SettingHelper.bool(this.sgLava, "\u6ed1\u7fd4\u65f6\u5ffd\u7565\u5ca9\u6d46", "\u6ed1\u7fd4\u4e2d\u6ce1\u5728\u5ca9\u6d46\u91cc\u4e5f\u4e0d\u81ea\u6551\uff08\u5371\u9669\uff0c\u522b\u5f00\uff09\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.lavaSwimToSafety = SettingHelper.bool(this.sgLava, "\u515c\u5e95\uff1a\u6e38\u5411\u5b89\u5168\u70b9", "\u989d\u5916\u529f\u80fd\uff08\u9ed8\u8ba4\u5173\uff09\uff1a\u81ea\u6551\u7a97\u53e3\u5185\u8fd8\u671d\u6700\u8fd1\u7684\u5b89\u5168\u70b9\u6e38\u3001\u4f1a\u6309\u524d\u8fdb\u548c\u8f6c\u5411\u3002\u9ed8\u8ba4\u5173 = \u5b8c\u5168\u6309\u53c2\u8003\u5b9e\u73b0\uff0c\u6ce1\u5728\u5ca9\u6d46\u6d77\u91cc\u4e0d\u4f1a\u81ea\u6551\u6210\u529f\uff0c\u9700\u8981\u81ea\u6551\u8bf7\u6253\u5f00\u515c\u5e95\u3002", false);
+        this.lavaSearchRadius = SettingHelper.int_(this.sgLava, "\u515c\u5e95\uff1a\u5b89\u5168\u70b9\u641c\u7d22\u534a\u5f84", "\u4e0a\u9762\u90a3\u4e00\u9879\u7684\u641c\u7d22\u534a\u5f84\uff08\u683c\uff09\u3002\u9ed8\u8ba4 12\u3002", 12, 3, 24);
+        this.lavaDrinkFireRes = SettingHelper.bool(this.sgLava, "\u515c\u5e95\uff1a\u559d\u6297\u706b\u836f\u6c34", "\u989d\u5916\u529f\u80fd\uff08\u9ed8\u8ba4\u5173\uff09\uff1a\u81ea\u6551\u7a97\u53e3\u5185\u5feb\u6377\u680f\u6709\u6297\u706b\u836f\u6c34\u5c31\u5148\u559d\u6389\u3002\u9ed8\u8ba4\u5173 = \u5b8c\u5168\u6309\u53c2\u8003\u5b9e\u73b0\uff0c\u6ce1\u5728\u5ca9\u6d46\u6d77\u91cc\u4e0d\u4f1a\u81ea\u6551\u6210\u529f\uff0c\u9700\u8981\u81ea\u6551\u8bf7\u6253\u5f00\u515c\u5e95\u3002", false);
+        this.lavaLookPitch = SettingHelper.double_(this.sgLava, "\u81ea\u6551\u62ac\u5934\u89d2\u5ea6", "\u81ea\u6551\u65f6\u628a\u89c6\u89d2\u62ac\u5230\u591a\u5c11\u5ea6\uff08-90 = \u6b63\u4e0a\u65b9\uff0c\u8d8a\u5927\u8d8a\u5e73\uff09\u3002\u9ed8\u8ba4 -90\u3002", -90.0, -90.0, 0.0);
+        this.lavaUseFirework = SettingHelper.bool(this.sgLava, "\u81ea\u6551\u65f6\u653e\u70df\u82b1", "\u81ea\u6551\u65f6\u4ece\u5feb\u6377\u680f\u653e\u4e00\u53d1\u70df\u82b1\u628a\u81ea\u5df1\u63a8\u8d77\u6765\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.lavaFailAbort = SettingHelper.bool(this.sgLava, "\u81ea\u6551\u5931\u8d25\u624d\u5224\u5931\u8d25", "\u81ea\u6551\u7a97\u53e3\u8d70\u5b8c\u8fd8\u5728\u5ca9\u6d46\u91cc\uff08\u6216\u627e\u4e0d\u5230\u70df\u82b1\uff09\u5c31\u5224\u4efb\u52a1\u5931\u8d25\uff1b\u662f\u5426\u767b\u51fa\u7531\u300c\u5b89\u5168\u300d\u7ec4\u91cc\u7684\u5931\u8d25\u81ea\u52a8\u767b\u51fa\u51b3\u5b9a\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.lavaPredictEnabled = SettingHelper.bool(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u542f\u7528\u9884\u6d4b\u89c4\u907f", "\u5b9e\u9a8c\u6027\uff0c\u9ed8\u8ba4\u5173\uff1a\u6cbf\u5f53\u524d\u98de\u884c\u65b9\u5411\u9884\u6d4b 1.5~4 \u79d2\uff0c\u63d0\u524d\u907f\u5f00\u5ca9\u6d46\u67f1/\u5ca9\u6d46\u6e56\u3002", false);
+        this.lavaPredictHorizon = SettingHelper.double_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u9884\u6d4b\u65f6\u957f\uff08\u79d2\uff09", "\u5f80\u524d\u9884\u6d4b\u591a\u5c11\u79d2\u7684\u98de\u884c\u8f68\u8ff9\u3002\u9ed8\u8ba4 3.0\u3002", 3.0, 1.5, 4.0);
+        this.lavaPredictUrgent = SettingHelper.double_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u7d27\u6025\u9608\u503c\uff08\u79d2\uff09", "\u9884\u8ba1\u5728\u8fd9\u4e2a\u65f6\u95f4\u5185\u649e\u4e0a\u5ca9\u6d46\u5c31\u6539\u7528\u300c\u7d27\u6025\u89c4\u907f\u300d\uff08\u6682\u505c Baritone + \u504f\u8f6c\u89c6\u89d2 + \u653e\u70df\u82b1\uff09\u3002\u9ed8\u8ba4 1.2\u3002", 1.2, 0.4, 2.0);
+        this.lavaPredictLateral = SettingHelper.int_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u4fa7\u5411\u7ed5\u884c\u8ddd\u79bb", "\u7ed5\u884c\u822a\u70b9\u79bb\u5371\u9669\u70b9\u5f80\u4fa7\u9762\u504f\u591a\u5c11\u683c\u3002\u9ed8\u8ba4 30\u3002", 30, 16, 96);
+        this.lavaPredictReturn = SettingHelper.int_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u7ed5\u884c\u7ed3\u675f\u8ddd\u79bb", "\u79bb\u7ed5\u884c\u822a\u70b9\u591a\u8fd1\u5c31\u7b97\u7ed5\u8fc7\u8fd9\u4e00\u6bb5\uff08\u4e5f\u53ef\u4ee5\u9760\u300c\u524d\u65b9\u9884\u6d4b\u53d8\u5e72\u51c0\u300d\u63d0\u524d\u7ed3\u675f\uff09\u3002\u9ed8\u8ba4 25\u3002", 25, 8, 64);
+        this.lavaPredictCooldown = SettingHelper.int_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u89c4\u907f\u9632\u6296 tick", "\u4e24\u6b21\u89c4\u907f\u52a8\u4f5c\u4e4b\u95f4\u81f3\u5c11\u95f4\u9694\u591a\u5c11 tick\uff0c\u9632\u6b62\u5728\u5ca9\u6d46\u8fb9\u7f18\u53cd\u590d\u89e6\u53d1\u3002\u9ed8\u8ba4 40\u3002", 40, 10, 200);
+        this.lavaPredictWarnOnly = SettingHelper.bool(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u53ea\u9884\u8b66\u4e0d\u63a5\u7ba1", "\u53ea\u628a\u9884\u6d4b\u7ed3\u679c\u5199\u8fdb\u65e5\u5fd7\uff0c\u4e0d\u6539\u822a\u70b9\u3001\u4e0d\u78b0\u6309\u952e\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.lavaPredictPauseBaritone = SettingHelper.bool(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u7d27\u6025\u65f6\u6682\u505c Baritone", "\u7d27\u6025\u89c4\u907f\u671f\u95f4\u6682\u505c Baritone\uff08p\uff09\uff0c\u8131\u79bb\u540e\u6062\u590d\uff08r\uff09\u2014\u2014\u4e0d\u6682\u505c\u7684\u8bdd\u5b83\u4f1a\u548c\u6211\u4eec\u62a2\u89c6\u89d2\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.lavaPredictDeflect = SettingHelper.double_(this.sgLavaPredict, "\u5ca9\u6d46\u9884\u6d4b\uff1a\u7d27\u6025\u504f\u8f6c\u89d2\uff08\u5ea6\uff09", "\u7d27\u6025\u89c4\u907f\u65f6\u76f8\u5bf9\u300c\u5ca9\u6d46\u53cd\u65b9\u5411\u300d\u518d\u5de6\u53f3\u504f\u591a\u5c11\u5ea6\uff0c\u7528\u6765\u5728\u4e24\u4fa7\u91cc\u6311\u4e00\u6761\u66f4\u5e72\u51c0\u7684\u51fa\u8def\u3002\u9ed8\u8ba4 75.0\u3002", 75.0, 30.0, 90.0);
+        this.autoSupply = SettingHelper.bool(this.sgSupplyTrigger, "\u542f\u7528\u81ea\u52a8\u8865\u7ed9", "\u7f3a\u7269\u8d44\u65f6\u81ea\u52a8\u964d\u843d\uff0c\u653e\u672b\u5f71\u7bb1\u3001\u53d6\u6f5c\u5f71\u76d2\u8865\u7ed9\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.supplyBeforeSegment = SettingHelper.bool(this.sgSupplyTrigger, "\u6bcf\u6bb5\u5148\u505a\u8865\u7ed9\u68c0\u67e5", "\u6bcf\u6bb5\u5f00\u59cb\u524d\u5148\u8dd1\u4e00\u6b21\u8865\u7ed9\u5224\u5b9a\uff0c\u4ec0\u4e48\u90fd\u4e0d\u7f3a\u5c31\u76f4\u63a5\u8d77\u98de\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.minFireworkStacks = SettingHelper.int_(this.sgSupplyTrigger, "\u70df\u82b1\u6700\u4f4e\u7ec4\u6570", "\u80cc\u5305\u91cc\u70df\u82b1\u5c11\u4e8e\u8fd9\u4e2a\u7ec4\u6570\u5c31\u89e6\u53d1\u8865\u7ed9\u3002\u9ed8\u8ba4 3\u3002", 3, 0, 27);
+        this.minFoodCount = SettingHelper.int_(this.sgSupplyTrigger, "\u98df\u7269\u6700\u4f4e\u6570\u91cf", "\u98df\u7269\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u5c31\u89e6\u53d1\u8865\u7ed9\u3002\u9ed8\u8ba4 8\u3002", 8, 0, 64);
+        this.minXpBottles = SettingHelper.int_(this.sgSupplyTrigger, "\u7ecf\u9a8c\u74f6\u6700\u4f4e\u6570\u91cf", "\u9644\u9b54\u4e4b\u74f6\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u5c31\u89e6\u53d1\u8865\u7ed9\uff08\u4fee\u9798\u7fc5\u7684\u524d\u63d0\uff09\u3002\u9ed8\u8ba4 8\u3002", 8, 0, 640);
+        this.minTotems = SettingHelper.int_(this.sgSupplyTrigger, "\u56fe\u817e\u6700\u4f4e\u6570\u91cf", "\u4e0d\u6b7b\u56fe\u817e\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u5c31\u89e6\u53d1\u8865\u7ed9\u3002\u9ed8\u8ba4 1\u3002", 1, 0, 8);
+        this.minElytraDurability = SettingHelper.int_(this.sgSupplyTrigger, "\u9798\u7fc5\u8010\u4e45\u8b66\u6212\u7ebf", "\u6240\u6709\u9798\u7fc5\u7684\u5269\u4f59\u8010\u4e45\u603b\u548c\u4f4e\u4e8e\u8be5\u503c\u5c31\u89e6\u53d1\u8865\u7ed9\uff08\u987a\u8def\u6362\u65b0\u9798\u7fc5\uff09\u3002\u9ed8\u8ba4 60\u3002", 60, 0, 400);
+        this.landForSupply = SettingHelper.bool(this.sgSupplyTrigger, "\u8865\u7ed9\u524d\u81ea\u52a8\u964d\u843d", "\u8ba9 Baritone \u964d\u843d\u5230\u5730\u9762\u540e\u518d\u5f00\u59cb\u653e\u7bb1\u5b50\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.maxSupplyRetries = SettingHelper.int_(this.sgSupplyTrigger, "\u6700\u5927\u8865\u7ed9\u91cd\u8bd5\u6b21\u6570", "\u8865\u7ed9\u540e\u7269\u8d44\u4ecd\u7136\u4e0d\u8fbe\u6807\u5c31\u9000\u907f\u91cd\u8bd5\u3002\u9ed8\u8ba4 2\u3002", 2, 1, 10);
+        this.supplyErrorRetries = SettingHelper.int_(this.sgSupplyTrigger, "\u8865\u7ed9\u51fa\u9519\u91cd\u8bd5\u6b21\u6570", "\u8865\u7ed9\u8fc7\u7a0b\u51fa\u9519\u65f6\u4e0d\u5224\u5931\u8d25\uff0c\u9000\u907f\u91cd\u8bd5\u8fd9\u4e48\u591a\u6b21\u3002\u9ed8\u8ba4 3\u3002", 3, 1, 10);
+        this.supplyRetryDelay = SettingHelper.int_(this.sgSupplyTrigger, "\u8865\u7ed9\u91cd\u8bd5\u7b49\u5f85", "\u4e24\u6b21\u8865\u7ed9\u4e4b\u95f4\u7684\u6700\u5c0f\u95f4\u9694 tick\uff0820 tick = 1 \u79d2\uff09\u3002\u9ed8\u8ba4 200\u3002", 200, 20, 2400);
+        this.autoRestock = SettingHelper.bool(this.sgSupplyTrigger, "\u81ea\u52a8\u8865\u5145\u7269\u8d44\u81f3\u7269\u54c1\u680f", "\u5feb\u6377\u680f\u91cc\u6e05\u5355\u7269\u54c1\u4e0d\u591f\u5c31\u4ece\u80cc\u5305\u6362\u8fc7\u6765\uff08\u4e0d\u6253\u5f00\u754c\u9762\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.restockItems = SettingHelper.items(this.sgSupplyTrigger, "\u7269\u54c1\u680f\u8865\u5145\u6e05\u5355", "\u8981\u7ef4\u6301\u7684\u7269\u54c1\u6e05\u5355\u3002", List.of(Items.FIREWORK_ROCKET), false);
+        this.restockStacks = SettingHelper.int_(this.sgSupplyTrigger, "\u6bcf\u4e2a\u7269\u54c1\u8865\u5230\u51e0\u7ec4", "\u6e05\u5355\u91cc\u6bcf\u6837\u7269\u54c1\u5728\u5feb\u6377\u680f\u91cc\u4fdd\u6301\u51e0\u7ec4\uff08\u4e00\u7ec4 = \u8be5\u7269\u54c1\u7684\u6700\u5927\u5806\u53e0\u6570\uff1a\u70df\u82b1 64\u3001\u7ecf\u9a8c\u74f6 64\u3001\u56fe\u817e 1\uff09\u3002", 1, 1, 8);
+        this.restockInterval = SettingHelper.int_(this.sgSupplyTrigger, "\u8865\u5145\u95f4\u9694 tick", "\u4e24\u6b21\u642c\u8fd0\u4e4b\u95f4\u7684\u6700\u5c0f\u95f4\u9694\uff0820 tick = 1 \u79d2\uff09\u3002\u9ed8\u8ba4 10\u3002", 10, 1, 100);
+        this.restockKeepHeld = SettingHelper.bool(this.sgSupplyTrigger, "\u8865\u5145\u65f6\u4e0d\u5360\u624b\u6301\u683c", "\u6362\u4f4d\u65f6\u8df3\u8fc7\u4f60\u5f53\u524d\u62ff\u7740\u7684\u90a3\u4e00\u683c\uff0c\u514d\u5f97\u628a\u4f60\u6b63\u7528\u7684\u4e1c\u897f\u6362\u8d70\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.restockTriggerSupply = SettingHelper.bool(this.sgSupplyTrigger, "\u80cc\u5305\u4e0d\u8db3\u65f6\u89e6\u53d1\u8865\u7ed9", "\u6e05\u5355\u91cc\u7684\u4e1c\u897f\u8fde\u6574\u4e2a\u80cc\u5305\u90fd\u4e0d\u591f\u65f6\uff0c\u89e6\u53d1\u672b\u5f71\u7bb1\u8865\u7ed9\uff08\u964d\u843d \u2192 \u653e\u672b\u5f71\u7bb1 \u2192 \u5f00\u6f5c\u5f71\u76d2\u53d6\u7269\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.fullSupplyOnStart = SettingHelper.bool(this.sgSupplyTrigger, "\u4efb\u52a1\u5f00\u59cb\u65f6\u5148\u8865\u6ee1", "\u4efb\u52a1\u5f00\u59cb\u65f6\u5148\u505a\u4e00\u6b21\u5b8c\u6574\u8865\u7ed9\uff0c\u8865\u6ee1\u518d\u8d77\u98de\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.supplyKey = SettingHelper.keybind(this.sgSupplyTrigger, "\u624b\u52a8\u8865\u7ed9\u952e", "\u6309\u4e00\u4e0b\u7acb\u523b\u505a\u4e00\u6b21\u8865\u7ed9\uff08\u4e0d\u9700\u8981\u6253\u5f00\u4efb\u4f55\u754c\u9762\uff09\u3002");
+        this.targetFireworkStacks = SettingHelper.int_(this.sgSupplyAmount, "\u76ee\u6807\u70df\u82b1\u7ec4\u6570", "\u8865\u5230\u591a\u5c11\u7ec4\u70df\u82b1\uff081 \u7ec4 = 64 \u4e2a\uff09\u3002\u9ed8\u8ba4 21\u3002", 21, 0, 36);
+        this.targetXpBottles = SettingHelper.int_(this.sgSupplyAmount, "\u76ee\u6807\u7ecf\u9a8c\u74f6\u6570\u91cf", "\u8865\u5230\u591a\u5c11\u4e2a\u9644\u9b54\u4e4b\u74f6\uff08\u4fee\u9798\u7fc5\u7528\uff09\u3002\u9ed8\u8ba4 192\u3002", 192, 0, 2560);
+        this.targetFoodCount = SettingHelper.int_(this.sgSupplyAmount, "\u76ee\u6807\u98df\u7269\u6570\u91cf", "\u8865\u5230\u591a\u5c11\u4e2a\u98df\u7269\u3002\u9ed8\u8ba4 32\u3002", 32, 0, 512);
+        this.targetTotems = SettingHelper.int_(this.sgSupplyAmount, "\u76ee\u6807\u56fe\u817e\u6570\u91cf", "\u8865\u5230\u591a\u5c11\u4e2a\u4e0d\u6b7b\u56fe\u817e\u3002\u9ed8\u8ba4 2\u3002", 2, 0, 16);
+        this.targetElytraCount = SettingHelper.int_(this.sgSupplyAmount, "\u76ee\u6807\u5907\u7528\u9798\u7fc5", "\u8865\u5230\u591a\u5c11\u6761\u300c\u8010\u4e45 3\u3001\u635f\u4f24 < 15\u300d\u7684\u5907\u7528\u9798\u7fc5\u3002\u9ed8\u8ba4 5\u3002", 5, 0, 8);
+        this.minEnderChests = SettingHelper.int_(this.sgSupplyAmount, "\u6700\u5c11\u672b\u5f71\u7bb1\u6570\u91cf", "\u80cc\u5305\u91cc\u672b\u5f71\u7bb1\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u65f6\u7ed9\u8b66\u544a\uff08\u6309\u8bbe\u8ba1\u76f4\u63a5\u5224\u5b9a\u5931\u8d25\uff09\u3002\u9ed8\u8ba4 3\u3002", 3, 1, 9);
+        this.maxShulkers = SettingHelper.int_(this.sgSupplyAmount, "\u5355\u6b21\u6700\u591a\u53d6\u76d2\u6570", "\u4e00\u6b21\u8865\u7ed9\u6700\u591a\u4ece\u672b\u5f71\u7bb1\u91cc\u53d6\u51e0\u4e2a\u6f5c\u5f71\u76d2\uff08\u9632\u6b62\u7269\u54c1\u592a\u5206\u6563\uff09\u3002\u9ed8\u8ba4 4\u3002", 4, 1, 27);
+        this.actionDelay = SettingHelper.int_(this.sgSupplyExec, "\u52a8\u4f5c\u95f4\u9694 tick", "\u6bcf\u4e2a\u70b9\u51fb/\u653e\u7f6e\u52a8\u4f5c\u4e4b\u95f4\u7684\u95f4\u9694\u3002\u9ed8\u8ba4 3\u3002", 3, 1, 20);
+        this.placeRadius = SettingHelper.int_(this.sgSupplyExec, "\u653e\u7f6e\u641c\u7d22\u534a\u5f84", "\u5728\u73a9\u5bb6\u5468\u56f4\u591a\u5c11\u683c\u5185\u5bfb\u627e\u53ef\u4ee5\u653e\u672b\u5f71\u7bb1/\u6f5c\u5f71\u76d2\u7684\u4f4d\u7f6e\u3002\u9ed8\u8ba4 2\u3002", 2, 1, 4);
+        this.autoPlaceEnderChest = SettingHelper.bool(this.sgSupplyExec, "\u81ea\u52a8\u653e\u7f6e\u672b\u5f71\u7bb1", "\u4ece\u5feb\u6377\u680f\u62ff\u51fa\u672b\u5f71\u7bb1\u653e\u5728\u811a\u8fb9\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.autoPickupEnderChest = SettingHelper.bool(this.sgSupplyExec, "\u7528\u540e\u56de\u6536\u672b\u5f71\u7bb1", "\u8865\u7ed9\u5b8c\u6210\u540e\u628a\u672b\u5f71\u7bb1\u6316\u56de\u6765\uff08\u5426\u5219\u4f1a\u6d88\u8017\u672b\u5f71\u7bb1\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.useBaritoneMine = SettingHelper.bool(this.sgSupplyExec, "\u7528 Baritone \u6316\u65b9\u5757", "\u6316\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u4ea4\u7ed9 Baritone\uff1a\u5b83\u4f1a\u8d70\u8fc7\u53bb\u6309\u4f4f\u6316\uff0c\u5e76\u6361\u56de\u6389\u843d\u7269\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.storeLoot = SettingHelper.bool(this.sgSupplyExec, "\u987a\u8def\u5b58\u6218\u5229\u54c1", "\u53d6\u7269\u8d44\u65f6\uff0c\u628a\u80cc\u5305\u91cc\u7684\u6742\u7269\uff08\u6216\u4e0b\u9762\u7684\u767d\u540d\u5355\u7269\u54c1\uff09shift \u8fdb\u5f53\u524d\u6253\u5f00\u7684\u6f5c\u5f71\u76d2\uff0c\u817e\u51fa\u7a7a\u95f4\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.storeItems = SettingHelper.items(this.sgSupplyExec, "\u8981\u5b58\u653e\u7684\u7269\u54c1", "\u53ea\u6709\u8fd9\u4e9b\u7269\u54c1\u4f1a\u88ab\u5b58\u8fdb\u6f5c\u5f71\u76d2\u3002", List.of(), false);
+        this.supplyFoodItems = SettingHelper.items(this.sgSupplyExec, "\u8865\u7ed9\u7684\u98df\u7269\u767d\u540d\u5355", "\u8865\u7ed9\u65f6\u8865\u54ea\u4e9b\u98df\u7269\u3002", List.of(Items.GOLDEN_CARROT, Items.COOKED_BEEF, Items.BREAD), true);
+        this.autoEat = SettingHelper.bool(this.sgEat, "\u542f\u7528\u81ea\u52a8\u8fdb\u98df", "\u9965\u997f\u6216\u8840\u91cf\u504f\u4f4e\u65f6\u81ea\u52a8\u5403\u4e1c\u897f\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.hungerThreshold = SettingHelper.int_(this.sgEat, "\u9965\u997f\u9608\u503c", "\u9965\u997f\u503c\u4f4e\u4e8e\u8be5\u503c\u65f6\u5403\u996d\uff080-20\uff09\u3002\u9ed8\u8ba4 16\u3002", 16, 0, 20);
+        this.healthThreshold = SettingHelper.double_(this.sgEat, "\u8840\u91cf\u9608\u503c", "\u8840\u91cf\u4f4e\u4e8e\u8be5\u503c\u4e14\u9965\u997f\u503c\u4e0d\u6ee1\u65f6\u4e5f\u5403\u996d\uff08\u914d\u5408\u81ea\u7136\u56de\u8840\uff09\u3002\u9ed8\u8ba4 15.0\u3002", 15.0, 0.0, 20.0);
+        this.eatWhileGliding = SettingHelper.bool(this.sgEat, "\u98de\u884c\u4e2d\u8fdb\u98df", "\u5141\u8bb8\u5728\u6ed1\u7fd4\u9014\u4e2d\u5403\uff08\u53ea\u5728\u722c\u5347\u6bb5\u5403\uff0c\u907f\u514d\u6389\u9ad8\u5ea6\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.eatMinRise = SettingHelper.double_(this.sgEat, "\u722c\u5347\u901f\u5ea6\u9608\u503c", "\u5782\u76f4\u901f\u5ea6\u9ad8\u4e8e\u8be5\u503c\u624d\u5141\u8bb8\u5728\u98de\u884c\u4e2d\u8fdb\u98df\u3002\u9ed8\u8ba4 0.6\u3002", 0.6, 0.0, 3.0);
+        this.foodWhitelist = SettingHelper.items(this.sgEat, "\u5403\u7684\u98df\u7269\u767d\u540d\u5355", "\u7559\u7a7a = \u4efb\u4f55\u80fd\u5403\u7684\u4e1c\u897f\u90fd\u5403\u3002", List.of(Items.GOLDEN_CARROT, Items.COOKED_BEEF, Items.BREAD), true);
+        this.foodPriorityOrdered = (OrderedItemListSetting)this.sgEat.add((Setting)((OrderedItemListSetting.Builder)((Object)((OrderedItemListSetting.Builder)((Object)new OrderedItemListSetting.Builder().name("\u98df\u7269\u4f18\u5148\u7ea7"))).description("\u6309\u987a\u5e8f\u5403/\u8865\uff0c\u5217\u8868\u8d8a\u9760\u524d\u4f18\u5148\u3002\u9ed8\u8ba4\u7a7a\u3002"))).filter(SettingHelper::isFood).build());
+        this.foodPriority = SettingHelper.string(this.sgEat, "\u98df\u7269\u4f18\u5148\u7ea7\uff08\u65e7\u7248\uff0c\u53ef\u7559\u7a7a\uff09", "\u65e7\u7248\u7684\u9017\u53f7\u5206\u9694\u5199\u6cd5\uff0c\u542f\u52a8\u65f6\u4f1a\u81ea\u52a8\u8fc1\u79fb\u5230\u4e0a\u9762\u7684\u5217\u8868\uff0c\u7559\u7a7a\u5c31\u884c\u3002", "");
+        this.junkDrop = SettingHelper.bool(this.sgJunk, "\u6316\u5230\u5783\u573e\u65b9\u5757\u81ea\u52a8\u4e22\u6389", "\u843d\u5730\u540e\u628a\u80cc\u5305\u91cc\u7684\u5783\u573e\u65b9\u5757\u4e22\u8fdb\u9644\u8fd1\u5ca9\u6d46\uff0c\u987a\u624b\u817e\u683c\u5b50\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.junkOnlyLava = SettingHelper.bool(this.sgJunk, "\u53ea\u5728\u9644\u8fd1\u6709\u5ca9\u6d46\u65f6\u4e22", "\u627e\u4e0d\u5230\u5ca9\u6d46\u5c31\u4e0d\u4e22\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.junkRadius = SettingHelper.int_(this.sgJunk, "\u5783\u573e\u5224\u5b9a\u534a\u5f84", "\u4ee5\u4f60\u4e3a\u4e2d\u5fc3\u627e\u5ca9\u6d46\u7684\u534a\u5f84\uff08\u683c\uff09\u3002\u9ed8\u8ba4 8\u3002", 8, 2, 32);
+        this.junkItems = SettingHelper.items(this.sgJunk, "\u5783\u573e\u6e05\u5355", "\u8fd9\u4e9b\u65b9\u5757\u4f1a\u88ab\u81ea\u52a8\u4e22\u6389\uff08\u4fdd\u62a4\u6e05\u5355\u91cc\u7684\u6c38\u4e0d\u4e22\uff09\u3002", List.of(Items.NETHERRACK, Items.STONE, Items.COBBLESTONE, Items.DIRT, Items.GRAVEL, Items.SAND, Items.DEEPSLATE, Items.TUFF, Items.ANDESITE, Items.DIORITE, Items.GRANITE, Items.BLACKSTONE, Items.BASALT, Items.SOUL_SAND, Items.SOUL_SOIL, Items.END_STONE), false);
+        this.autoMend = SettingHelper.bool(this.sgMend, "\u542f\u7528\u81ea\u52a8\u4fee\u9798\u7fc5", "\u9798\u7fc5\u8010\u4e45\u4e0d\u8db3\u65f6\u964d\u843d\u5e76\u7528\u9644\u9b54\u4e4b\u74f6\u4fee\u590d\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.mendDurability = SettingHelper.int_(this.sgMend, "\u4fee\u590d\u89e6\u53d1\u8010\u4e45", "\u9798\u7fc5\u5269\u4f59\u8010\u4e45\u4f4e\u4e8e\u8be5\u503c\u65f6\u89e6\u53d1\u4fee\u590d\u3002\u9ed8\u8ba4 60\u3002", 60, 8, 400);
+        this.mendKey = SettingHelper.keybind(this.sgMend, "\u624b\u52a8\u4fee\u9798\u7fc5\u952e", "\u6309\u4e00\u4e0b\u7acb\u523b\u5f00\u59cb\u4e00\u6b21\u4fee\u590d\u3002");
+        this.maxMendRetries = SettingHelper.int_(this.sgMend, "\u6700\u5927\u4fee\u590d\u91cd\u8bd5\u6b21\u6570", "\u8fde\u7eed\u5931\u8d25\u8fd9\u4e48\u591a\u6b21\u540e\u81ea\u52a8\u5173\u6389\u300c\u542f\u7528\u81ea\u52a8\u4fee\u9798\u7fc5\u300d\uff0c\u907f\u514d\u4e00\u76f4\u964d\u843d\u53c8\u4fee\u4e0d\u4e86\u3002\u9ed8\u8ba4 2\u3002", 2, 1, 10);
+        this.minBottles = SettingHelper.int_(this.sgMend, "\u6700\u5c11\u7ecf\u9a8c\u74f6", "\u80cc\u5305\u91cc\u5c11\u4e8e\u8fd9\u4e2a\u6570\u91cf\u5c31\u4e0d\u542f\u52a8\u4fee\u590d\uff08\u8bbe\u8ba1\u4e0a\u8981\u6c42 \u2265 30 \u4e2a\uff09\u3002\u9ed8\u8ba4 32\u3002", 32, 1, 640);
+        this.repairToDamage = SettingHelper.int_(this.sgMend, "\u4fee\u590d\u5230\u635f\u4f24\u503c", "\u9798\u7fc5\u635f\u4f24\u964d\u5230\u8be5\u503c\u4ee5\u4e0b\u5c31\u505c\u624b\uff080 = \u4fee\u6ee1\uff09\u3002\u9ed8\u8ba4 20\u3002", 20, 0, 200);
+        this.requireGround = SettingHelper.bool(this.sgMend, "\u9700\u8981\u843d\u5730", "\u5148\u8ba9 Baritone \u964d\u843d\u518d\u4fee\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.landingTimeout = SettingHelper.int_(this.sgMend, "\u964d\u843d\u8d85\u65f6", "\u7b49\u5f85\u843d\u5730\u7684\u6700\u957f tick \u6570\uff0820 tick = 1 \u79d2\uff09\u3002\u9ed8\u8ba4 600\u3002", 600, 100, 6000);
+        this.mendPitch = SettingHelper.double_(this.sgMend, "\u6295\u63b7\u4fef\u4ef0\u89d2", "\u6254\u74f6\u5b50\u65f6\u7684\u89c6\u89d2\u89d2\u5ea6\uff0c90 = \u5782\u76f4\u671d\u4e0b\uff08\u7ecf\u9a8c\u7403\u4f1a\u843d\u5728\u811a\u8fb9\u88ab\u81ea\u5df1\u5438\u8d70\uff09\u3002\u9ed8\u8ba4 90.0\u3002", 90.0, 45.0, 90.0);
+        this.throwDelay = SettingHelper.int_(this.sgMend, "\u6295\u63b7\u95f4\u9694 tick", "\u4e24\u6b21\u6254\u74f6\u5b50\u4e4b\u95f4\u7684\u95f4\u9694\uff1b\u8c03\u5c0f\u66f4\u5feb\uff0c\u4f46\u8bbe\u592a\u5c0f\u670d\u52a1\u7aef\u4f1a\u4e0d\u8ba4\u8fd9\u4e24\u74f6\u3002\u9ed8\u8ba4 4\u3002", 4, 2, 20);
+        this.maxThrows = SettingHelper.int_(this.sgMend, "\u5355\u6b21\u6700\u591a\u6254\u51e0\u74f6", "\u4e00\u6b21\u4fee\u590d\u6700\u591a\u6254\u51e0\u74f6\u9644\u9b54\u4e4b\u74f6\u3002\u9ed8\u8ba4 128\u3002", 128, 1, 1280);
+        this.requireMending = SettingHelper.bool(this.sgMend, "\u5fc5\u987b\u6709\u7ecf\u9a8c\u4fee\u8865", "\u9798\u7fc5\u6ca1\u6709\u300c\u7ecf\u9a8c\u4fee\u8865\u300d\u65f6\u76f4\u63a5\u653e\u5f03\uff08\u907f\u514d\u767d\u6254\u74f6\u5b50\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.requireNetherWastes = SettingHelper.bool(this.sgMend, "\u4ec5\u4e0b\u754c\u8352\u5730\u4fee\u590d", "\u53ea\u5728 nether_wastes \u751f\u7269\u7fa4\u7cfb\u4fee\u9798\u7fc5\uff08\u843d\u5730\u76f8\u5bf9\u5b89\u5168\uff09\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.autoLogout = SettingHelper.bool(this.sgSafety, "\u5371\u9669\u81ea\u52a8\u767b\u51fa", "\u8840\u91cf\u8fc7\u4f4e\u4e14\u56fe\u817e\u4e0d\u8db3\u65f6\u81ea\u52a8\u65ad\u5f00\u8fde\u63a5\uff08\u4fdd\u547d\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.logoutHealth = SettingHelper.double_(this.sgSafety, "\u767b\u51fa\u8840\u91cf", "\u8840\u91cf\u4f4e\u4e8e\u8be5\u503c\u4e14\u56fe\u817e\u6570\u91cf\u4e0d\u8db3\u65f6\u767b\u51fa\u3002\u9ed8\u8ba4 8.0\u3002", 8.0, 1.0, 20.0);
+        this.logoutTotemMin = SettingHelper.int_(this.sgSafety, "\u767b\u51fa\u56fe\u817e\u9608\u503c", "\u56fe\u817e\u6570\u91cf\u5c11\u4e8e\u7b49\u4e8e\u8be5\u503c\u65f6\uff0c\u914d\u5408\u8840\u91cf\u6761\u4ef6\u89e6\u53d1\u767b\u51fa\u3002\u9ed8\u8ba4 1\u3002", 1, 0, 8);
+        this.logoutOnFailure = SettingHelper.bool(this.sgSafety, "\u5931\u8d25\u81ea\u52a8\u767b\u51fa", "\u98de\u884c\u4efb\u52a1\u5931\u8d25\u65f6\u81ea\u52a8\u65ad\u5f00\u8fde\u63a5\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.logoutOnSupplyFail = SettingHelper.bool(this.sgSafety, "\u8865\u7ed9\u5931\u8d25\u4e5f\u767b\u51fa", "\u8865\u7ed9\u8fd9\u4e00\u8def\u5931\u8d25\uff08\u653e\u4e0d\u4e86\u672b\u5f71\u7bb1 / \u76d2\u5b50\u91cc\u6ca1\u8d27 / \u964d\u843d\u8d85\u65f6\uff09\u65f6\u662f\u5426\u4e5f\u767b\u51fa\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.logoutOnArrive = SettingHelper.bool(this.sgSafety, "\u5230\u8fbe\u81ea\u52a8\u767b\u51fa", "\u8dd1\u5b8c\u6240\u6709\u822a\u70b9\u540e\u81ea\u52a8\u65ad\u5f00\u8fde\u63a5\uff08\u6302\u673a\u8dd1\u56fe\u5e38\u7528\uff09\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.disableOnFinish = SettingHelper.bool(this.sgSafety, "\u4efb\u52a1\u7ed3\u675f\u5173\u95ed\u6a21\u5757", "\u8dd1\u5b8c / \u5931\u8d25\u540e\u81ea\u52a8\u628a\u672c\u6a21\u5757\u5173\u6389\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.noElytraWaitSec = SettingHelper.int_(this.sgSafety, "\u6ca1\u6709\u9798\u7fc5\u65f6\u7b49\u591a\u4e45\uff08\u79d2\uff09", "\u8eab\u4e0a\u6ca1\u6709\u53ef\u7528\u9798\u7fc5\u65f6\u5148\u7b49\u8fd9\u4e48\u4e45\uff08\u521a\u8fdb\u670d\u52a1\u5668\u7269\u54c1\u680f\u53ef\u80fd\u8fd8\u6ca1\u540c\u6b65\uff09\u3002\u9ed8\u8ba4 60\u3002", 60, 0, 600);
+        this.debugMessages = SettingHelper.bool(this.sgDebug, "\u8c03\u8bd5\u8f93\u51fa", "\u5728\u804a\u5929\u680f\u6253\u5370\u72b6\u6001\u673a\u7684\u6bcf\u4e00\u6b65\u3001\u6f5c\u5f71\u76d2\u626b\u63cf\u7ed3\u679c\u4e0e\u706b\u7403/\u5ca9\u6d46\u7ec6\u8282\u3002\u9ed8\u8ba4\u5173\u3002", false);
+        this.hudInfo = SettingHelper.bool(this.sgDebug, "HUD \u72b6\u6001", "\u5728\u6a21\u5757\u5217\u8868\u91cc\u663e\u793a\u5f53\u524d\u72b6\u6001/\u8ddd\u79bb/\u70df\u82b1\u6570\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.statusMonitor = SettingHelper.bool(this.sgDebug, "\u72b6\u6001\u76d1\u63a7", "\u6bcf 10 \u79d2\u5728\u804a\u5929\u680f\u6253\u4e00\u884c\u5f53\u524d\u72b6\u6001\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.detailLog = SettingHelper.bool(this.sgDebug, "\u8be6\u7ec6\u65e5\u5fd7\uff08\u5199\u6587\u4ef6\uff09", "\u628a\u6bcf\u4e00\u6b65\u52a8\u4f5c\u5199\u8fdb icehack-logs \u4e0b\u7684\u65e5\u5fd7\u6587\u4ef6\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.logSteps = SettingHelper.bool(this.sgDebug, "\u65e5\u5fd7\u8bb0\u5f55\u6bcf\u4e00\u6b65\u52a8\u4f5c", "\u8fde\u6bcf\u4e00\u6b21\u70b9\u51fb/\u6309\u952e/\u72b6\u6001\u8fc1\u79fb\u90fd\u5199\u8fdb\u65e5\u5fd7\uff08\u6587\u4ef6\u66f4\u5927\uff09\u3002\u9ed8\u8ba4\u5f00\u3002", true);
+        this.logKeep = SettingHelper.int_(this.sgDebug, "\u65e5\u5fd7\u4fdd\u7559\u4efd\u6570", "icehack-logs \u76ee\u5f55\u6700\u591a\u4fdd\u7559\u51e0\u4efd\u65e5\u5fd7\uff0c\u8001\u7684\u81ea\u52a8\u5220\u9664\u3002\u9ed8\u8ba4 10\u3002", 10, 2, 50);
+        this.eat = new EatController();
+        this.fireballs = new FireballDeflector();
+        this.lavaCacheRadius = -1;
+        this.lavaCachePitch = -999.0;
+        this.pdCacheHorizon = Double.NaN;
+        this.pdCacheUrgent = Double.NaN;
+        this.pdCacheLateral = -1;
+        this.pdCacheReturn = -1;
+        this.pdCacheCooldown = -1;
+        this.pdCacheDeflect = Double.NaN;
+        this.restocker = new InventoryRestocker();
+        this.junkDropper = new JunkDropper();
+        this.exhaustedItems = new LinkedHashSet<Item>();
+        this.lastSupplyStockSignature = "";
+        this.state = State.IDLE;
+        this.failReason = "";
+        this.route = new ArrayList<BlockPos>();
+        this.takeoffPhase = TakeoffPhase.INIT;
+        this.fakeGlideWindow = new TimelinessCounter(20);
+        this.takeoffFlowOwner = "";
+        this.fireworkSeenTotal = -1;
+        this.openLavaWindow = new TimelinessCounter(20);
+        this.lastActivityDistance = -1.0;
+        this.segFailWindow = new TimelinessCounter(600);
+        this.spinWindow = new TimelinessCounter(400);
+        this.landingY = Double.NaN;
+        this.lastReplanTick = -600;
+        this.recoverAfter = RecoverAfter.PREPARE;
+        this.lastHurtHealth = -1.0;
+        this.foodPriorityRaw = "\u0000";
+        this.foodPriorityParsed = List.of();
+        OrderedItemListWidget.registerFactory();
     }
 
-    @Override
     public void onActivate() {
-        state = State.PREPARE;
-        failReason = "";
-        route.clear();
-        routeIndex = 0;
-        segmentTarget = null;
-        directionInitialised = false;
-        tickCounter = 0;
-        resetStuckState();
-        resetTerrainState();
-        waitTicks = 0;
-        takeoffTicks = 0;
-        takeoffPhase = TakeoffPhase.INIT;
-        jumpSeq = 0;
-        jumpSeqTicks = 0;
-        jumpAttempts = 0;
-        fallTicks = 0;
-        glidingLostTicks = 0;
-        openTriesDone = 0;
-        clearWaited = 0;
-        clearingHead = false;
-        ascendTicks = 0;
-        ascendTargetY = 0;
-        openEnd = null;
-        openStartY = 0;
-        hopTicks = 0;
-        openSearchFails = 0;
-        ascendingSearch = false;
-        searchYh = 0.0;
-        viewHoldTicks = 0;
-        hoverTicker = 0;
-        hovering = false;
-        pausedByPlayer = false;
-        stuckStrikes = 0;
-        segFailStrikes = 0;
-        spinTimes = 0;
-        spinPauseTicks = 0;
-        lastSpinPos = null;
-        segResetDone = false;
-        forceFlyToOpen = false;
-        flightGrace = 0;
-        supplyRetries = 0;
-        supplyErrorRetryCount = 0;
-        lastSupplyStockSignature = "";
-        supplyNoProgressRounds = 0;
-        supplyCooldown = 0;
-        exhaustedItems.clear();
-        foodExhaustedCache = false;
-        exhaustedCooldown = 0;
-        mendRetries = 0;
-        mendCooldown = 0;
-        hoverStart = 0;
-        fireballTooManyWarned = false;
-        flightSettingsApplied = false;
-        takeoffAutoJumpUsed = false;
-        directionFrozen = 0f;
-        supplyTask = null;
-        mendTask = null;
-        manualTask = false;
-        restocker.reset();
-        startFullSupplyDone = false;
-        startFullSupplyPending = false;
-        noElytraWaitTicks = 0;
-        suppressLogout = false;
-        fireballs.reset();
-        eat.stop();
-        takeoffFireworksUsed = 0;
-        takeoffFireworkCooldown = 0;
-        takeoffFireworkY = Double.NaN;
-        ensureLava();
-        ensureLavaPredictor();
-        if (lavaPredictor != null) lavaPredictor.reset();
-
+        SupplyTask keepRecovering;
+        this.state = State.PREPARE;
+        this.failReason = "";
+        this.route.clear();
+        this.routeIndex = 0;
+        this.segmentTarget = null;
+        this.directionInitialised = false;
+        this.tickCounter = 0;
+        this.migrateFoodPriority();
+        this.resetTerrainState();
+        this.applyNetherSeedPause();
+        this.applyBtSafety();
+        this.resetSegmentStability();
+        this.waitTicks = 0;
+        this.takeoffTicks = 0;
+        this.takeoffPhase = TakeoffPhase.INIT;
+        this.jumpSeq = 0;
+        this.jumpSeqTicks = 0;
+        this.jumpAttempts = 0;
+        this.fallTicks = 0;
+        this.glidingLostTicks = 0;
+        this.openTriesDone = 0;
+        this.clearWaited = 0;
+        this.clearingHead = false;
+        this.ascendTicks = 0;
+        this.ascendTargetY = 0.0;
+        this.openEnd = null;
+        this.openStartY = 0.0;
+        this.hopTicks = 0;
+        this.openSearchFails = 0;
+        this.ascendingSearch = false;
+        this.searchYh = 0.0;
+        this.viewHoldTicks = 0;
+        this.hovering = false;
+        this.pausedByPlayer = false;
+        this.segFailWindow.reset();
+        this.spinWindow.reset();
+        this.spinPauseTicks = 0;
+        this.lastSpinPos = null;
+        this.segResetDone = false;
+        this.forceFlyToOpen = false;
+        this.supplyRetries = 0;
+        this.supplyErrorRetryCount = 0;
+        this.lastSupplyStockSignature = "";
+        this.supplyNoProgressRounds = 0;
+        this.supplyCooldown = 0;
+        this.exhaustedItems.clear();
+        this.foodExhaustedCache = false;
+        this.exhaustedCooldown = 0;
+        this.mendRetries = 0;
+        this.mendCooldown = 0;
+        this.hoverStart = 0;
+        this.fireballTooManyWarned = false;
+        this.flightSettingsApplied = false;
+        this.takeoffAutoJumpUsed = false;
+        this.resetFakeGlideRecovery();
+        this.directionFrozen = 0.0f;
+        this.supplyTask = keepRecovering = this.recoverArmed ? this.supplyTask : null;
+        this.mendTask = null;
+        this.manualTask = false;
+        this.restocker.reset();
+        this.startFullSupplyDone = false;
+        this.startFullSupplyPending = false;
+        this.noElytraWaitTicks = 0;
+        this.suppressLogout = false;
+        this.fireballs.reset();
+        this.eat.stop();
+        this.ensureLava();
+        this.ensureLavaPredictor();
+        if (this.lavaPredictor != null) {
+            this.lavaPredictor.reset();
+        }
         if (!BaritoneHook.available()) {
-            error("没有检测到 Baritone：请先安装 Baritone（或 Meteor 的 baritone 集成）再使用本模块。");
-            state = State.FAILED;
-            if (isActive()) toggle();
+            this.error("\u6ca1\u6709\u68c0\u6d4b\u5230 Baritone\uff1a\u8bf7\u5148\u5b89\u88c5 Baritone\uff08\u6216 Meteor \u7684 baritone \u96c6\u6210\uff09\u518d\u4f7f\u7528\u672c\u6a21\u5757\u3002", new Object[0]);
+            this.state = State.FAILED;
+            if (this.isActive()) {
+                this.toggle();
+            }
             return;
         }
         if (!BaritoneHook.ready()) {
-            error("Baritone 已安装但还没有就绪（拿不到 IBaritone 实例），请进入世界后再打开本模块。");
-            state = State.FAILED;
-            if (isActive()) toggle();
+            this.error("Baritone \u5df2\u5b89\u88c5\u4f46\u8fd8\u6ca1\u6709\u5c31\u7eea\uff08\u62ff\u4e0d\u5230 IBaritone \u5b9e\u4f8b\uff09\uff0c\u8bf7\u8fdb\u5165\u4e16\u754c\u540e\u518d\u6253\u5f00\u672c\u6a21\u5757\u3002", new Object[0]);
+            this.state = State.FAILED;
+            if (this.isActive()) {
+                this.toggle();
+            }
             return;
         }
-        if (btTermsAccepted.get()) BaritoneHook.acceptTerms();
+        if (((Boolean)this.btTermsAccepted.get()).booleanValue()) {
+            BaritoneHook.acceptTerms();
+        }
         BaritoneHook.installSegFailLogger();
         BaritoneHook.clearSegFailCounter();
-        refreshBaritoneStatus();
-        warnConflicts();
-
-        FOElytraLog.fileVerbose = logSteps.get();
-        if (mc.runDirectory != null) {
-            FOElytraLog.setGameDir(mc.runDirectory.toPath());
-            if (detailLog.get()) {
-
-                logFileOwned = FOElytraLog.currentFile() == null;
-                FOElytraLog.ensureOpen(mc.runDirectory.toPath(), logKeep.get());
-                dumpEnvironment();
+        this.refreshBaritoneStatus();
+        this.warnConflicts();
+        FOElytraLog.fileVerbose = (Boolean)this.logSteps.get();
+        if (this.mc.runDirectory != null) {
+            FOElytraLog.setGameDir(this.mc.runDirectory.toPath());
+            if (((Boolean)this.detailLog.get()).booleanValue()) {
+                this.logFileOwned = FOElytraLog.currentFile() == null;
+                FOElytraLog.ensureOpen(this.mc.runDirectory.toPath(), (Integer)this.logKeep.get());
+                this.dumpEnvironment();
             }
         }
-
-        if (btAutoJump.get()) {
-            warning("Baritone 的 elytraAutoJump = true（已写进 baritone/settings.txt）：开着它 Baritone 会在起飞前"
-                + "先去找「能往下跳的台阶」，平原/室内直接报 Failed to compute a walking path to a spot to jump off from "
-                + "并拒绝起飞。本插件起飞时会临时压掉这一项；想永久关掉就关掉面板「Baritone 飞行 → 自动起跳」"
-                + "再点一次「保存并设为默认」。");
+        if (((Boolean)this.btAutoJump.get()).booleanValue()) {
+            this.warning("Baritone \u7684 elytraAutoJump = true\uff08\u5df2\u5199\u8fdb baritone/settings.txt\uff09\uff1a\u5f00\u7740\u5b83 Baritone \u4f1a\u5728\u8d77\u98de\u524d\u5148\u53bb\u627e\u300c\u80fd\u5f80\u4e0b\u8df3\u7684\u53f0\u9636\u300d\uff0c\u5e73\u539f/\u5ba4\u5185\u76f4\u63a5\u62a5 Failed to compute a walking path to a spot to jump off from \u5e76\u62d2\u7edd\u8d77\u98de\u3002\u672c\u63d2\u4ef6\u8d77\u98de\u65f6\u4f1a\u4e34\u65f6\u538b\u6389\u8fd9\u4e00\u9879\uff1b\u60f3\u6c38\u4e45\u5173\u6389\u5c31\u5173\u6389\u9762\u677f\u300cBaritone \u98de\u884c \u2192 \u81ea\u52a8\u8d77\u8df3\u300d\u518d\u70b9\u4e00\u6b21\u300c\u4fdd\u5b58\u5e76\u8bbe\u4e3a\u9ed8\u8ba4\u300d\u3002", new Object[0]);
         }
-
-        FOElytraLog.info("AutoElytraFlight 启动：模式 %s，Baritone 就绪", mode.get());
-        if (mc.player != null && ItemHelper.wornElytra(mc.player).isEmpty()) {
-            warning("身上没有穿鞘翅，准备阶段会尝试自动穿上。");
-        } else if (mc.player != null && ItemHelper.remainingDurability(ItemHelper.wornElytra(mc.player)) < 30
-            && targetElytraCount.get() <= 0) {
-            warning("身上的鞘翅只剩 %d 点耐久，而「补给数量 → 目标备用鞘翅」是 0 —— "
-                + "鞘翅一飞坏，模块就再也起不来了。建议把「目标备用鞘翅」设成 1~2 组。",
-                ItemHelper.remainingDurability(ItemHelper.wornElytra(mc.player)));
+        FOElytraLog.info("AutoElytraFlight \u542f\u52a8\uff1a\u6a21\u5f0f %s\uff0cBaritone \u5c31\u7eea", this.mode.get());
+        if (keepRecovering != null && keepRecovering.isRecovering()) {
+            this.stopRecoverRunner();
+            this.state = State.RECOVER;
+            FOElytraLog.warn("\u6a21\u5757\u53c8\u6253\u5f00\u4e86\uff1a\u5148\u63a5\u7740\u628a\u4e0a\u6b21\u6ca1\u6536\u56de\u7684\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u6536\u5b8c\uff0c\u518d\u7ee7\u7eed\u8dd1\u56fe", new Object[0]);
+        }
+        if (this.mc.player != null && ItemHelper.wornElytra((PlayerEntity)this.mc.player).isEmpty()) {
+            this.warning("\u8eab\u4e0a\u6ca1\u6709\u7a7f\u9798\u7fc5\uff0c\u51c6\u5907\u9636\u6bb5\u4f1a\u5c1d\u8bd5\u81ea\u52a8\u7a7f\u4e0a\u3002", new Object[0]);
+        } else if (this.mc.player != null && ItemHelper.remainingDurability(ItemHelper.wornElytra((PlayerEntity)this.mc.player)) < 30 && (Integer)this.targetElytraCount.get() <= 0) {
+            this.warning("\u8eab\u4e0a\u7684\u9798\u7fc5\u53ea\u5269 %d \u70b9\u8010\u4e45\uff0c\u800c\u300c\u8865\u7ed9\u6570\u91cf \u2192 \u76ee\u6807\u5907\u7528\u9798\u7fc5\u300d\u662f 0 \u2014\u2014 \u9798\u7fc5\u4e00\u98de\u574f\uff0c\u6a21\u5757\u5c31\u518d\u4e5f\u8d77\u4e0d\u6765\u4e86\u3002\u5efa\u8bae\u628a\u300c\u76ee\u6807\u5907\u7528\u9798\u7fc5\u300d\u8bbe\u6210 1~2 \u7ec4\u3002", new Object[]{ItemHelper.remainingDurability(ItemHelper.wornElytra((PlayerEntity)this.mc.player))});
         }
     }
 
-    @Override
     public void onDeactivate() {
-        eat.stop();
-        fireballs.reset();
-        restocker.reset();
+        BounceProbe.shutdown();
+        this.eat.stop();
+        this.fireballs.reset();
+        this.restocker.reset();
         BaritoneHook.removeSegFailLogger();
-        if (lava != null) lava.release(mc);
-        if (lavaPredictor != null) lavaPredictor.release(mc);
-        viewHoldTicks = 0;
-        if (takeoffAutoJumpUsed) {
-
-            takeoffAutoJumpUsed = false;
-            BaritoneHook.btSet("elytraAutoJump", btAutoJump.get());
+        this.restoreNetherSeed();
+        this.restoreBtSafety();
+        if (this.lava != null) {
+            this.lava.release(this.mc);
         }
-        if (baritoneAutoJumpForced) {
-
-            baritoneAutoJumpForced = false;
-            BaritoneHook.btSet("elytraAutoJump", btAutoJump.get());
+        if (this.lavaPredictor != null) {
+            this.lavaPredictor.release(this.mc);
         }
-        mc.options.forwardKey.setPressed(false);
-        mc.options.jumpKey.setPressed(false);
-        mc.options.useKey.setPressed(false);
+        this.viewHoldTicks = 0;
+        if (this.takeoffAutoJumpUsed) {
+            this.takeoffAutoJumpUsed = false;
+            this.restoreAutoJumpIfOurs();
+        }
+        if (this.baritoneAutoJumpForced) {
+            this.baritoneAutoJumpForced = false;
+            this.restoreAutoJumpIfOurs();
+        }
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
+        PlayerAction.clearStuckSneak();
         BlockBreaker.cancel();
+        this.releaseTakeoffFlow();
         BaritoneHook.stop();
-
-        if (supplyTask != null && supplyTask.isRunning()) supplyTask.abort("模块关闭");
-        if (mendTask != null && mendTask.isRunning()) mendTask.abort("模块关闭");
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-
-        if (state != State.IDLE) FOElytraLog.info("AutoElytraFlight 已关闭（%s）", state.toString());
-        state = State.IDLE;
-
-        if (logFileOwned) {
-            logFileOwned = false;
+        boolean recoveringNow = false;
+        if (this.supplyTask != null && (this.supplyTask.isRunning() || this.supplyTask.recoverNeeded())) {
+            if (this.supplyTask.recoverNeeded() && this.supplyTask.beginRecover("\u6a21\u5757\u5173\u95ed")) {
+                this.recoverArmed = true;
+                this.recoverAfter = RecoverAfter.IDLE;
+                this.recoverWatchdog = 0;
+                recoveringNow = true;
+                FOElytraLog.warn("\u6a21\u5757\u5173\u95ed\uff1a\u5148\u628a\u653e\u4e0b\u7684\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u6536\u56de\u6765\uff08\u6700\u591a %d \u79d2\uff09\u518d\u505c", 25);
+            } else if (this.supplyTask.isRunning()) {
+                this.supplyTask.abort("\u6a21\u5757\u5173\u95ed");
+            }
+        }
+        if (this.mendTask != null && this.mendTask.isRunning()) {
+            this.mendTask.abort("\u6a21\u5757\u5173\u95ed");
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        if (recoveringNow) {
+            this.state = State.RECOVER;
+            this.startRecoverRunner();
+        } else if (this.state != State.IDLE) {
+            FOElytraLog.info("AutoElytraFlight \u5df2\u5173\u95ed\uff08%s\uff09", this.state.name());
+            this.state = State.IDLE;
+        }
+        if (this.logFileOwned && !recoveringNow) {
+            this.logFileOwned = false;
             FOElytraLog.closeFile();
         }
     }
 
     public boolean flyTo(int x, int z) {
-        if (mc.player == null || mc.world == null) return false;
-
-        targetX.set(x);
-        targetZ.set(z);
-        mode.set(Mode.SingleTarget);
-        segmentTarget = null;
-        segFailStrikes = 0;
-        segResetDone = false;
-        spinTimes = 0;
-        spinPauseTicks = 0;
-        takeoffPhase = TakeoffPhase.INIT;
-        flightSettingsApplied = false;
-        forceFlyToOpen = false;
-        takeoffTicks = 0;
-        jumpAttempts = 0;
-        openTriesDone = 0;
-        startFullSupplyDone = true;
-        startFullSupplyPending = false;
-        manualTask = false;
-        state = State.PREPARE;
-        FOElytraLog.info("收到外部飞行请求：%d, %d（当前距离 %.0f 格）", x, z,
-            Math.hypot(mc.player.getX() - (x + 0.5), mc.player.getZ() - (z + 0.5)));
+        if (this.mc.player == null || this.mc.world == null) {
+            return false;
+        }
+        this.targetX.set(x);
+        this.targetZ.set(z);
+        this.mode.set(Mode.SingleTarget);
+        this.segmentTarget = null;
+        this.segFailWindow.reset();
+        this.segResetDone = false;
+        this.spinWindow.reset();
+        this.spinPauseTicks = 0;
+        this.takeoffPhase = TakeoffPhase.INIT;
+        this.flightSettingsApplied = false;
+        this.forceFlyToOpen = false;
+        this.takeoffTicks = 0;
+        this.jumpAttempts = 0;
+        this.openTriesDone = 0;
+        this.startFullSupplyDone = true;
+        this.startFullSupplyPending = false;
+        this.manualTask = false;
+        this.state = State.PREPARE;
+        FOElytraLog.info("\u6536\u5230\u5916\u90e8\u98de\u884c\u8bf7\u6c42\uff1a%d, %d\uff08\u5f53\u524d\u8ddd\u79bb %.0f \u683c\uff09", x, z, Math.hypot(this.mc.player.getX() - ((double)x + 0.5), this.mc.player.getZ() - ((double)z + 0.5)));
         return true;
     }
 
     public boolean travelFinished() {
-        return state == State.DONE || state == State.FAILED || state == State.IDLE || segmentTarget == null;
+        return this.state == State.DONE || this.state == State.FAILED || this.state == State.IDLE || this.segmentTarget == null;
     }
 
     public boolean travelFailed() {
-        return state == State.FAILED;
+        return this.state == State.FAILED;
     }
 
     public boolean travelTerminal() {
-        return state == State.DONE || state == State.FAILED || state == State.IDLE;
+        return this.state == State.DONE || this.state == State.FAILED || this.state == State.IDLE;
     }
 
     public double distanceToSegmentTarget() {
-        if (mc.player == null || segmentTarget == null) return -1;
-        double dx = mc.player.getX() - (segmentTarget.getX() + 0.5);
-        double dz = mc.player.getZ() - (segmentTarget.getZ() + 0.5);
+        if (this.mc.player == null || this.segmentTarget == null) {
+            return -1.0;
+        }
+        double dx = this.mc.player.getX() - ((double)this.segmentTarget.getX() + 0.5);
+        double dz = this.mc.player.getZ() - ((double)this.segmentTarget.getZ() + 0.5);
         return Math.sqrt(dx * dx + dz * dz);
     }
 
     public String travelStateName() {
-        return state.toString();
+        return this.state.name();
     }
 
     public String travelFailReason() {
-        return failReason == null ? "" : failReason;
+        return this.failReason == null ? "" : this.failReason;
     }
 
-    @Override
     public String getInfoString() {
-        if (!hudInfo.get()) return null;
-        if (mc.player == null || state == State.IDLE) return state.toString();
-
-        StringBuilder sb = new StringBuilder(state.toString());
-        if (segmentTarget != null) {
-            double dx = mc.player.getX() - (segmentTarget.getX() + 0.5);
-            double dz = mc.player.getZ() - (segmentTarget.getZ() + 0.5);
+        if (!((Boolean)this.hudInfo.get()).booleanValue()) {
+            return null;
+        }
+        if (this.mc.player == null || this.state == State.IDLE) {
+            return this.state.name();
+        }
+        StringBuilder sb = new StringBuilder(this.state.name());
+        if (this.segmentTarget != null) {
+            double dx = this.mc.player.getX() - ((double)this.segmentTarget.getX() + 0.5);
+            double dz = this.mc.player.getZ() - ((double)this.segmentTarget.getZ() + 0.5);
             sb.append(String.format(" %.0fm", Math.sqrt(dx * dx + dz * dz)));
         }
-        sb.append(" 烟花").append(ItemHelper.countInHotbar(mc.player, Items.FIREWORK_ROCKET));
-        if (state == State.SUPPLY && supplyTask != null) sb.append(" ").append(supplyTask.progress());
-        if (state == State.MEND && mendTask != null) sb.append(" ").append(mendTask.progress());
+        sb.append(" \u70df\u82b1").append(ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET));
+        if ((this.state == State.SUPPLY || this.state == State.RECOVER) && this.supplyTask != null) {
+            sb.append(" ").append(this.supplyTask.progress());
+        }
+        if (this.state == State.MEND && this.mendTask != null) {
+            sb.append(" ").append(this.mendTask.progress());
+        }
         return sb.toString();
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (!isActive() || mc.player == null || mc.world == null) return;
-        FOElytraLog.debugEnabled = debugMessages.get();
+        if (!this.isActive() || this.mc.player == null || this.mc.world == null) {
+            return;
+        }
+        FOElytraLog.debugEnabled = (Boolean)this.debugMessages.get();
         try {
-            tick();
-        } catch (Throwable t) {
-            onError("onTick", t);
-            fail("内部异常 " + t.getClass().getSimpleName());
+            this.tick();
+        }
+        catch (Throwable t) {
+            this.onError("onTick", t);
+            this.fail("\u5185\u90e8\u5f02\u5e38 " + t.getClass().getSimpleName());
         }
     }
 
     private void dumpEnvironment() {
-        FOElytraLog.detail("Minecraft %s｜Baritone %s｜模块 %s", "1.21.11",
-            BaritoneHook.available() ? (BaritoneHook.ready() ? "已就绪" : "已加载未就绪") : "未安装",
-            name);
-        if (mc.player != null) {
-            FOElytraLog.detail("玩家位置 %d %d %d｜世界 %s",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
-                mc.world != null ? mc.world.getRegistryKey().getValue() : "?");
+        Object[] objectArray = new Object[3];
+        objectArray[0] = "1.21.11";
+        objectArray[1] = BaritoneHook.available() ? (BaritoneHook.ready() ? "\u5df2\u5c31\u7eea" : "\u5df2\u52a0\u8f7d\u672a\u5c31\u7eea") : "\u672a\u5b89\u88c5";
+        objectArray[2] = this.name;
+        FOElytraLog.detail("Minecraft %s\uff5cBaritone %s\uff5c\u6a21\u5757 %s", objectArray);
+        if (this.mc.player != null) {
+            FOElytraLog.detail("\u73a9\u5bb6\u4f4d\u7f6e %d %d %d\uff5c\u4e16\u754c %s", this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ(), this.mc.world != null ? this.mc.world.getRegistryKey().getValue() : "?");
         }
-        FOElytraLog.detail("—— 当前设置 ——");
+        FOElytraLog.detail("\u2014\u2014 \u5f53\u524d\u8bbe\u7f6e \u2014\u2014", new Object[0]);
         try {
-            for (SettingGroup g : settings) {
-                FOElytraLog.detail("【%s】", g.name);
-                for (Setting<?> s : g) {
+            for (SettingGroup g : this.settings) {
+                FOElytraLog.detail("\u3010%s\u3011", g.name);
+                for (Setting s : g) {
                     FOElytraLog.detail("    %s = %s", s.name, s.get());
                 }
             }
-        } catch (Throwable t) {
+        }
+        catch (Throwable t) {
             FOElytraLog.detailError("dumpEnvironment", t);
         }
-        FOElytraLog.detail("—— 设置结束 ——");
+        FOElytraLog.detail("\u2014\u2014 \u8bbe\u7f6e\u7ed3\u675f \u2014\u2014", new Object[0]);
     }
 
     private void statusHeartbeat() {
-        if (!statusMonitor.get()) return;
-        if (tickCounter % 200 != 0) return;
-        if (mc.player == null) return;
-        String dist = segmentTarget == null ? "-" : String.format("%.0f", Math.hypot(
-            mc.player.getX() - (segmentTarget.getX() + 0.5), mc.player.getZ() - (segmentTarget.getZ() + 0.5)));
-
-        String predict = (lavaPredictor != null && (lavaPredictor.threat() != null || lavaPredictor.isAvoiding()))
-            ? " | " + lavaPredictor.statusText() : "";
-        FOElytraLog.info("状态监控：状态 %s%s | Baritone %s | 烟花 %d 发（%d 组）| 血 %.1f | 距目标 %s 格 | 滑翔 %s%s",
-            state.toString(),
-            hovering ? "(等区块)" : (pausedByPlayer ? "(让行)" : ""),
-            BaritoneHook.isFlying() ? "飞行中" : "未接管",
-            ItemHelper.countInHotbar(mc.player, Items.FIREWORK_ROCKET),
-            ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)),
-            mc.player.getHealth(), dist,
-            mc.player.isGliding() ? "是" : "否", predict);
+        if (!((Boolean)this.statusMonitor.get()).booleanValue()) {
+            return;
+        }
+        if (this.tickCounter % 200 != 0) {
+            return;
+        }
+        if (this.mc.player == null) {
+            return;
+        }
+        String dist = this.segmentTarget == null ? "-" : String.format("%.0f", Math.hypot(this.mc.player.getX() - ((double)this.segmentTarget.getX() + 0.5), this.mc.player.getZ() - ((double)this.segmentTarget.getZ() + 0.5)));
+        String predict = this.lavaPredictor != null && (this.lavaPredictor.threat() != null || this.lavaPredictor.isAvoiding()) ? " | " + this.lavaPredictor.statusText() : "";
+        FOElytraLog.info("\u72b6\u6001\u76d1\u63a7\uff1a\u72b6\u6001 %s%s | Baritone %s | \u70df\u82b1 %d \u53d1\uff08%d \u7ec4\uff09| \u8840 %.1f | \u8ddd\u76ee\u6807 %s \u683c | \u6ed1\u7fd4 %s%s", this.state.name(), this.hovering ? "(\u7b49\u533a\u5757)" : (this.pausedByPlayer ? "(\u8ba9\u884c)" : ""), BaritoneHook.isFlying() ? "\u98de\u884c\u4e2d" : "\u672a\u63a5\u7ba1", ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET), ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)), Float.valueOf(this.mc.player.getHealth()), dist, this.mc.player.isGliding() ? "\u662f" : "\u5426", predict);
     }
 
     private void tick() {
-        tickCounter++;
+        boolean escaping;
+        boolean lavaHoldNow;
+        ++this.tickCounter;
         BaritoneHook.markTick();
-
-        if (tickCounter % 600 == 0) BaritoneHook.installSegFailLogger();
-        if (supplyCooldown > 0) supplyCooldown--;
-        if (mendCooldown > 0) mendCooldown--;
-        if (exhaustedCooldown > 0) {
-            if (--exhaustedCooldown == 0) {
-
-                FOElytraLog.info("补给重试冷却结束（之前判定取光的：%s），下次仍会去末影箱翻一遍",
-                    describeExhausted());
-                exhaustedItems.clear();
-                foodExhaustedCache = false;
+        BounceProbe.tick(this.mc, this.state.name(), BaritoneHook.isFlying());
+        PlayerAction.forceNoSneak();
+        if (this.takeoffFlowHoldTicks > 0 && --this.takeoffFlowHoldTicks == 0) {
+            FOElytraLog.detail("\u8d77\u98de\u6d41\u7a0b\u4e92\u65a5\u89e3\u9664\uff08%s \u5df2\u7ed3\u675f %d tick\uff09", this.takeoffFlowOwner, 20);
+            this.takeoffFlowOwner = "";
+        }
+        if (this.tickCounter % 600 == 0) {
+            BaritoneHook.installSegFailLogger();
+        }
+        if (this.supplyCooldown > 0) {
+            --this.supplyCooldown;
+        }
+        if (this.mendCooldown > 0) {
+            --this.mendCooldown;
+        }
+        if (this.supplyHurtNoLand > 0) {
+            --this.supplyHurtNoLand;
+        }
+        if (this.exhaustedCooldown > 0 && --this.exhaustedCooldown == 0) {
+            FOElytraLog.info("\u8865\u7ed9\u91cd\u8bd5\u51b7\u5374\u7ed3\u675f\uff08\u4e4b\u524d\u5224\u5b9a\u53d6\u5149\u7684\uff1a%s\uff09\uff0c\u4e0b\u6b21\u4ecd\u4f1a\u53bb\u672b\u5f71\u7bb1\u7ffb\u4e00\u904d", this.describeExhausted());
+            this.exhaustedItems.clear();
+            this.foodExhaustedCache = false;
+        }
+        boolean bl = lavaHoldNow = this.mc.player != null && this.mc.player.isInLava();
+        if (lavaHoldNow) {
+            this.eatHoldTicks = 60;
+            if (this.eat.isEating()) {
+                FOElytraLog.detail("\u5728\u5ca9\u6d46\u91cc\uff0c\u5148\u505c\u4e0b\u8fdb\u98df\uff08\u5403\u4e86\u4e5f\u6ca1\u7528\uff0c\u7b49\u51fa\u6765\u518d\u5403\uff09", new Object[0]);
+                this.eat.stop();
             }
+        } else if (this.eatHoldTicks > 0) {
+            --this.eatHoldTicks;
         }
-
-        ensureLava();
-        ensureLavaPredictor();
-        manualKeyTick();
-        baritoneKeyTick();
-        infinityElytraTick();
-
-        lavaTick();
-        lavaViewHoldTick();
-
-        boolean busy = state == State.SUPPLY || state == State.MEND;
-        boolean guiOpen = InvHelper.screenOpen();
-
-        if (guiOpen) PlayerAction.restoreHeldKeys();
-
-        boolean escaping = lavaEscaping() || (lavaPredictor != null && lavaPredictor.isAvoiding());
-        if (!busy && !guiOpen && !escaping) {
-
-            fireballTick();
-            eat.tick(autoEat.get(), hungerThreshold.get(), healthThreshold.get(),
-                eatWhileGliding.get(), eatMinRise.get(), foodWhitelist.get(), foodPriorityList());
-        } else if (eat.isEating() && (guiOpen || escaping)) {
-            eat.stop();
+        this.ensureLava();
+        this.ensureLavaPredictor();
+        if (this.tickCounter % 20 == 0) {
+            this.applyNetherSeedPause();
         }
-
-        if (autoRestock.get() && !busy && !guiOpen && !escaping) {            restocker.tick(restockItems.get(), restockStacks.get(), restockKeepHeld.get(), restockInterval.get());
-        }
-
-        safetyTick();
-        statusHeartbeat();
-        takeoffFireworkTick();
-
-        if (stuckEscapeActive()) {
-            stuckEscapeTick();
+        this.manualKeyTick();
+        this.baritoneKeyTick();
+        this.infinityElytraTick();
+        boolean inLavaNow = this.mc.player != null && this.mc.player.isInLava();
+        this.lavaTick();
+        this.autoMendTick();
+        this.inputStuckTick();
+        if (this.lavaEscaping() || inLavaNow && ((Boolean)this.lavaEscape.get()).booleanValue()) {
+            if (!this.lavaPriorityActive) {
+                this.lavaPriorityActive = true;
+                BaritoneHook.stop();
+                BlockBreaker.cancel();
+                PlayerAction.releaseAll();
+                FOElytraLog.warn("\u5ca9\u6d46\u4f18\u5148\uff1a\u6682\u505c\u5176\u5b83\u6d41\u7a0b\uff08\u5f53\u524d\u72b6\u6001 %s\uff0c\u5728\u5ca9\u6d46\u91cc %s\uff0c\u6ed1\u7fd4 %s\uff09", new Object[]{this.state, inLavaNow ? "\u662f" : "\u5426", this.mc.player.isGliding() ? "\u662f" : "\u5426"});
+            }
+            if (this.eat.isEating()) {
+                this.eat.stop();
+            }
             return;
         }
-
-        switch (state) {
-            case PREPARE -> prepare();
-            case TAKEOFF -> takeoff();
-            case FLYING -> flying();
-            case LANDING -> landing();
-            case SUPPLY -> supplyTick();
-            case MEND -> mendTick();
-            case DONE, FAILED -> {
-
+        if (this.lavaPriorityActive) {
+            this.lavaPriorityActive = false;
+            FOElytraLog.info("\u5ca9\u6d46\u4f18\u5148\u7ed3\u675f\uff1a\u6062\u590d\u539f\u6765\u7684\u6d41\u7a0b\uff08\u72b6\u6001 %s\uff09", new Object[]{this.state});
+        }
+        boolean busy = this.state == State.SUPPLY || this.state == State.MEND;
+        boolean guiOpen = InvHelper.screenOpen();
+        if (guiOpen) {
+            PlayerAction.restoreHeldKeys();
+        }
+        if (this.state == State.RECOVER) {
+            this.recoverTick();
+            return;
+        }
+        boolean bl2 = escaping = this.lavaEscaping() || this.lavaPredictor != null && this.lavaPredictor.isAvoiding();
+        if (this.eat.isEating() && this.fireballs.isEngaging() && !this.fireballs.pausedBaritone()) {
+            FOElytraLog.detail("\u6709\u706b\u7403\u8981\u62e6\u622a\uff1a\u5148\u505c\u4e0b\u8fdb\u98df\uff08\u514d\u5f97\u8fdb\u98df\u7ed3\u675f\u65f6\u628a\u62e6\u622a\u7684\u6682\u505c\u9876\u6389\uff09", new Object[0]);
+            this.eat.stop();
+        }
+        if (!(busy || guiOpen || escaping || this.eatHoldTicks > 0 || this.pausedByPlayer || this.fireballs.isEngaging())) {
+            this.fireballTick();
+            this.eat.tick((Boolean)this.autoEat.get(), (Integer)this.hungerThreshold.get(), (Double)this.healthThreshold.get(), (Boolean)this.eatWhileGliding.get(), (Double)this.eatMinRise.get(), (List)this.foodWhitelist.get(), this.foodPriorityList());
+        } else if (this.eat.isEating() && (guiOpen || escaping)) {
+            this.eat.stop();
+        }
+        if (((Boolean)this.autoRestock.get()).booleanValue() && !busy && !guiOpen && !escaping) {
+            this.restocker.tick((List)this.restockItems.get(), (Integer)this.restockStacks.get(), (Boolean)this.restockKeepHeld.get(), (Integer)this.restockInterval.get());
+        }
+        if (((Boolean)this.junkDrop.get()).booleanValue() && !busy && !guiOpen && !escaping && this.tickCounter % 10 == 0) {
+            this.junkDropper.tick(true, (Boolean)this.junkOnlyLava.get(), (Integer)this.junkRadius.get(), (List)this.junkItems.get(), this.junkProtectedExtras(), this.tickCounter);
+        }
+        this.safetyTick();
+        this.statusHeartbeat();
+        switch (this.state.ordinal()) {
+            case 1: {
+                this.prepare();
+                break;
             }
-            case IDLE -> state = State.PREPARE;
+            case 2: {
+                this.takeoff();
+                break;
+            }
+            case 3: {
+                this.flying();
+                break;
+            }
+            case 4: {
+                this.landing();
+                break;
+            }
+            case 5: {
+                this.supplyTick();
+                break;
+            }
+            case 6: {
+                this.mendTick();
+                break;
+            }
+            case 7: {
+                this.recoverTick();
+                break;
+            }
+            case 8: 
+            case 9: {
+                break;
+            }
+            case 0: {
+                this.state = State.PREPARE;
+            }
         }
     }
 
     private void manualKeyTick() {
-        boolean supplyPressed = supplyKey.get() != null && supplyKey.get().isPressed();
-        if (supplyPressed && !supplyKeyWasPressed
-            && state != State.SUPPLY && state != State.MEND && state != State.LANDING) {
-            manualTask = true;
-            if (startSupply()) FOElytraLog.info("手动触发补给");
-            else manualTask = false;
+        boolean mendPressed;
+        boolean supplyPressed;
+        boolean bl = supplyPressed = this.supplyKey.get() != null && ((Keybind)this.supplyKey.get()).isPressed();
+        if (supplyPressed && !this.supplyKeyWasPressed && this.state != State.SUPPLY && this.state != State.MEND && this.state != State.LANDING) {
+            this.manualTask = true;
+            if (this.startSupply()) {
+                FOElytraLog.info("\u624b\u52a8\u89e6\u53d1\u8865\u7ed9", new Object[0]);
+            } else {
+                this.manualTask = false;
+            }
         }
-        supplyKeyWasPressed = supplyPressed;
-
-        boolean mendPressed = mendKey.get() != null && mendKey.get().isPressed();
-        if (mendPressed && !mendKeyWasPressed
-            && state != State.SUPPLY && state != State.MEND && state != State.LANDING) {
-            manualTask = true;
-            if (startMend()) FOElytraLog.info("手动触发修鞘翅");
-            else manualTask = false;
+        this.supplyKeyWasPressed = supplyPressed;
+        boolean bl2 = mendPressed = this.mendKey.get() != null && ((Keybind)this.mendKey.get()).isPressed();
+        if (mendPressed && !this.mendKeyWasPressed && this.state != State.SUPPLY && this.state != State.MEND && this.state != State.LANDING) {
+            this.manualTask = true;
+            if (this.startMend()) {
+                FOElytraLog.info("\u624b\u52a8\u89e6\u53d1\u4fee\u9798\u7fc5", new Object[0]);
+            } else {
+                this.manualTask = false;
+            }
         }
-        mendKeyWasPressed = mendPressed;
+        this.mendKeyWasPressed = mendPressed;
     }
 
     private void prepare() {
         if (!BaritoneHook.available()) {
-            fail("Baritone 不可用");
+            this.fail("Baritone \u4e0d\u53ef\u7528");
             return;
         }
-        if (!ensureElytraWorn()) {
-
-            if (noElytraWaitTicks++ < noElytraWaitSec.get() * 20) {
-                if (noElytraWaitTicks == 1 || noElytraWaitTicks % 100 == 0) {
-                    FOElytraLog.warn("身上没有可用的鞘翅：先等你穿上或等物品栏同步（已等 %d 秒，最多 %d 秒）。"
-                        + "等满后才会判失败，这条失败不会自动登出。",
-                        noElytraWaitTicks / 20, noElytraWaitSec.get());
+        if (!this.ensureElytraWorn()) {
+            if (this.noElytraWaitTicks++ < (Integer)this.noElytraWaitSec.get() * 20) {
+                if (this.noElytraWaitTicks == 1 || this.noElytraWaitTicks % 100 == 0) {
+                    FOElytraLog.warn("\u8eab\u4e0a\u6ca1\u6709\u53ef\u7528\u7684\u9798\u7fc5\uff1a\u5148\u7b49\u4f60\u7a7f\u4e0a\u6216\u7b49\u7269\u54c1\u680f\u540c\u6b65\uff08\u5df2\u7b49 %d \u79d2\uff0c\u6700\u591a %d \u79d2\uff09\u3002\u7b49\u6ee1\u540e\u624d\u4f1a\u5224\u5931\u8d25\uff0c\u8fd9\u6761\u5931\u8d25\u4e0d\u4f1a\u81ea\u52a8\u767b\u51fa\u3002", this.noElytraWaitTicks / 20, this.noElytraWaitSec.get());
                 }
                 return;
             }
-            noElytraWaitTicks = 0;
-            failNoLogout("没有任何可用的鞘翅（等了 " + noElytraWaitSec.get() + " 秒仍没穿上）");
+            this.noElytraWaitTicks = 0;
+            this.failNoLogout("\u6ca1\u6709\u4efb\u4f55\u53ef\u7528\u7684\u9798\u7fc5\uff08\u7b49\u4e86 " + String.valueOf(this.noElytraWaitSec.get()) + " \u79d2\u4ecd\u6ca1\u7a7f\u4e0a\uff09");
             return;
         }
-        noElytraWaitTicks = 0;
-
-        if (segmentTarget == null && !chooseNextTarget()) {
-            finish("所有航点已完成");
+        this.noElytraWaitTicks = 0;
+        if (this.segmentTarget == null && !this.chooseNextTarget()) {
+            this.finish("\u6240\u6709\u822a\u70b9\u5df2\u5b8c\u6210");
             return;
         }
-
-        if (InvHelper.screenOpen()) {
-            waitTicks++;
-            if (waitTicks == 1) {
-                FOElytraLog.info("检测到你开着界面：我先等你关掉再继续（补给/起飞已暂停）。"
-                    + "我不会替你关界面；不想跑了就再按一次模块快捷键关掉它。");
-            } else if (waitTicks % 200 == 0) {
-                FOElytraLog.warn("仍在等你关闭界面（已等 %d 秒）——关掉界面我就继续；不想等就按快捷键关掉模块", waitTicks / 20);
-            }
+        if (this.waitForUserScreen("\u51c6\u5907\u8d77\u98de/\u98de\u884c")) {
             return;
         }
-        waitTicks = 0;
-
-        boolean lavaNow = lavaDanger();
-
-        if (!lavaNow && autoSupply.get() && supplyBeforeSegment.get() && supplyCooldown <= 0) {
-            String need = supplyNeedText();
+        this.waitTicks = 0;
+        boolean lavaNow = this.lavaDanger();
+        if (!lavaNow && ((Boolean)this.autoSupply.get()).booleanValue() && ((Boolean)this.supplyBeforeSegment.get()).booleanValue() && this.supplyCooldown <= 0) {
+            String need = this.supplyNeedText();
             if (!need.isEmpty()) {
-                FOElytraLog.info("所需补给：%s", need);
-
-                String stock = supplyStockSignature(need);
-                if (stock.equals(lastSupplyStockSignature)) {
-                    supplyNoProgressRounds++;
+                FOElytraLog.info("\u6240\u9700\u8865\u7ed9\uff1a%s", need);
+                String stock = this.supplyStockSignature(need);
+                if (stock.equals(this.lastSupplyStockSignature)) {
+                    ++this.supplyNoProgressRounds;
                 } else {
-                    lastSupplyStockSignature = stock;
-                    supplyNoProgressRounds = 0;
+                    this.lastSupplyStockSignature = stock;
+                    this.supplyNoProgressRounds = 0;
                 }
-
-                if (supplyNoProgressRounds >= SUPPLY_NO_PROGRESS_LIMIT) {
-                    registerUnobtainableFromNeed(need);
-                    lastSupplyStockSignature = "";
-                    supplyNoProgressRounds = 0;
-                    supplyCooldown = supplyRetryDelay.get();
+                if (this.supplyNoProgressRounds >= 1) {
+                    this.registerUnobtainableFromNeed(need);
+                    this.lastSupplyStockSignature = "";
+                    this.supplyNoProgressRounds = 0;
+                    this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
                     return;
                 }
-                if (startSupply()) return;
-                supplyCooldown = supplyRetryDelay.get();
-            } else {
-                lastSupplyStockSignature = "";
-                supplyNoProgressRounds = 0;
-            }
-        }
-
-        if (!lavaNow && autoSupply.get() && fullSupplyOnStart.get() && !startFullSupplyDone && supplyCooldown <= 0) {
-            if (fullSupplyNeeded()) {
-                if (startSupply()) {
-                    startFullSupplyDone = true;
-                    startFullSupplyPending = true;
-                    FOElytraLog.info("任务开始：先补满物资再起飞（%s）→ %s", supplyReason(), fullSupplyGap());
+                if (this.startSupply()) {
                     return;
                 }
-                startFullSupplyDone = true;
+                this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
             } else {
-                startFullSupplyDone = true;
-                FOElytraLog.info("任务开始：物资够用，直接起飞（差额：%s）", fullSupplyGap());
+                this.lastSupplyStockSignature = "";
+                this.supplyNoProgressRounds = 0;
             }
         }
-
-        if (!lavaNow && supplyBeforeSegment.get() && autoSupply.get() && supplyNeeded() && supplyCooldown <= 0) {
-            FOElytraLog.info("起飞前检查：%s", supplyReason());
-            if (startSupply()) return;
-            supplyCooldown = supplyRetryDelay.get();
+        if (!lavaNow && ((Boolean)this.autoSupply.get()).booleanValue() && ((Boolean)this.fullSupplyOnStart.get()).booleanValue() && !this.startFullSupplyDone && this.supplyCooldown <= 0) {
+            if (this.fullSupplyNeeded()) {
+                if (this.startSupply()) {
+                    this.startFullSupplyDone = true;
+                    this.startFullSupplyPending = true;
+                    FOElytraLog.info("\u4efb\u52a1\u5f00\u59cb\uff1a\u5148\u8865\u6ee1\u7269\u8d44\u518d\u8d77\u98de\uff08%s\uff09\u2192 %s", this.supplyReason(), this.fullSupplyGap());
+                    return;
+                }
+                this.startFullSupplyDone = true;
+            } else {
+                this.startFullSupplyDone = true;
+                FOElytraLog.info("\u4efb\u52a1\u5f00\u59cb\uff1a\u7269\u8d44\u591f\u7528\uff0c\u76f4\u63a5\u8d77\u98de\uff08\u5dee\u989d\uff1a%s\uff09", this.fullSupplyGap());
+            }
         }
-        if (!lavaNow && autoMend.get() && mendCooldown <= 0 && MendTask.shouldRepair(mendDurability.get())) {
-            if (startMend()) return;
-            mendCooldown = 100;
+        if (!lavaNow && ((Boolean)this.supplyBeforeSegment.get()).booleanValue() && ((Boolean)this.autoSupply.get()).booleanValue() && this.supplyNeeded() && this.supplyCooldown <= 0) {
+            FOElytraLog.info("\u8d77\u98de\u524d\u68c0\u67e5\uff1a%s", this.supplyReason());
+            if (this.startSupply()) {
+                return;
+            }
+            this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
         }
-
-        flightSettingsApplied = false;
-        takeoffTicks = 0;
-        takeoffAutoJumpUsed = false;
-        takeoffPhase = TakeoffPhase.INIT;
-        jumpSeq = 0;
-        jumpAttempts = 0;
-        openTriesDone = 0;
-        openEnd = null;
-        clearingHead = false;
-        glidingLostTicks = 0;
-        ascendingSearch = false;
-        searchYh = 0.0;
-        openSearchFails = 0;
-        waitTicks = 0;
-        takeoffCeilingChecked = false;
-        stuckNow = false;
-        stuckTracker.reset();
-        stuckFireworkHold = false;
-        state = State.TAKEOFF;
+        if (!lavaNow && ((Boolean)this.autoMend.get()).booleanValue() && this.mendCooldown <= 0 && MendTask.shouldRepair((Integer)this.mendDurability.get())) {
+            if (this.startMend()) {
+                return;
+            }
+            this.mendCooldown = 100;
+        }
+        this.flightSettingsApplied = false;
+        this.takeoffTicks = 0;
+        this.takeoffAutoJumpUsed = false;
+        this.takeoffPhase = TakeoffPhase.INIT;
+        this.jumpSeq = 0;
+        this.jumpAttempts = 0;
+        this.openTriesDone = 0;
+        this.openEnd = null;
+        this.clearingHead = false;
+        this.glidingLostTicks = 0;
+        this.resetFakeGlideRecovery();
+        this.ascendingSearch = false;
+        this.searchYh = 0.0;
+        this.openSearchFails = 0;
+        this.waitTicks = 0;
+        this.state = State.TAKEOFF;
     }
 
     private void warnConflicts() {
-        if (mc.player == null) return;
-        List<String> flight = new ArrayList<>();
-        List<String> items = new ArrayList<>();
+        if (this.mc.player == null) {
+            return;
+        }
+        ArrayList<String> flight = new ArrayList<String>();
+        ArrayList<String> items = new ArrayList<String>();
         try {
             for (Module m : Modules.get().getAll()) {
                 if (!m.isActive()) continue;
-                if (CONFLICT_FLIGHT.contains(m.name)) flight.add(m.name);
-                else if (CONFLICT_ITEMS.contains(m.name)) items.add(m.name);
+                if (CONFLICT_FLIGHT.contains(m.name)) {
+                    flight.add(m.name);
+                    continue;
+                }
+                if (!CONFLICT_ITEMS.contains(m.name)) continue;
+                items.add(m.name);
             }
-        } catch (Throwable t) {
+        }
+        catch (Throwable t) {
             return;
         }
         if (!flight.isEmpty()) {
-            warning("检测到同时开启的飞行模块 %s —— 它们会和本模块抢鞘翅控制，建议只留一个。", flight);
+            this.warning("\u68c0\u6d4b\u5230\u540c\u65f6\u5f00\u542f\u7684\u98de\u884c\u6a21\u5757 %s \u2014\u2014 \u5b83\u4eec\u4f1a\u548c\u672c\u6a21\u5757\u62a2\u9798\u7fc5\u63a7\u5236\uff0c\u5efa\u8bae\u53ea\u7559\u4e00\u4e2a\u3002", new Object[]{flight});
         }
         if (!items.isEmpty()) {
-            warning("检测到同时开启的 %s —— 它们会和本模块抢右键/物品栏（本模块自带进食、修鞘翅与烟花补充），建议关掉。", items);
+            this.warning("\u68c0\u6d4b\u5230\u540c\u65f6\u5f00\u542f\u7684 %s \u2014\u2014 \u5b83\u4eec\u4f1a\u548c\u672c\u6a21\u5757\u62a2\u53f3\u952e/\u7269\u54c1\u680f\uff08\u672c\u6a21\u5757\u81ea\u5e26\u8fdb\u98df\u3001\u4fee\u9798\u7fc5\u4e0e\u70df\u82b1\u8865\u5145\uff09\uff0c\u5efa\u8bae\u5173\u6389\u3002", new Object[]{items});
         }
     }
 
     private boolean ensureElytraWorn() {
-        ItemStack worn = ItemHelper.wornElytra(mc.player);
-        if (!worn.isEmpty() && !isBroken(worn)) return true;
-        if (InvHelper.screenOpen()) return true;
-
-        if (!worn.isEmpty() && isBroken(worn)) {
-            InvHelper.click(mc.player.currentScreenHandler, 6, 0, SlotActionType.QUICK_MOVE);
-            FOElytraLog.warn("胸甲槽里的鞘翅已经用坏了（耐久 0），先取下来");
-        }
-
-        int slot = InvHelper.findSlot(s -> s.isOf(Items.ELYTRA) && !isBroken(s), 0, 36);
-        if (slot < 0) return false;
-        InvHelper.clickPlayerInv(slot, 0, SlotActionType.QUICK_MOVE);
-        ItemStack after = ItemHelper.wornElytra(mc.player);
-        if (!after.isEmpty() && !isBroken(after)) {
-            FOElytraLog.tip("已自动穿上鞘翅（剩余耐久 %d）", ItemHelper.remainingDurability(after));
+        int slot;
+        ItemStack worn = ItemHelper.wornElytra((PlayerEntity)this.mc.player);
+        if (!worn.isEmpty() && !AutoElytraFlight.isBroken(worn)) {
             return true;
         }
-        FOElytraLog.warn("鞘翅没穿上（胸甲槽里是不是有别的盔甲？），先脱掉再试");
+        if (InvHelper.screenOpen()) {
+            return true;
+        }
+        if (!worn.isEmpty() && AutoElytraFlight.isBroken(worn)) {
+            InvHelper.click(this.mc.player.currentScreenHandler, 6, 0, SlotActionType.QUICK_MOVE);
+            FOElytraLog.warn("\u80f8\u7532\u69fd\u91cc\u7684\u9798\u7fc5\u5df2\u7ecf\u7528\u574f\u4e86\uff08\u8010\u4e45 0\uff09\uff0c\u5148\u53d6\u4e0b\u6765", new Object[0]);
+        }
+        if ((slot = InvHelper.findSlot(s -> s.isOf(Items.ELYTRA) && !AutoElytraFlight.isBroken(s), 0, 36)) < 0) {
+            return false;
+        }
+        InvHelper.clickPlayerInv(slot, 0, SlotActionType.QUICK_MOVE);
+        ItemStack after = ItemHelper.wornElytra((PlayerEntity)this.mc.player);
+        if (!after.isEmpty() && !AutoElytraFlight.isBroken(after)) {
+            FOElytraLog.tip("\u5df2\u81ea\u52a8\u7a7f\u4e0a\u9798\u7fc5\uff08\u5269\u4f59\u8010\u4e45 %d\uff09", ItemHelper.remainingDurability(after));
+            return true;
+        }
+        FOElytraLog.warn("\u9798\u7fc5\u6ca1\u7a7f\u4e0a\uff08\u80f8\u7532\u69fd\u91cc\u662f\u4e0d\u662f\u6709\u522b\u7684\u76d4\u7532\uff1f\uff09\uff0c\u5148\u8131\u6389\u518d\u8bd5", new Object[0]);
         return false;
     }
 
@@ -1486,515 +1436,602 @@ public class AutoElytraFlight extends FOElytraModule {
     }
 
     private boolean chooseNextTarget() {
-
-        if (lavaPredictor != null) lavaPredictor.reset();
-        switch (mode.get()) {
-            case SingleTarget -> {
-                segmentTarget = new BlockPos(targetX.get(), 0, targetZ.get());
-                FOElytraLog.info("目标坐标：%d, %d", targetX.get(), targetZ.get());
+        if (this.lavaPredictor != null) {
+            this.lavaPredictor.reset();
+        }
+        switch (((Mode)((Object)this.mode.get())).ordinal()) {
+            case 1: {
+                this.segmentTarget = new BlockPos(((Integer)this.targetX.get()).intValue(), 0, ((Integer)this.targetZ.get()).intValue());
+                FOElytraLog.info("\u76ee\u6807\u5750\u6807\uff1a%d, %d", this.targetX.get(), this.targetZ.get());
                 return true;
             }
-            case Direction -> {
-                if (!directionInitialised) {
-
-                    directionInitialised = true;
-                    directionFrozen = mc.player.getYaw();
-                    FOElytraLog.info("定向跑图方向已锁定：%.0f°（%s）。想换方向请转头后重新开关模块。",
-                        directionFrozen, headingName(directionFrozen));
+            case 2: {
+                if (!this.directionInitialised) {
+                    this.directionInitialised = true;
+                    this.directionFrozen = this.mc.player.getYaw();
+                    FOElytraLog.info("\u5b9a\u5411\u8dd1\u56fe\u65b9\u5411\u5df2\u9501\u5b9a\uff1a%.0f\u00b0\uff08%s\uff09\u3002\u60f3\u6362\u65b9\u5411\u8bf7\u8f6c\u5934\u540e\u91cd\u65b0\u5f00\u5173\u6a21\u5757\u3002", Float.valueOf(this.directionFrozen), AutoElytraFlight.headingName(this.directionFrozen));
                 }
-                double rad = Math.toRadians(directionFrozen);
-                int dx = (int) Math.round(-Math.sin(rad) * segmentDistance.get());
-                int dz = (int) Math.round(Math.cos(rad) * segmentDistance.get());
-
-                segmentTarget = new BlockPos(mc.player.getBlockX() + dx, 0, mc.player.getBlockZ() + dz);
-                FOElytraLog.info("定向跑图下一段：%d, %d（方向 %.0f° %s）",
-                    segmentTarget.getX(), segmentTarget.getZ(), directionFrozen, headingName(directionFrozen));
-                return true;
-            }
-            default -> {
-                if (route.isEmpty()) {
-                    route.addAll(parseWaypoints());
-                    if (route.isEmpty()) {
-                        fail("航点列表为空（格式应为 x,z）");
-                        return false;
-                    }
-                }
-                if (routeIndex >= route.size()) {
-                    if (!loop.get()) return false;
-                    routeIndex = 0;
-                }
-                segmentTarget = route.get(routeIndex);
-                FOElytraLog.info("第 %d/%d 个航点：%d, %d", routeIndex + 1, route.size(),
-                    segmentTarget.getX(), segmentTarget.getZ());
-                routeIndex++;
+                double rad = Math.toRadians(this.directionFrozen);
+                int dx = (int)Math.round(-Math.sin(rad) * (double)((Integer)this.segmentDistance.get()).intValue());
+                int dz = (int)Math.round(Math.cos(rad) * (double)((Integer)this.segmentDistance.get()).intValue());
+                this.segmentTarget = new BlockPos(this.mc.player.getBlockX() + dx, 0, this.mc.player.getBlockZ() + dz);
+                FOElytraLog.info("\u5b9a\u5411\u8dd1\u56fe\u4e0b\u4e00\u6bb5\uff1a%d, %d\uff08\u65b9\u5411 %.0f\u00b0 %s\uff09", this.segmentTarget.getX(), this.segmentTarget.getZ(), Float.valueOf(this.directionFrozen), AutoElytraFlight.headingName(this.directionFrozen));
                 return true;
             }
         }
+        if (this.route.isEmpty()) {
+            this.route.addAll(this.parseWaypoints());
+            if (this.route.isEmpty()) {
+                this.fail("\u822a\u70b9\u5217\u8868\u4e3a\u7a7a\uff08\u683c\u5f0f\u5e94\u4e3a x,z\uff09");
+                return false;
+            }
+        }
+        if (this.routeIndex >= this.route.size()) {
+            if (!((Boolean)this.loop.get()).booleanValue()) {
+                return false;
+            }
+            this.routeIndex = 0;
+        }
+        this.segmentTarget = this.route.get(this.routeIndex);
+        FOElytraLog.info("\u7b2c %d/%d \u4e2a\u822a\u70b9\uff1a%d, %d", this.routeIndex + 1, this.route.size(), this.segmentTarget.getX(), this.segmentTarget.getZ());
+        ++this.routeIndex;
+        return true;
     }
 
     private List<BlockPos> parseWaypoints() {
-        List<BlockPos> list = new ArrayList<>();
-        for (String raw : waypoints.get()) {
-            if (raw == null) continue;
-            String line = raw.trim();
-            if (line.isEmpty()) continue;
+        ArrayList<BlockPos> list = new ArrayList<BlockPos>();
+        for (String raw : this.waypoints.get()) {
+            String line;
+            if (raw == null || (line = raw.trim()).isEmpty()) continue;
             String[] parts = line.split("[,\\s]+");
             if (parts.length < 2) {
-                FOElytraLog.warn("航点格式无法识别：%s", line);
+                FOElytraLog.warn("\u822a\u70b9\u683c\u5f0f\u65e0\u6cd5\u8bc6\u522b\uff1a%s", line);
                 continue;
             }
             try {
                 list.add(new BlockPos(Integer.parseInt(parts[0].trim()), 0, Integer.parseInt(parts[1].trim())));
-            } catch (NumberFormatException e) {
-                FOElytraLog.warn("航点数字解析失败：%s", line);
+            }
+            catch (NumberFormatException e) {
+                FOElytraLog.warn("\u822a\u70b9\u6570\u5b57\u89e3\u6790\u5931\u8d25\uff1a%s", line);
             }
         }
         return list;
     }
 
     private void takeoff() {
-        if (segmentTarget == null) {
+        if (this.segmentTarget == null) {
             PlayerAction.pressJump(false);
-            state = State.PREPARE;
+            this.state = State.PREPARE;
             return;
         }
-
-        if (lavaEscaping()) return;
-
-        if (InvHelper.screenOpen()) {
-            waitTicks++;
-            if (waitTicks == 1) FOElytraLog.info("检测到你开着界面，等你关掉再继续（起飞已暂停）");
-            else if (waitTicks % 200 == 0) FOElytraLog.warn("仍在等你关闭界面（起飞已等 %d 秒）", waitTicks / 20);
+        if (this.lavaEscaping()) {
             return;
         }
-        waitTicks = 0;
-
-        if (stuckEscape.get() && !takeoffCeilingChecked) {
-            takeoffCeilingChecked = true;
-            if (StuckEscape.ceilingBlocked(mc.world, mc.player.getBlockPos(), STUCK_CEILING_UP)) {
-                FOElytraLog.warn("起飞位置头顶被堵（在洞里/顶到天花板）：先出去再起飞，别原地怼天花板");
-                stuckNow = true;
-                if (beginStuckEscape("起飞位置封顶")) return;
-            }
+        if (this.waitForUserScreen("\u8d77\u98de")) {
+            return;
         }
-
-        if (!flightSettingsApplied) {
-            flightSettingsApplied = true;
-
-            baritoneAutoJumpForced = true;
-            BaritoneHook.applyFlightSettings(false, btFireworkSpeed.get(), btAllowEmergencyLand.get());
-
-            if (!lavaEscaping()) mc.player.setPitch(takeoffPitch.get().floatValue());
-            if (!BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ())) {
-                fail("Baritone 拒绝规划鞘翅路线");
+        this.waitTicks = 0;
+        if (!this.flightSettingsApplied) {
+            this.flightSettingsApplied = true;
+            int fwStacksNow = ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET));
+            if ((Integer)this.minFireworkStacks.get() > 0 && fwStacksNow < (Integer)this.minFireworkStacks.get()) {
+                FOElytraLog.err("\u6ca1\u6709\u70df\u82b1\uff0c\u4e0d\u80fd\u8d77\u98de\uff08\u968f\u8eab\u53ea\u6709 %d \u7ec4\uff0c\u6700\u4f4e\u8981 %d \u7ec4\uff0c\u8865\u7ed9\u4e5f\u6ca1\u8865\u4e0a\uff09\u2192 \u505c\u624b\uff0c\u5f80\u672b\u5f71\u7bb1\u91cc\u8865\u70df\u82b1\u6216\u624b\u52a8\u62ff\u51fa\u6765\u518d\u5f00\uff1b0 \u70df\u82b1\u8d77\u98de\u53ea\u4f1a\u6ed1\u7fd4\u8fdb\u5ca9\u6d46/\u6454\u6b7b", fwStacksNow, this.minFireworkStacks.get());
+                PlayerAction.pressJump(false);
+                PlayerAction.pressUse(false);
+                PlayerAction.pressForward(false);
+                PlayerAction.restoreHeldKeys();
+                BaritoneHook.stop();
+                if (this.beginRecover("\u6ca1\u6709\u70df\u82b1\u4e0d\u80fd\u8d77\u98de", RecoverAfter.IDLE)) {
+                    FOElytraLog.warn("\u5148\u8d70\u5f52\u4f4d\uff1a\u628a\u653e\u4e0b\u7684\u672b\u5f71\u7bb1\u548c\u6f5c\u5f71\u76d2\u6536\u56de\u6765\uff0c\u6536\u5b8c\u5c31\u505c\u624b\uff08\u4e0d\u786c\u8d77\u98de\uff09", new Object[0]);
+                    return;
+                }
+                this.failNoLogout("\u6ca1\u6709\u70df\u82b1\u4e0d\u80fd\u8d77\u98de\uff08\u968f\u8eab " + fwStacksNow + " \u7ec4\uff0c\u6700\u4f4e\u8981 " + String.valueOf(this.minFireworkStacks.get()) + " \u7ec4\uff09");
                 return;
             }
-            takeoffDelayTicks = 15;
-            takeoffPhase = TakeoffPhase.LAUNCH;
-            if (forceFlyToOpen) {
-
-                forceFlyToOpen = false;
-                takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
-                FOElytraLog.info("复飞：直接进入「飞往开阔地」流程");
+            this.baritoneAutoJumpForced = true;
+            BaritoneHook.applyFlightSettings((Boolean)this.takeoffByBaritone.get(), 0.5, (Boolean)this.infinityElytra.get() != false ? false : (Boolean)this.btAllowEmergencyLand.get());
+            this.lastForcedAutoJump = (Boolean)this.takeoffByBaritone.get();
+            if (!this.allowReplan("\u8d77\u98de")) {
+                FOElytraLog.detail("\u8d77\u98de\u9996\u6bb5\u91cd\u89c4\u5212\u88ab\u8282\u6d41\u8df3\u8fc7\uff0c\u4ea4\u7ed9\u540e\u9762\u7684\u6389\u7ebf\u91cd\u89c4\u5212\u515c\u5e95", new Object[0]);
+            } else if (!BaritoneHook.pathTo(this.segmentTarget.getX(), this.segmentTarget.getZ())) {
+                this.fail("Baritone \u62d2\u7edd\u89c4\u5212\u9798\u7fc5\u8def\u7ebf");
+                return;
             }
-            takeoffTicks = 0;
-            jumpAttempts = 0;
-            openTriesDone = 0;
-            openEnd = null;
-            clearingHead = false;
-            jumpSeq = 0;
-            glidingLostTicks = 0;
-            takeoffFireworksUsed = 0;
-            takeoffFireworkCooldown = 0;
-            takeoffFireworkY = Double.NaN;
-
-            FOElytraLog.info("开始起飞：位置 %d %d %d｜地面 %s｜滑翔 %s｜头顶被挡 %s｜烟花 %d 发",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
-                mc.player.isOnGround() ? "是" : "否",
-                mc.player.isGliding() ? "是" : "否",
-                blockingBlocks(1).isEmpty() ? "否" : "是",
-                ItemHelper.countInHotbar(mc.player, Items.FIREWORK_ROCKET));
+            this.takeoffDelayTicks = 15;
+            this.takeoffPhase = TakeoffPhase.LAUNCH;
+            if (this.forceFlyToOpen) {
+                this.forceFlyToOpen = false;
+                this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+                FOElytraLog.info("\u590d\u98de\uff1a\u76f4\u63a5\u8fdb\u5165\u300c\u98de\u5f80\u5f00\u9614\u5730\u300d\u6d41\u7a0b", new Object[0]);
+            }
+            this.takeoffTicks = 0;
+            this.jumpAttempts = 0;
+            this.openTriesDone = 0;
+            this.openEnd = null;
+            this.clearingHead = false;
+            this.jumpSeq = 0;
+            this.glidingLostTicks = 0;
+            this.resetFakeGlideRecovery();
+            PlayerAction.clearStuckSneak();
+            FOElytraLog.info("\u5f00\u59cb\u8d77\u98de\uff1a\u4f4d\u7f6e %d %d %d\uff5c\u5730\u9762 %s\uff5c\u6ed1\u7fd4 %s\uff5c\u5934\u9876\u88ab\u6321 %s\uff5c\u70df\u82b1 %d \u53d1", this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ(), this.mc.player.isOnGround() ? "\u662f" : "\u5426", this.mc.player.isGliding() ? "\u662f" : "\u5426", AutoElytraFlight.blockingBlocks(1).isEmpty() ? "\u5426" : "\u662f", ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET));
         }
-
-        takeoffTicks++;
-
-        if (baritoneControlling()) {
-            takeoffSucceeded();
+        ++this.takeoffTicks;
+        if (this.baritoneControlling()) {
+            this.takeoffSucceeded();
             return;
         }
-
-        int budget = Math.max(600, takeoffTimeout.get() * 5);
-        if (autoTakeoff.get() && takeoffTicks > budget) {
-
-            takeoffFallbackOrFail(String.format("起飞流程跑了 %d tick（%.0f 秒）Baritone 仍未接管",
-                takeoffTicks, takeoffTicks / 20.0));
+        int budget = Math.max(600, (Integer)this.takeoffTimeout.get() * 5);
+        if (((Boolean)this.autoTakeoff.get()).booleanValue() && this.takeoffTicks > budget) {
+            this.takeoffFallbackOrFail(String.format("\u8d77\u98de\u6d41\u7a0b\u8dd1\u4e86 %d tick\uff08%.0f \u79d2\uff09Baritone \u4ecd\u672a\u63a5\u7ba1", this.takeoffTicks, (double)this.takeoffTicks / 20.0));
             return;
         }
-
-        switch (takeoffPhase) {
-            case CLEAR_HEAD -> clearHeadTick();
-            case FLY_TO_OPEN -> flyToOpenTick();
-            case ASCEND -> ascendTick();
-            case WAIT_ARRIVE -> waitArriveTick();
-            default -> {
-                if (autoTakeoff.get()) launchTick();
-                else manualLaunchTick();
+        switch (this.takeoffPhase.ordinal()) {
+            case 2: {
+                this.clearHeadTick();
+                break;
+            }
+            case 3: {
+                this.flyToOpenTick();
+                break;
+            }
+            case 4: {
+                this.ascendTick();
+                break;
+            }
+            case 5: {
+                this.waitArriveTick();
+                break;
+            }
+            default: {
+                if (((Boolean)this.autoTakeoff.get()).booleanValue()) {
+                    this.launchTick();
+                    break;
+                }
+                this.manualLaunchTick();
             }
         }
     }
 
     private boolean baritoneControlling() {
-
-        return mc.player != null && mc.player.isGliding() && !mc.player.isOnGround()
-            && BaritoneHook.isFlying();
-    }
-
-    private void takeoffFireworkTick() {
-        if (mc.player == null) return;
-        if (!takeoffFirework.get()) return;
-        if (takeoffFireworkCooldown > 0) takeoffFireworkCooldown--;
-
-        if (takeoffFireworksUsed == 0) {
-            if (!baritoneControlling()) return;
-            if (takeoffFireworkCooldown > 0) return;
-            takeoffFireworkY = mc.player.getY();
-            fireTakeoffFirework();
-            return;
-        }
-        if (takeoffFireworksUsed >= TAKEOFF_FIREWORK_MAX) return;
-        if (takeoffFireworkCooldown > 0) return;
-        boolean nearGround = mc.player.isOnGround()
-            || (!Double.isNaN(takeoffFireworkY) && mc.player.getY() <= takeoffFireworkY + 2.0);
-        if (!nearGround) return;
-        fireTakeoffFirework();
-    }
-
-    private void fireTakeoffFirework() {
-        if (mc.player == null || !mc.player.isGliding() || mc.player.isOnGround()) return;
-        if (ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET) <= 0) return;
-        if (!useFirework()) {
-            refillHotbarFireworks();
-            if (!useFirework()) {
-                takeoffFireworkCooldown = 20;
-                return;
-            }
-        }
-        takeoffFireworksUsed++;
-        takeoffFireworkCooldown = TAKEOFF_FIREWORK_RETRY_TICKS;
-        FOElytraLog.info("起飞后补烟花（第 %d/%d 发）", takeoffFireworksUsed, TAKEOFF_FIREWORK_MAX);
+        return this.mc.player != null && this.mc.player.isGliding() && !this.mc.player.isOnGround() && BaritoneHook.isFlying();
     }
 
     private void updateActivity() {
-        if (mc.player == null) {
-            activityTicks = 0;
+        if (this.mc.player == null) {
+            this.activityTicks = 0;
             return;
         }
-        boolean airborneFalling = !mc.player.isOnGround() && mc.player.getVelocity().y < -0.05;
-        double horiz = Math.sqrt(mc.player.getVelocity().x * mc.player.getVelocity().x
-            + mc.player.getVelocity().z * mc.player.getVelocity().z);
+        boolean airborneFalling = !this.mc.player.isOnGround() && this.mc.player.getVelocity().y < -0.05;
+        double horiz = Math.sqrt(this.mc.player.getVelocity().x * this.mc.player.getVelocity().x + this.mc.player.getVelocity().z * this.mc.player.getVelocity().z);
         boolean moving = horiz > 0.2;
         boolean closing = false;
-        if (segmentTarget != null) {
-            double d = Math.hypot(mc.player.getX() - (segmentTarget.getX() + 0.5),
-                mc.player.getZ() - (segmentTarget.getZ() + 0.5));
-            closing = lastActivityDistance >= 0 && d < lastActivityDistance - 0.05;
-            lastActivityDistance = d;
+        if (this.segmentTarget != null) {
+            double d = Math.hypot(this.mc.player.getX() - ((double)this.segmentTarget.getX() + 0.5), this.mc.player.getZ() - ((double)this.segmentTarget.getZ() + 0.5));
+            closing = this.lastActivityDistance >= 0.0 && d < this.lastActivityDistance - 0.05;
+            this.lastActivityDistance = d;
         }
         if (airborneFalling || moving || closing) {
-            if (activityTicks < 100) activityTicks++;
+            if (this.activityTicks < 100) {
+                ++this.activityTicks;
+            }
         } else {
-            activityTicks = 0;
+            this.activityTicks = 0;
         }
     }
 
     private void takeoffSucceeded() {
+        BounceProbe.mark("\u8d77\u98de\u6210\u529f");
         PlayerAction.pressJump(false);
-        jumpSeq = 0;
-        if (takeoffAutoJumpUsed) {
-
-            takeoffAutoJumpUsed = false;
+        this.jumpSeq = 0;
+        this.releaseTakeoffFlow();
+        if (this.takeoffAutoJumpUsed) {
+            this.takeoffAutoJumpUsed = false;
             BaritoneHook.btSet("elytraAutoJump", false);
-            baritoneAutoJumpForced = true;
+            this.lastForcedAutoJump = false;
+            this.baritoneAutoJumpForced = true;
         }
-        FOElytraLog.info("起飞成功：Baritone 已接管鞘翅飞行（第 %d tick，方式 %s）", takeoffTicks, takeoffPhase);
-        takeoffPhase = TakeoffPhase.INIT;
-        openEnd = null;
-        clearingHead = false;
-        hopTicks = 0;
-        ascendingSearch = false;
-        searchYh = 0.0;
-        openSearchFails = 0;
-        state = State.FLYING;
-        waitTicks = 0;
-        flightGrace = 60;
-        stuckStrikes = 0;
-        lastCheckX = mc.player.getBlockX();
-        lastCheckZ = mc.player.getBlockZ();
-        stuckNow = false;
-        stuckTracker.reset();
-        stuckFireworkHold = false;
-        stuckEscapeMode = STUCK_ESCAPE_NONE;
-        stuckEscapeSpot = null;
-        takeoffCeilingChecked = false;
-        flightStartX = mc.player.getX();
-        flightStartZ = mc.player.getZ();
-        flightProgressTicks = 0;
-        stuckEscapeFails = 0;
+        FOElytraLog.info("\u8d77\u98de\u6210\u529f\uff1aBaritone \u5df2\u63a5\u7ba1\u9798\u7fc5\u98de\u884c\uff08\u7b2c %d tick\uff0c\u65b9\u5f0f %s\uff09", new Object[]{this.takeoffTicks, this.takeoffPhase});
+        this.takeoffPhase = TakeoffPhase.INIT;
+        this.openEnd = null;
+        this.clearingHead = false;
+        this.hopTicks = 0;
+        this.ascendingSearch = false;
+        this.searchYh = 0.0;
+        this.openSearchFails = 0;
+        this.state = State.FLYING;
+        this.waitTicks = 0;
+        this.clearShaftTakeoff();
+        this.btTakeoffWaitTick = 0;
+        this.btTakeoffFallbackLogged = false;
+        BaritoneHook.btSet("elytraAutoJump", false);
+        this.lastForcedAutoJump = false;
+        this.takeoffReArmCount = 0;
+        this.jumpAttemptTick = this.tickCounter;
+        this.btTakeoffWaitTick = 0;
+        this.btTakeoffFallbackLogged = false;
+        this.lastCheckX = this.mc.player.getBlockX();
+        this.lastCheckZ = this.mc.player.getBlockZ();
     }
 
     private boolean flightStatusCheck() {
-        if (mc.player == null) return true;
-        updateActivity();
-
-        if (baritoneControlling()) {
-            controlTicks = 0;
-            airborneTicks = 0;
+        boolean stationary;
+        if (this.mc.player == null) {
+            return true;
+        }
+        this.updateActivity();
+        if (this.baritoneControlling()) {
+            this.controlTicks = 0;
+            this.lostControlCycles = 0;
+            this.airborneTicks = 0;
             return false;
         }
-
-        if (mc.player.isGliding()) {
-            if (mc.player.isOnGround()) {
-
-                mc.player.stopGliding();
-                PlayerAction.pressJump(false);
-                if (++fakeGlideTicks % 20 == 1) {
-                    FOElytraLog.warn("检测到「假滑翔」（客户端说在滑翔、人却站在地上）：已清掉本地滑翔状态，重新起跳");
-                }
-            } else {
-                fakeGlideTicks = 0;
-
-                if (++controlTicks > 15) {
-                    controlTicks = 0;
-                    if (openAreaSearch.get() && openTriesDone < openTries.get()) beginFlyToOpen();
-                    else replanIfLost(true);
-                }
-                return true;
-            }
-        } else {
-            fakeGlideTicks = 0;
+        if (this.fakeGlideTick()) {
+            return true;
         }
-
-        if (!mc.player.isOnGround()) {
-
-            if (airJumpHold > 0) {
+        if (this.mc.player.isGliding() && !this.mc.player.isOnGround()) {
+            if (++this.controlTicks > 15) {
+                this.controlTicks = 0;
+                if (((Boolean)this.openAreaSearch.get()).booleanValue() && this.openTriesDone < (Integer)this.openTries.get()) {
+                    this.beginFlyToOpen();
+                } else if (!BaritoneHook.isFlying() && ++this.lostControlCycles >= 2) {
+                    this.lostControlCycles = 0;
+                    this.replanIfLost(true);
+                }
+            }
+            return true;
+        }
+        if (!this.mc.player.isOnGround()) {
+            if (this.mc.player.isGliding()) {
+                this.notGlidingAirTicks = 0;
+            } else if (++this.notGlidingAirTicks == 20 || this.notGlidingAirTicks % 100 == 0) {
+                boolean hasElytra = !ItemHelper.wornElytra((PlayerEntity)this.mc.player).isEmpty();
+                FOElytraLog.warn("\u4eba\u5728\u7a7a\u4e2d\u4f46\u9798\u7fc5\u6ca1\u5c55\u5f00\uff08\u5ba2\u6237\u7aef\u8bf4\u6ca1\u5728\u6ed1\u7fd4\uff09\u5df2 %.1f \u79d2\uff5c\u8eab\u4e0a\u9798\u7fc5 %s\uff5c\u4f4d\u7f6e %d %d %d \u2192 \u8fd9\u6bb5\u65f6\u95f4\u53f3\u952e\u653e\u70df\u82b1\u662f\u6ca1\u53cd\u5e94\u7684\uff08\u539f\u7248\u89c4\u5219\uff1a\u53ea\u6709\u6ed1\u7fd4\u4e2d\u624d\u80fd\u653e\u70df\u82b1\uff09\uff0c\u6b63\u5728\u4e00\u76f4\u6309\u8df3\u5c1d\u8bd5\u91cd\u65b0\u5c55\u5f00", (double)this.notGlidingAirTicks / 20.0, hasElytra ? "\u5728" : "\u6ca1\u6709", this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ());
+            }
+            if (this.airJumpHold > 0) {
                 PlayerAction.pressJump(false);
-                airJumpHold = 0;
-                airborneTicks = 0;
-            } else if (++airborneTicks > 2) {
+                this.airJumpHold = 0;
+                this.airborneTicks = 0;
+            } else if (++this.airborneTicks > 2) {
                 PlayerAction.pressJump(true);
-                airJumpHold = 1;
+                this.airJumpHold = 1;
             }
             return true;
         }
-
-        airborneTicks = 0;
-        if (jumpSeq != 0) {
-            jumpSeqTick();
+        this.notGlidingAirTicks = 0;
+        this.airborneTicks = 0;
+        if (this.jumpSeq != 0) {
+            this.jumpSeqTick();
             return true;
         }
-        boolean stationary = Math.abs(mc.player.getVelocity().x) < 0.01
-            && Math.abs(mc.player.getVelocity().z) < 0.01;
-        if (!stationary) return true;
-
-        if (clearHeadBlock.get() && !blockingBlocks(1).isEmpty()) {
-            beginClearHead();
+        boolean bl = stationary = Math.abs(this.mc.player.getVelocity().x) < 0.01 && Math.abs(this.mc.player.getVelocity().z) < 0.01;
+        if (!stationary) {
             return true;
         }
-        if (takeoffDelayTicks > 0) {
-            takeoffDelayTicks--;
+        if (((Boolean)this.clearHeadBlock.get()).booleanValue() && !AutoElytraFlight.blockingBlocks(1).isEmpty()) {
+            this.beginClearHead();
             return true;
         }
-        if (jumpAttempts < jumpBeforeOpen.get()) {
-            jumpAttempts++;
-            FOElytraLog.info("自动起跳：第 %d/%d 次（%s）", jumpAttempts, jumpBeforeOpen.get(),
-                state == State.FLYING ? "飞行中重新起跳（落地了）" : "起飞阶段");
-            startJumpSequence();
+        if (this.takeoffDelayTicks > 0) {
+            --this.takeoffDelayTicks;
+            return true;
+        }
+        if (this.shaftAlignTick()) {
+            return true;
+        }
+        if (this.waitForBaritoneTakeoff()) {
+            return true;
+        }
+        if (this.tickCounter - this.jumpAttemptTick > 100) {
+            this.jumpAttempts = 0;
+        }
+        this.jumpAttemptTick = this.tickCounter;
+        if (this.jumpAttempts < (Integer)this.jumpBeforeOpen.get()) {
+            ++this.jumpAttempts;
+            FOElytraLog.info("\u81ea\u52a8\u8d77\u8df3\uff1a\u7b2c %d/%d \u6b21\uff08%s\uff09", this.jumpAttempts, this.jumpBeforeOpen.get(), this.state == State.FLYING ? "\u98de\u884c\u4e2d\u91cd\u65b0\u8d77\u8df3\uff08\u843d\u5730\u4e86\uff09" : "\u8d77\u98de\u9636\u6bb5");
+            this.startJumpSequence();
+        } else if (((Boolean)this.openAreaSearch.get()).booleanValue() && this.openTriesDone < (Integer)this.openTries.get()) {
+            this.beginFlyToOpen();
         } else {
-
-            if (openAreaSearch.get() && openTriesDone < openTries.get()) beginFlyToOpen();
-            else replanIfLost(true);
+            this.takeoffFallbackOrFail("\u843d\u5730\u540e\u539f\u5730\u8d77\u8df3 " + String.valueOf(this.jumpBeforeOpen.get()) + " \u6b21\u6ca1\u80fd\u8d77\u98de");
         }
         return true;
     }
 
     private void manualLaunchTick() {
-        if (mc.player.isGliding()) {
-            if (++glidingLostTicks % 100 == 0) FOElytraLog.info("已在滑翔，等 Baritone 接管飞行…");
+        if (this.mc.player.isGliding()) {
+            if (++this.glidingLostTicks % 100 == 0) {
+                FOElytraLog.info("\u5df2\u5728\u6ed1\u7fd4\uff0c\u7b49 Baritone \u63a5\u7ba1\u98de\u884c\u2026", new Object[0]);
+            }
             return;
         }
-        glidingLostTicks = 0;
-        if (takeoffTicks % 200 == 0) {
-            FOElytraLog.warn("「自动起飞」已关：请自己起跳两下展开鞘翅，模块会在你起飞后接管（已等 %d 秒）", takeoffTicks / 20);
+        this.glidingLostTicks = 0;
+        if (this.takeoffTicks % 200 == 0) {
+            FOElytraLog.warn("\u300c\u81ea\u52a8\u8d77\u98de\u300d\u5df2\u5173\uff1a\u8bf7\u81ea\u5df1\u8d77\u8df3\u4e24\u4e0b\u5c55\u5f00\u9798\u7fc5\uff0c\u6a21\u5757\u4f1a\u5728\u4f60\u8d77\u98de\u540e\u63a5\u7ba1\uff08\u5df2\u7b49 %d \u79d2\uff09", this.takeoffTicks / 20);
         }
     }
 
     private void launchTick() {
-
-        if (mc.player.isGliding() && mc.player.isOnGround()) {
-
-            mc.player.stopGliding();
+        boolean moving;
+        if (this.fakeGlideTick()) {
+            return;
+        }
+        if ("\u8d77\u98de\u91cd\u8bd5".equals(this.takeoffFlowOwner)) {
+            this.claimTakeoffFlow("\u8d77\u98de\u91cd\u8bd5");
+        }
+        if (this.mc.player.isGliding()) {
             PlayerAction.pressJump(false);
-            jumpSeq = 0;
-            jumpPhase = 0;
-            if (++fakeGlideTicks % 20 == 1) {
-                FOElytraLog.warn("检测到「假滑翔」（客户端说在滑翔、人却站在地上）：已清掉本地滑翔状态，重新走起跳流程");
+            this.jumpSeq = 0;
+            if (this.glidingLostTicks == 0) {
+                this.replanIfLost(true);
             }
-        } else if (mc.player.isGliding()) {
-            fakeGlideTicks = 0;
-            PlayerAction.pressJump(false);
-            jumpSeq = 0;
-
-            if (glidingLostTicks == 0) replanIfLost(true);
-            if (++glidingLostTicks > 15) {
-                glidingLostTicks = 0;
-                if (openAreaSearch.get() && openTriesDone < openTries.get()) beginFlyToOpen();
-                else takeoffFallbackOrFail("已经在滑翔，但 Baritone 15 tick 后仍未接管");
+            if (++this.glidingLostTicks > 15) {
+                this.glidingLostTicks = 0;
+                if (((Boolean)this.openAreaSearch.get()).booleanValue() && this.openTriesDone < (Integer)this.openTries.get()) {
+                    this.beginFlyToOpen();
+                } else {
+                    this.takeoffFallbackOrFail("\u5df2\u7ecf\u5728\u6ed1\u7fd4\uff0c\u4f46 Baritone 15 tick \u540e\u4ecd\u672a\u63a5\u7ba1");
+                }
             }
             return;
-        } else {
-            fakeGlideTicks = 0;
         }
-
-        if (!mc.player.isOnGround()) {
-            fallTicks++;
-            if (airJumpHold > 0) {
+        if (!this.mc.player.isOnGround()) {
+            ++this.fallTicks;
+            if (this.airJumpHold > 0) {
                 PlayerAction.pressJump(false);
-                airJumpHold = 0;
-                fallTicks = 0;
-            } else if (fallTicks > 2) {
+                this.airJumpHold = 0;
+                this.fallTicks = 0;
+            } else if (this.fallTicks > 2) {
                 PlayerAction.pressJump(true);
-                airJumpHold = 1;
+                this.airJumpHold = 1;
             }
             return;
         }
-
-        fallTicks = 0;
-        if (jumpSeq != 0) {
-            jumpSeqTick();
+        this.fallTicks = 0;
+        if (this.jumpSeq != 0) {
+            this.jumpSeqTick();
             return;
         }
-
-        boolean moving = Math.abs(mc.player.getVelocity().x) >= 0.01 || Math.abs(mc.player.getVelocity().z) >= 0.01;
+        boolean bl = moving = Math.abs(this.mc.player.getVelocity().x) >= 0.01 || Math.abs(this.mc.player.getVelocity().z) >= 0.01;
         if (moving) {
-             ++launchWait;
-            if (launchWait < 40) return;
-            launchWait = 0;
+            ++this.launchWait;
+            if (this.launchWait < 40) {
+                return;
+            }
+            this.launchWait = 0;
         } else {
-            launchWait = 0;
+            this.launchWait = 0;
         }
-
-        if (clearHeadBlock.get() && !blockingBlocks(1).isEmpty()) {
-            beginClearHead();
+        if (((Boolean)this.clearHeadBlock.get()).booleanValue() && !AutoElytraFlight.blockingBlocks(1).isEmpty()) {
+            this.beginClearHead();
             return;
         }
-
-        if (takeoffDelayTicks > 0) {
-            takeoffDelayTicks--;
+        if (this.takeoffDelayTicks > 0) {
+            --this.takeoffDelayTicks;
             return;
         }
-
-        if (jumpAttempts < jumpBeforeOpen.get()) {
-            jumpAttempts++;
-
-            FOElytraLog.info("自动起跳：第 %d 次尝试（最多 %d 次，之后改用「飞往开阔地」）",
-                jumpAttempts, jumpBeforeOpen.get());
-            startJumpSequence();
+        if (this.waitForBaritoneTakeoff()) {
             return;
         }
-
-        if (openAreaSearch.get() && openTriesDone < openTries.get()) {
-            beginFlyToOpen();
+        if (this.jumpAttempts < (Integer)this.jumpBeforeOpen.get()) {
+            ++this.jumpAttempts;
+            FOElytraLog.info("\u81ea\u52a8\u8d77\u8df3\uff1a\u7b2c %d \u6b21\u5c1d\u8bd5\uff08\u6700\u591a %d \u6b21\uff0c\u4e4b\u540e\u6539\u7528\u300c\u98de\u5f80\u5f00\u9614\u5730\u300d\uff09", this.jumpAttempts, this.jumpBeforeOpen.get());
+            this.startJumpSequence();
             return;
         }
-        takeoffFallbackOrFail(jumpAttempts + " 次原地起跳都没能展开鞘翅");
+        if (((Boolean)this.openAreaSearch.get()).booleanValue() && this.openTriesDone < (Integer)this.openTries.get()) {
+            this.beginFlyToOpen();
+            return;
+        }
+        this.takeoffFallbackOrFail(this.jumpAttempts + " \u6b21\u539f\u5730\u8d77\u8df3\u90fd\u6ca1\u80fd\u5c55\u5f00\u9798\u7fc5");
+    }
+
+    private boolean fakeGlideTick() {
+        return false;
+    }
+
+    private boolean beginFakeGlideRecovery() {
+        if (this.takeoffFlowBusy("\u5047\u6ed1\u7fd4\u6062\u590d")) {
+            FOElytraLog.detail("\u5047\u6ed1\u7fd4\u5148\u8bb0\u7740\uff08%s \u6b63\u5728\u8fdb\u884c\uff0c\u8fd8\u5269 %d tick\uff09\u2192 \u7b49\u5b83\u7ed3\u675f\u518d\u6062\u590d", this.takeoffFlowOwner, this.takeoffFlowHoldTicks);
+            return true;
+        }
+        if (this.fakeGlideRecovers >= 3) {
+            int head = AutoElytraFlight.blockingBlocks(1).size();
+            String where = this.mc.player.getBlockX() + " " + this.mc.player.getBlockY() + " " + this.mc.player.getBlockZ();
+            FOElytraLog.warn("\u8fde\u7eed %d \u6b21\u5047\u6ed1\u7fd4\u90fd\u6ca1\u79bb\u5730\uff08\u4f4d\u7f6e %s\uff0c\u5934\u9876\u6321 %d \u683c\uff09\u2192 \u505c\u624b\uff1a\u53ef\u80fd\u662f\u5730\u5f62/\u670d\u52a1\u7aef\u72b6\u6001\u95ee\u9898\uff0c\u8bf7\u624b\u52a8\u8d77\u8df3\u6216\u6362\u4e2a\u5730\u65b9", 3, where, head);
+            this.releaseTakeoffFlow();
+            this.failNoLogout("\u5047\u6ed1\u7fd4\u6062\u590d 3 \u6b21\u90fd\u6ca1\u79bb\u5730\uff08\u4f4d\u7f6e " + where + "\uff0c\u5934\u9876\u6321 " + head + " \u683c\uff09");
+            return true;
+        }
+        ++this.fakeGlideRecovers;
+        this.fakeGlideWindow.reset();
+        this.fakeGlidePhase = 1;
+        this.fakeGlidePhaseTicks = 0;
+        PlayerAction.pressJump(false);
+        PlayerAction.releaseAll();
+        this.mc.player.stopGliding();
+        this.jumpSeq = 0;
+        this.jumpPhase = 0;
+        this.claimTakeoffFlow("\u5047\u6ed1\u7fd4\u6062\u590d");
+        FOElytraLog.warn("\u5047\u6ed1\u7fd4\u786e\u8ba4\uff08\u8fde\u7eed %d tick \u5ba2\u6237\u7aef\u8bf4\u5728\u6ed1\u7fd4\u3001\u4eba\u5374\u5728\u5730\u4e0a\uff09\u2192 \u7b2c %d/%d \u6b21\u6700\u5c0f\u6062\u590d\uff1a\u677e\u952e \u2192 \u7b49 %d tick \u2192 \u53ea\u6309\u4e00\u6b21\u8df3 \u2192 \u518d\u770b %d tick \u662f\u5426\u79bb\u5730", 20, this.fakeGlideRecovers, 3, 5, 15);
+        return true;
+    }
+
+    private void fakeGlideRecoveryTick() {
+        ++this.fakeGlidePhaseTicks;
+        if (this.fakeGlidePhase == 1) {
+            if (this.fakeGlidePhaseTicks < 5) {
+                return;
+            }
+            this.fakeGlidePhase = 2;
+            this.fakeGlidePhaseTicks = 0;
+            PlayerAction.pressJump(true);
+            FOElytraLog.detail("\u5047\u6ed1\u7fd4\u6062\u590d\uff1a\u6309\u4e00\u6b21\u8df3\uff08\u7b2c %d/%d \u6b21\uff09", this.fakeGlideRecovers, 3);
+            return;
+        }
+        if (this.fakeGlidePhase == 2) {
+            if (this.fakeGlidePhaseTicks < 2) {
+                return;
+            }
+            PlayerAction.pressJump(false);
+            this.fakeGlidePhase = 3;
+            this.fakeGlidePhaseTicks = 0;
+            return;
+        }
+        if (this.mc.player != null && !this.mc.player.isOnGround()) {
+            FOElytraLog.info("\u5047\u6ed1\u7fd4\u6062\u590d\u6210\u529f\uff1a\u5df2\u7ecf\u79bb\u5730\uff08\u7b2c %d/%d \u6b21\uff09\uff0c\u7ee7\u7eed\u8d77\u98de\u6d41\u7a0b", this.fakeGlideRecovers, 3);
+            this.fakeGlideRecovered();
+            return;
+        }
+        if (this.fakeGlidePhaseTicks < 15) {
+            return;
+        }
+        FOElytraLog.warn("\u5047\u6ed1\u7fd4\u6062\u590d\u7b2c %d/%d \u6b21\u6ca1\u79bb\u5730\uff08\u4f4d\u7f6e %s\uff0c\u5934\u9876\u6321 %d \u683c\uff09", this.fakeGlideRecovers, 3, this.mc.player == null ? "\u672a\u77e5" : this.mc.player.getBlockX() + " " + this.mc.player.getBlockY() + " " + this.mc.player.getBlockZ(), this.mc.player == null ? 0 : AutoElytraFlight.blockingBlocks(1).size());
+        this.fakeGlideWindow.reset();
+        this.fakeGlidePhase = 0;
+        this.fakeGlidePhaseTicks = 0;
+    }
+
+    private void fakeGlideRecovered() {
+        this.fakeGlideWindow.reset();
+        this.fakeGlidePhase = 0;
+        this.fakeGlidePhaseTicks = 0;
+        this.fakeGlideRecovers = 0;
+    }
+
+    private void resetFakeGlideRecovery() {
+        this.fakeGlideWindow.reset();
+        this.fakeGlidePhase = 0;
+        this.fakeGlidePhaseTicks = 0;
+        this.fakeGlideRecovers = 0;
+        this.releaseTakeoffFlow();
+    }
+
+    private void claimTakeoffFlow(String who) {
+        this.takeoffFlowOwner = who;
+        this.takeoffFlowHoldTicks = 20;
+    }
+
+    private void releaseTakeoffFlow() {
+        this.takeoffFlowOwner = "";
+        this.takeoffFlowHoldTicks = 0;
+    }
+
+    private boolean takeoffFlowBusy(String who) {
+        return this.takeoffFlowHoldTicks > 0 && !who.equals(this.takeoffFlowOwner);
     }
 
     private void startJumpSequence() {
-        jumpPhase = 1;
-        jumpIteration = 0;
-        takeoffFireworksUsed = 0;
-        takeoffFireworkCooldown = 0;
-        takeoffFireworkY = Double.NaN;
-        if (!lavaEscaping()) mc.player.setPitch(takeoffPitch.get().floatValue());
+        if (PlayerAction.clearStuckSneak()) {
+            FOElytraLog.warn("\u68c0\u6d4b\u5230\u6b8b\u7559\u6f5c\u884c\uff08\u4f60\u6ca1\u6309 Shift\uff09\u2014\u2014\u5df2\u89e3\u9664\uff0c\u5426\u5219\u8df3\u4e0d\u8d77\u6765", new Object[0]);
+        }
+        this.jumpPhase = 1;
+        this.jumpIteration = 0;
+        if (this.mc.player != null) {
+            this.mc.player.setPitch(-30.0f);
+        }
+        this.takeoffFireworkPending = (Boolean)this.takeoffFirework.get() != false ? 1 : 0;
         PlayerAction.pressJump(true);
-        jumpSeq = 1;
-        jumpSeqTicks = 0;
+        this.jumpSeq = 1;
+        this.jumpSeqTicks = 0;
     }
 
     private void jumpSeqTick() {
-        jumpSeqTicks++;
-        switch (jumpPhase) {
-            case 1 -> {
-                if (jumpIteration == 1) PlayerAction.pressJump(false);
-                jumpPhase = 2;
+        ++this.jumpSeqTicks;
+        switch (this.jumpPhase) {
+            case 1: {
+                if (this.jumpIteration == 1) {
+                    PlayerAction.pressJump(false);
+                }
+                this.jumpPhase = 2;
+                break;
             }
-            case 2 -> {
-                if (mc.player.getVelocity().y < -0.1) {
-                    jumpPhase = 3;
+            case 2: {
+                if (this.mc.player.getVelocity().y < -0.1) {
+                    this.jumpPhase = 3;
                     return;
                 }
-                jumpIteration++;
-                if (jumpIteration >= 8) {
-                    jumpPhase = 3;
+                ++this.jumpIteration;
+                if (this.jumpIteration >= 8) {
+                    this.jumpPhase = 3;
                     return;
                 }
-                jumpPhase = 1;
+                this.jumpPhase = 1;
+                break;
             }
-            case 3 -> {
+            case 3: {
                 PlayerAction.pressJump(true);
-                jumpPhase = 4;
+                this.jumpPhase = 4;
+                break;
             }
-            case 4 -> jumpPhase = 5;
-            case 5 -> {
+            case 4: {
+                this.jumpPhase = 5;
+                break;
+            }
+            case 5: {
                 PlayerAction.pressJump(false);
-                jumpPhase = 0;
-                jumpSeq = 0;
-                jumpSeqTicks = 0;
+                this.jumpPhase = 0;
+                this.jumpSeq = 0;
+                this.jumpSeqTicks = 0;
+                break;
             }
-            default -> {
-                jumpPhase = 0;
-                jumpSeq = 0;
-                jumpSeqTicks = 0;
+            default: {
+                this.jumpPhase = 0;
+                this.jumpSeq = 0;
+                this.jumpSeqTicks = 0;
             }
         }
     }
 
     private static List<BlockPos> blockingBlocks(int checkY) {
-        List<BlockPos> out = new ArrayList<>();
+        ArrayList<BlockPos> out = new ArrayList<BlockPos>();
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null || client.player == null) return out;
-        World world = client.world;
-        PlayerEntity player = client.player;
-
+        if (client.world == null || client.player == null) {
+            return out;
+        }
+        ClientWorld world = client.world;
+        ClientPlayerEntity player = client.player;
         Vec3d pos = player.getEntityPos();
         double headX = pos.x;
         double headZ = pos.z;
-        double headY = pos.y + player.getHeight();
-        int aboveY = (int) Math.floor(headY) + 1;
-        int baseX = (int) Math.floor(headX);
-        int baseZ = (int) Math.floor(headZ);
-        double offsetX = headX - baseX;
-        double offsetZ = headZ - baseZ;
-
-        Set<BlockPos> toCheck = new LinkedHashSet<>();
+        double headY = pos.y + (double)player.getHeight();
+        int aboveY = (int)Math.floor(headY) + 1;
+        int baseX = (int)Math.floor(headX);
+        int baseZ = (int)Math.floor(headZ);
+        double offsetX = headX - (double)baseX;
+        double offsetZ = headZ - (double)baseZ;
+        LinkedHashSet<BlockPos> toCheck = new LinkedHashSet<BlockPos>();
         toCheck.add(new BlockPos(baseX, aboveY, baseZ));
-        if (offsetX > 0.7) toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ));
-        else if (offsetX < 0.3) toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ));
-        if (offsetZ > 0.7) toCheck.add(new BlockPos(baseX, aboveY, baseZ + 1));
-        else if (offsetZ < 0.3) toCheck.add(new BlockPos(baseX, aboveY, baseZ - 1));
-        if (offsetX > 0.7 && offsetZ > 0.7) toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ + 1));
-        else if (offsetX > 0.7 && offsetZ < 0.3) toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ - 1));
-        else if (offsetX < 0.3 && offsetZ > 0.7) toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ + 1));
-        else if (offsetX < 0.3 && offsetZ < 0.3) toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ - 1));
-
+        if (offsetX > 0.7) {
+            toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ));
+        } else if (offsetX < 0.3) {
+            toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ));
+        }
+        if (offsetZ > 0.7) {
+            toCheck.add(new BlockPos(baseX, aboveY, baseZ + 1));
+        } else if (offsetZ < 0.3) {
+            toCheck.add(new BlockPos(baseX, aboveY, baseZ - 1));
+        }
+        if (offsetX > 0.7 && offsetZ > 0.7) {
+            toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ + 1));
+        } else if (offsetX > 0.7 && offsetZ < 0.3) {
+            toCheck.add(new BlockPos(baseX + 1, aboveY, baseZ - 1));
+        } else if (offsetX < 0.3 && offsetZ > 0.7) {
+            toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ + 1));
+        } else if (offsetX < 0.3 && offsetZ < 0.3) {
+            toCheck.add(new BlockPos(baseX - 1, aboveY, baseZ - 1));
+        }
         for (BlockPos pos0 : toCheck) {
-            for (int i = 0; i < checkY; i++) {
-                BlockPos q = pos0.add(0, i, 0);
-                if (chunkLoaded(world, q) && !world.getBlockState(q).isAir()) out.add(pos0);
+            BlockPos q;
+            int i;
+            for (i = 0; i < checkY; ++i) {
+                q = pos0.add(0, i, 0);
+                if (!AutoElytraFlight.chunkLoaded((World)world, q) || world.getBlockState(q).isAir()) continue;
+                out.add(pos0);
             }
-            for (int i = checkY; i < 0; i++) {
-                BlockPos q = pos0.add(0, i, 0);
-                if (chunkLoaded(world, q) && !world.getBlockState(q).isAir()) out.add(pos0);
+            for (i = checkY; i < 0; ++i) {
+                q = pos0.add(0, i, 0);
+                if (!AutoElytraFlight.chunkLoaded((World)world, q) || world.getBlockState(q).isAir()) continue;
+                out.add(pos0);
             }
         }
         return out;
@@ -2005,1987 +2042,2559 @@ public class AutoElytraFlight extends FOElytraModule {
     }
 
     private void beginClearHead() {
-        List<BlockPos> bp = blockingBlocks(1);
-        if (bp.isEmpty()) return;
-        FOElytraLog.warn("头顶有方块阻挡，让 Baritone 先挖开（设计行为）");
-
-        Vec3d pos = mc.player.getEntityPos();
+        BounceProbe.mark("\u5934\u9876\u88ab\u6321");
+        List<BlockPos> bp = AutoElytraFlight.blockingBlocks(1);
+        if (bp.isEmpty()) {
+            return;
+        }
+        FOElytraLog.warn("\u5934\u9876\u6709\u65b9\u5757\u963b\u6321\uff0c\u8ba9 Baritone \u5148\u6316\u5f00\uff08\u8bbe\u8ba1\u884c\u4e3a\uff09", new Object[0]);
+        Vec3d pos = this.mc.player.getEntityPos();
         BaritoneHook.stop();
-        BaritoneHook.builderClearArea(
-            new BlockPos((int) Math.floor(pos.x - 0.3), bp.get(0).getY(), (int) Math.floor(pos.z - 0.3)),
-            new BlockPos((int) Math.floor(pos.x - 0.3) + 1, bp.get(0).getY() + 1, (int) Math.floor(pos.z - 0.3) + 1));
-
-        clearingHead = true;
-        clearWaited = 0;
-        jumpAttempts = 0;
-        takeoffPhase = TakeoffPhase.CLEAR_HEAD;
+        BaritoneHook.builderClearArea(new BlockPos((int)Math.floor(pos.x - 0.3), bp.get(0).getY(), (int)Math.floor(pos.z - 0.3)), new BlockPos((int)Math.floor(pos.x - 0.3) + 1, bp.get(0).getY() + 1, (int)Math.floor(pos.z - 0.3) + 1));
+        this.clearingHead = true;
+        this.clearWaited = 0;
+        this.jumpAttempts = 0;
+        this.takeoffPhase = TakeoffPhase.CLEAR_HEAD;
     }
 
     private void clearHeadTick() {
-        clearWaited++;
-        List<BlockPos> left = blockingBlocks(1);
-        boolean digging = clearingHead && clearWaited <= 200 && !left.isEmpty() && BaritoneHook.builderActive();
-        if (digging) return;
-
-        clearingHead = false;
+        boolean digging;
+        ++this.clearWaited;
+        List<BlockPos> left = AutoElytraFlight.blockingBlocks(1);
+        boolean bl = digging = this.clearingHead && this.clearWaited <= 200 && !left.isEmpty() && BaritoneHook.builderActive();
+        if (digging) {
+            return;
+        }
+        this.clearingHead = false;
         if (left.isEmpty()) {
-            FOElytraLog.info("头顶障碍清除完毕（用了 %d tick），立刻起跳", clearWaited);
-            if (segmentTarget != null) BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
+            FOElytraLog.info("\u5934\u9876\u969c\u788d\u6e05\u9664\u5b8c\u6bd5\uff08\u7528\u4e86 %d tick\uff09\uff0c\u7acb\u523b\u8d77\u8df3", this.clearWaited);
+            if (this.segmentTarget != null) {
+                this.requeuePath("\u6e05\u969c\u540e\u8d77\u98de", this.segmentTarget.getX(), this.segmentTarget.getZ());
+            }
         } else {
-            FOElytraLog.warn("头顶还是被挡（挖了 %d tick），照样起跳（设计上也是这样）", clearWaited);
+            FOElytraLog.warn("\u5934\u9876\u8fd8\u662f\u88ab\u6321\uff08\u6316\u4e86 %d tick\uff09\uff0c\u7167\u6837\u8d77\u8df3\uff08\u8bbe\u8ba1\u4e0a\u4e5f\u662f\u8fd9\u6837\uff09", this.clearWaited);
         }
-
-        jumpAttempts++;
-        takeoffPhase = TakeoffPhase.LAUNCH;
-        if (jumpAttempts <= jumpBeforeOpen.get()) {
-            startJumpSequence();
-        } else if (openAreaSearch.get() && openTriesDone < openTries.get()) {
-            beginFlyToOpen();
-        } else {
-            takeoffFallbackOrFail("头顶被挡，挖不掉也起不来");
-        }
+        this.takeoffDelayTicks = 0;
+        this.takeoffPhase = TakeoffPhase.LAUNCH;
     }
 
     private void beginFlyToOpen() {
-        openTriesDone++;
-        openEnd = null;
-        openSearchFails = 0;
-        ascendingSearch = false;
-        searchYh = 0.0;
+        ++this.openTriesDone;
+        this.openEnd = null;
+        this.openSearchFails = 0;
+        this.ascendingSearch = false;
+        this.searchYh = 0.0;
         PlayerAction.pressJump(false);
-        jumpSeq = 0;
-        jumpAttempts = 0;
-        takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
-        FOElytraLog.warn("尝试飞往开阔地带（第 %d/%d 次：先原地起跳，再找一条开阔航线）", openTriesDone, openTries.get());
+        this.jumpSeq = 0;
+        this.jumpAttempts = 0;
+        this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+        FOElytraLog.warn("\u5c1d\u8bd5\u98de\u5f80\u5f00\u9614\u5730\u5e26\uff08\u7b2c %d/%d \u6b21\uff1a\u5148\u539f\u5730\u8d77\u8df3\uff0c\u518d\u627e\u4e00\u6761\u5f00\u9614\u822a\u7ebf\uff09", this.openTriesDone, this.openTries.get());
     }
 
+    /*
+     * Enabled aggressive block sorting
+     */
     private void flyToOpenTick() {
-
-        if (!mc.player.isGliding()) {
-            if (jumpSeq != 0) {
-                jumpSeqTick();
+        if (this.mc.player.isInLava()) {
+            this.openLavaWindow.accumulate(this.tickCounter);
+        }
+        if (this.openLavaWindow.getCount(this.tickCounter) > 15) {
+            this.openLavaWindow.reset();
+            this.takeoffFallbackOrFail("\u98de\u5f80\u5f00\u9614\u5730\u7684\u8def\u4e0a\u6301\u7eed\u6ce1\u5728\u5ca9\u6d46\u91cc\uff0820 tick \u7a97\u53e3\u91cc\u8d85\u8fc7 15 tick\uff09");
+            return;
+        }
+        if (!this.mc.player.isGliding()) {
+            if (this.jumpSeq != 0) {
+                this.jumpSeqTick();
                 return;
             }
-            if (mc.player.isOnGround()) {
-                if (Math.abs(mc.player.getVelocity().x) < 0.01 && Math.abs(mc.player.getVelocity().z) < 0.01) {
-                    startJumpSequence();
+            if (this.mc.player.isOnGround()) {
+                if (Math.abs(this.mc.player.getVelocity().x) < 0.01 && Math.abs(this.mc.player.getVelocity().z) < 0.01) {
+                    this.startJumpSequence();
                 }
                 return;
             }
-            fallTicks++;
-            if (mc.player.getVelocity().y < -0.1 && fallTicks > 2) {
-                fallTicks = 0;
-
-                startJumpSequence();
+            ++this.fallTicks;
+            if (this.mc.player.getVelocity().y < -0.1 && this.fallTicks > 2) {
+                this.fallTicks = 0;
+                this.startJumpSequence();
             }
             return;
         }
-
-        replanIfLost(false);
-        double yr = mc.player.isOnGround() ? 1.2 : 1.7;
+        this.replanIfLost(false);
+        double yr = this.mc.player.isOnGround() ? 1.2 : 1.7;
         FindPathToOpen.Takeoff t = null;
         double usedYh = 0.0;
-
-        if (!ascendingSearch) {
-            t = FindPathToOpen.getTakeoffDirection(openSearchDist.get(), openSafeDist.get(), yr, 0.0);
-            if (t == null && allowAscend.get()) {
-                ascendingSearch = true;
-                searchYh = 3.0;
-                return;
-            }
+        if (!this.ascendingSearch && (t = FindPathToOpen.getTakeoffDirection((Double)this.openSearchDist.get(), (Double)this.openSafeDist.get(), yr, 0.0)) == null && ((Boolean)this.allowAscend.get()).booleanValue()) {
+            this.ascendingSearch = true;
+            this.searchYh = 3.0;
+            return;
         }
-
-        if (t == null && ascendingSearch) {
-            if (searchYh < 11.0) {
-                t = FindPathToOpen.getTakeoffDirection(openSearchDist.get(), openSafeDist.get(), 1.7, searchYh);
-                if (t != null) {
-                    usedYh = searchYh;
-                } else {
-                    searchYh += 0.5;
+        if (t == null && this.ascendingSearch) {
+            if (this.searchYh < 11.0) {
+                t = FindPathToOpen.getTakeoffDirection((Double)this.openSearchDist.get(), (Double)this.openSafeDist.get(), 1.7, this.searchYh);
+                if (t == null) {
+                    this.searchYh += 0.5;
                     return;
                 }
+                usedYh = this.searchYh;
             } else {
-                ascendingSearch = false;
+                this.ascendingSearch = false;
             }
         }
-
         if (t != null) {
-            ascendingSearch = false;
-            searchYh = 0.0;
+            this.ascendingSearch = false;
+            this.searchYh = 0.0;
         }
-
-        if (t == null) {
-
-            openSearchFails++;
-            if (openSearchFails < 3) return;
-            if (openTriesDone >= openTries.get()) {
-                takeoffFallbackOrFail("四周全被挡死，找不到任何可用的起飞航线（已试 " + openTriesDone + " 次）");
-                return;
-            }
-            beginFlyToOpen();
+        if (t != null) {
+            this.openSearchFails = 0;
+            this.takeoffFallbackOrFail("\u98de\u5f80\u5f00\u9614\u5730\u9700\u8981\u6a21\u5757\u81ea\u5df1\u653e\u70df\u82b1\uff0c\u8fd9\u6761\u8def\u7ebf\u5df2\u6309\u4f60\u7684\u8981\u6c42\u505c\u7528");
             return;
         }
-        openSearchFails = 0;
-
-        int slot = fireworkHotbarSlot();
-        if (slot < 0) {
-            takeoffFallbackOrFail("快捷栏里没有烟花，没法朝开阔地加速");
+        ++this.openSearchFails;
+        if (this.openSearchFails < 3) {
             return;
         }
-        selectHotbar(slot);
-
-        if (usedYh != 0.0) {
-
-            mc.player.setPitch(-90f);
-            InvHelper.useItem(Hand.MAIN_HAND);
-            ascendTargetY = mc.player.getY() + usedYh;
-            ascendTicks = 0;
-            takeoffPhase = TakeoffPhase.ASCEND;
-            FOElytraLog.info("四周太窄，先抬头抬升 %.1f 格再找航线", usedYh);
+        if (this.openTriesDone >= (Integer)this.openTries.get()) {
+            this.takeoffFallbackOrFail("\u56db\u5468\u5168\u88ab\u6321\u6b7b\uff0c\u627e\u4e0d\u5230\u4efb\u4f55\u53ef\u7528\u7684\u8d77\u98de\u822a\u7ebf\uff08\u5df2\u8bd5 " + this.openTriesDone + " \u6b21\uff09");
             return;
         }
-
-        mc.player.setYaw(t.yaw);
-        mc.player.setPitch(t.pitch);
-        InvHelper.useItem(Hand.MAIN_HAND);
-        openEnd = t.end;
-        openStartY = mc.player.getY();
-        hopTicks = 0;
-        takeoffPhase = TakeoffPhase.WAIT_ARRIVE;
-        FOElytraLog.info("锁定开阔航线：yaw %.0f° / pitch %.0f° → %s", t.yaw, t.pitch, openEnd.toShortString());
+        this.beginFlyToOpen();
     }
 
     private void ascendTick() {
-        if (!mc.player.isGliding()) {
-            takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+        if (!this.mc.player.isGliding()) {
+            this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
             return;
         }
-
-        if (mc.player.getY() > ascendTargetY) {
-            ascendTicks++;
-
-            mc.player.setPitch(0f);
-            mc.player.setYaw(mc.player.getYaw() + 180f);
-            if (ascendTicks > 40) {
-                ascendTicks = 0;
-                if (openTriesDone >= openTries.get()) takeoffFallbackOrFail("抬升之后仍然找不到航线");
-                else beginFlyToOpen();
+        if (this.mc.player.getY() > this.ascendTargetY) {
+            ++this.ascendTicks;
+            if (this.ascendTicks > 40) {
+                this.ascendTicks = 0;
+                if (this.openTriesDone >= (Integer)this.openTries.get()) {
+                    this.takeoffFallbackOrFail("\u5782\u76f4\u722c\u5347\u4e4b\u540e\u4ecd\u7136\u627e\u4e0d\u5230\u822a\u7ebf");
+                } else {
+                    this.beginFlyToOpen();
+                }
             }
             return;
         }
-
-        ascendTicks++;
-        mc.player.setPitch(-90f);
-        if (ascendTicks > 20) {
-            ascendTicks = 0;
-            takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+        ++this.ascendTicks;
+        if (this.ascendTicks > 20) {
+            this.ascendTicks = 0;
+            this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
         }
     }
 
     private void waitArriveTick() {
-        if (openEnd == null) {
-            takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+        if (this.openEnd == null) {
+            this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
             return;
         }
-
-        if (!mc.player.isGliding()) {
-
-            if (clearHeadBlock.get() && !blockingBlocks(1).isEmpty()) beginClearHead();
-            else takeoffPhase = TakeoffPhase.LAUNCH;
-            return;
-        }
-
-        replanIfLost(false);
-        boolean arrived = mc.player.getBlockPos().isWithinDistance(openEnd, 1.5);
-        if (!arrived) {
-
-            Vec3d toEnd = Vec3d.ofCenter(openEnd).subtract(mc.player.getEntityPos());
-            arrived = toEnd.dotProduct(mc.player.getVelocity()) < 0.0;
-        }
-
-        if (!arrived) {
-
-            hopTicks++;
-            if (hopTicks % 10 == 0
-                && (mc.player.getVelocity().horizontalLength() < 0.5 || mc.player.getY() < openStartY - 4.0)) {
-                InvHelper.useItem(Hand.MAIN_HAND);
+        if (!this.mc.player.isGliding()) {
+            if (((Boolean)this.clearHeadBlock.get()).booleanValue() && !AutoElytraFlight.blockingBlocks(1).isEmpty()) {
+                this.beginClearHead();
+            } else {
+                this.takeoffPhase = TakeoffPhase.LAUNCH;
             }
             return;
         }
-
-        openEnd = null;
-        if (openTriesDone >= openTries.get()) {
-            takeoffFallbackOrFail("来回冲了 " + openTriesDone + " 次开阔地，Baritone 仍未接管");
+        this.replanIfLost(false);
+        boolean arrived = this.mc.player.getBlockPos().isWithinDistance((Vec3i)this.openEnd, 1.5);
+        if (!arrived) {
+            Vec3d toEnd = Vec3d.ofCenter((Vec3i)this.openEnd).subtract(this.mc.player.getEntityPos());
+            boolean bl = arrived = toEnd.dotProduct(this.mc.player.getVelocity()) < 0.0;
+        }
+        if (!arrived) {
             return;
         }
-        beginFlyToOpen();
+        this.openEnd = null;
+        if (this.openTriesDone >= (Integer)this.openTries.get()) {
+            this.takeoffFallbackOrFail("\u6765\u56de\u51b2\u4e86 " + this.openTriesDone + " \u6b21\u5f00\u9614\u5730\uff0cBaritone \u4ecd\u672a\u63a5\u7ba1");
+            return;
+        }
+        this.beginFlyToOpen();
     }
 
     private void takeoffFallbackOrFail(String reason) {
+        BounceProbe.mark("\u8d77\u98de\u5931\u8d25\uff1a" + reason);
+        if (this.takeoffFlowBusy("\u8d77\u98de\u515c\u5e95")) {
+            FOElytraLog.detail("\u8d77\u98de\u515c\u5e95\u6682\u7f13\uff08%s \u6b63\u5728\u8fdb\u884c\uff0c\u8fd8\u5269 %d tick\uff09\u2192 \u8fd9\u6b21\u4e0d\u52a8\u8d77\u8df3\u6d41\u7a0b", this.takeoffFlowOwner, this.takeoffFlowHoldTicks);
+            return;
+        }
         PlayerAction.pressJump(false);
-        jumpSeq = 0;
-
-        if (!openAreaSearch.get() && takeoffReArmCount < 5) {
-            takeoffReArmCount++;
-            jumpAttempts = 0;
-            takeoffTicks = 0;
-            takeoffPhase = TakeoffPhase.LAUNCH;
-            takeoffDelayTicks = 0;
-            FOElytraLog.warn("起飞重试（第 %d/5 轮，已关闭「开阔地搜索起飞」：不绕开阔地，直接原地再起跳）",
-                takeoffReArmCount);
+        this.jumpSeq = 0;
+        if (!((Boolean)this.openAreaSearch.get()).booleanValue() && this.takeoffReArmCount < 5) {
+            ++this.takeoffReArmCount;
+            this.jumpAttempts = 0;
+            this.takeoffTicks = 0;
+            this.takeoffPhase = TakeoffPhase.LAUNCH;
+            this.takeoffDelayTicks = 0;
+            this.claimTakeoffFlow("\u8d77\u98de\u91cd\u8bd5");
+            FOElytraLog.warn("\u8d77\u98de\u91cd\u8bd5\uff08\u7b2c %d/5 \u8f6e\uff1a\u5df2\u5173\u95ed\u300c\u5f00\u9614\u5730\u641c\u7d22\u8d77\u98de\u300d\uff0c\u76f4\u63a5\u539f\u5730\u518d\u8d77\u8df3\uff09", this.takeoffReArmCount);
             return;
         }
-
-        if (takeoffAutoJumpFallback.get() && !takeoffAutoJumpUsed) {
-            takeoffAutoJumpUsed = true;
-            takeoffTicks = 0;
-            jumpAttempts = 0;
-            openTriesDone = 0;
-            openEnd = null;
-            clearingHead = false;
-            ascendingSearch = false;
-            searchYh = 0.0;
-            openSearchFails = 0;
-            takeoffPhase = TakeoffPhase.LAUNCH;
+        if (((Boolean)this.takeoffAutoJumpFallback.get()).booleanValue() && !this.takeoffAutoJumpUsed) {
+            this.takeoffAutoJumpUsed = true;
+            this.takeoffTicks = 0;
+            this.jumpAttempts = 0;
+            this.openTriesDone = 0;
+            this.openEnd = null;
+            this.clearingHead = false;
+            this.ascendingSearch = false;
+            this.searchYh = 0.0;
+            this.openSearchFails = 0;
+            this.takeoffPhase = TakeoffPhase.LAUNCH;
             BaritoneHook.btSet("elytraAutoJump", true);
-            if (segmentTarget != null) BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
-            FOElytraLog.warn("本插件的起飞流程失败（%s），临时打开 Baritone 的「自动起跳」再试一次（用 F3 看是不是头顶/脚下被挡）", reason);
+            this.lastForcedAutoJump = true;
+            this.claimTakeoffFlow("\u4ea4\u7ed9 Baritone");
+            if (this.segmentTarget != null) {
+                this.requeuePath("\u8d77\u98de\u5931\u8d25\u4ea4\u7ed9 Baritone", this.segmentTarget.getX(), this.segmentTarget.getZ());
+            }
+            FOElytraLog.warn("\u672c\u63d2\u4ef6\u7684\u8d77\u98de\u6d41\u7a0b\u5931\u8d25\uff08%s\uff5c\u6f5c\u884c %s\uff09\uff0c\u4e34\u65f6\u6253\u5f00 Baritone \u7684\u300c\u81ea\u52a8\u8d77\u8df3\u300d\u518d\u8bd5\u4e00\u6b21\uff08\u7528 F3 \u770b\u662f\u4e0d\u662f\u5934\u9876/\u811a\u4e0b\u88ab\u6321\uff09", reason, PlayerAction.sneakHeld() ? "\u662f" : "\u5426");
             return;
         }
-
-        failNoLogout("起飞失败：" + reason + "（可打开「起飞失败交给 Baritone」，或自己起跳后再开模块）");
+        this.failNoLogout("\u8d77\u98de\u5931\u8d25\uff1a" + reason + "\uff08\u6f5c\u884c " + (PlayerAction.sneakHeld() ? "\u662f" : "\u5426") + "\uff1b\u53ef\u6253\u5f00\u300c\u8d77\u98de\u5931\u8d25\u4ea4\u7ed9 Baritone\u300d\uff0c\u6216\u81ea\u5df1\u8d77\u8df3\u540e\u518d\u5f00\u6a21\u5757\uff09");
     }
 
     private void replanIfLost(boolean force) {
-        if (segmentTarget == null) return;
-
-        if (lavaPredictor != null && lavaPredictor.isAvoiding()) return;
-        if (BaritoneHook.isFlying()) return;
-        if (!force && tickCounter % 40 != 0) return;
-        BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
+        if (this.segmentTarget == null) {
+            return;
+        }
+        if (this.lavaPredictor != null && this.lavaPredictor.isAvoiding()) {
+            return;
+        }
+        if (BaritoneHook.isFlying()) {
+            return;
+        }
+        if (!force && this.tickCounter % 40 != 0) {
+            return;
+        }
+        this.requeuePath("\u6389\u7ebf\u91cd\u89c4\u5212", this.segmentTarget.getX(), this.segmentTarget.getZ());
     }
 
     private int fireworkHotbarSlot() {
-        if (mc.player == null) return -1;
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).getItem() == Items.FIREWORK_ROCKET) return i;
+        if (this.mc.player == null) {
+            return -1;
+        }
+        for (int i = 0; i < 9; ++i) {
+            if (this.mc.player.getInventory().getStack(i).getItem() != Items.FIREWORK_ROCKET) continue;
+            return i;
         }
         return -1;
     }
 
-    private void selectHotbar(int slot) {
-        mc.player.getInventory().setSelectedSlot(slot);
-        if (mc.getNetworkHandler() != null) {
-            try {
-                mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(slot));
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
     private void startOpenAreaEscape() {
-        if (segmentTarget == null) {
-            state = State.PREPARE;
+        if (this.segmentTarget == null) {
+            this.state = State.PREPARE;
             return;
         }
-        segFailStrikes = 0;
-        spinTimes = 0;
-        takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
-        forceFlyToOpen = true;
-        flightSettingsApplied = false;
-        takeoffTicks = 0;
-        openTriesDone = 0;
-        openEnd = null;
-        state = State.TAKEOFF;
+        this.segFailWindow.reset();
+        this.spinWindow.reset();
+        this.takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
+        this.forceFlyToOpen = true;
+        this.flightSettingsApplied = false;
+        this.takeoffTicks = 0;
+        this.openTriesDone = 0;
+        this.openEnd = null;
+        this.state = State.TAKEOFF;
     }
 
     private void resetTerrainState() {
-        terrainProbeTicks = 0;
-        terrainDetourCooldown = 0;
-        terrainDetour = null;
-        terrainDetourTicks = 0;
-        terrainClimbTicks = 0;
-        terrainClimbStartY = 0.0;
-        terrainClimbPausedBaritone = false;
-        terrainPending.clear();
-        terrainPendingTicks = 0;
-        landSkippedCave = 0;
-        landSkippedThreat = 0;
-        lastHurtHealth = -1.0;
-        torchPlacedThisLanding = false;
+        this.landSkippedThreat = 0;
+        this.landSkippedBasalt = 0;
+        this.basaltSkipHandled = false;
+        this.basaltBiomeUnknown = false;
+        this.lastHurtHealth = -1.0;
+        this.torchPlacedThisLanding = false;
     }
 
-    private void terrainTick() {
-        if (!avoidCaves.get() || segmentTarget == null) {
-            terrainPending.clear();
-            return;
+    private boolean inNether() {
+        try {
+            return this.mc.world != null && this.mc.world.getRegistryKey() == World.NETHER;
         }
-        if (terrainDetourCooldown > 0) terrainDetourCooldown--;
-        if (!resolveTerrainProbes()) return;
-        if (terrainDetour != null || terrainClimbTicks > 0 || terrainDetourCooldown > 0) return;
-        terrainProbeTicks++;
-        if (terrainProbeTicks % Math.max(5, probeInterval.get()) != 0) return;
-        scheduleTerrainProbes();
+        catch (Throwable t) {
+            return false;
+        }
     }
 
-    private void scheduleTerrainProbes() {
-        if (!terrainPending.isEmpty()) return;
-        int depth = Math.max(8, probeDepth.get());
-        int maxDist = Math.max(20, probeDistance.get());
-        double yaw = mc.player.getYaw();
-        for (int i = 1; i <= TERRAIN_SAMPLE_POINTS; i++) {
-            int d = (int) Math.round(maxDist * (double) i / TERRAIN_SAMPLE_POINTS);
-            int x = (int) Math.floor(forwardX(yaw, d));
-            int z = (int) Math.floor(forwardZ(yaw, d));
-            requestProbe(x, z, depth);
-            terrainPending.add(new TerrainSample(new BlockPos(x, mc.player.getBlockY(), z), d, "前方 " + d + " 格"));
+    private boolean allowReplan(String reason) {
+        int since;
+        if (!AutoElytraFlight.takeoffCriticalReplan(reason) && (since = Math.max(0, this.tickCounter - this.lastReplanTick)) < 60) {
+            FOElytraLog.detail("\u91cd\u89c4\u5212\uff1a\u539f\u56e0 %s\uff5c\u8ddd\u4e0a\u6b21 %.1f \u79d2\uff08\u6700\u5c11 3 \u79d2\uff09\u2192 \u8df3\u8fc7\u8fd9\u6b21\u4e0b\u53d1", reason, (double)since / 20.0);
+            return false;
         }
-        requestProbe(segmentTarget.getX(), segmentTarget.getZ(), depth);
-        terrainPending.add(new TerrainSample(segmentTarget, 0, "当前航点"));
-    }
-
-    private boolean resolveTerrainProbes() {
-        if (terrainPending.isEmpty()) {
-            terrainPendingTicks = 0;
-            return true;
-        }
-        terrainPendingTicks++;
-        if (terrainPendingTicks > TERRAIN_PROBE_TIMEOUT) {
-            FOElytraLog.detail("地形探测 %d tick 还没结果，这一轮当成未知（继续飞）", terrainPendingTicks);
-            terrainPending.clear();
-            terrainPendingTicks = 0;
-            return true;
-        }
-        int depth = Math.max(8, probeDepth.get());
-        List<TerrainSample> keep = new ArrayList<>();
-        for (TerrainSample s : terrainPending) {
-            TerrainProbe.Column col = pollProbe(s.pos().getX(), s.pos().getZ(), depth);
-            if (col == null) {
-                requestProbe(s.pos().getX(), s.pos().getZ(), depth);
-                if (keep.size() < 8) keep.add(s);
-                continue;
-            }
-            if (col.pending()) {
-                if (keep.size() < 8) keep.add(s);
-                continue;
-            }
-            if (!col.loaded()) continue;
-            if (col.deepCave()) {
-                terrainPending.clear();
-                terrainPendingTicks = 0;
-                triggerTerrainAvoidance(s.label());
-                return false;
-            }
-        }
-        terrainPending.clear();
-        terrainPending.addAll(keep);
+        this.lastReplanTick = this.tickCounter;
+        this.replanEver = true;
         return true;
     }
 
-    private void triggerTerrainAvoidance(String where) {
-        double yaw = mc.player.getYaw();
-        int forwardCave = 0;
-        for (int i = 1; i <= TERRAIN_SAMPLE_POINTS; i++) {
-            int maxDist = Math.max(20, probeDistance.get());
-            int d = (int) Math.round(maxDist * (double) i / TERRAIN_SAMPLE_POINTS);
-            if (caveAtHeading(yaw, d)) forwardCave++;
-        }
-        boolean leftCave = caveAtHeading(yaw - TERRAIN_DETOUR_ANGLE, TERRAIN_DETOUR_DISTANCE);
-        boolean rightCave = caveAtHeading(yaw + TERRAIN_DETOUR_ANGLE, TERRAIN_DETOUR_DISTANCE);
-        double lateralCost = TERRAIN_DETOUR_DISTANCE * 2.0;
-        double climbCost = TERRAIN_CLIMB_HEIGHT * 2.0;
-        terrainDetourCount++;
-        if (leftCave && rightCave) {
-            startTerrainClimb(where);
-            return;
-        }
-        if (forwardCave >= TERRAIN_SAMPLE_POINTS || climbCost >= lateralCost) {
-            startTerrainDetour(leftCave ? yaw + TERRAIN_DETOUR_ANGLE : yaw - TERRAIN_DETOUR_ANGLE,
-                leftCave ? "右侧" : "左侧", where);
-            return;
-        }
-        if (leftCave) {
-            startTerrainDetour(yaw + TERRAIN_DETOUR_ANGLE, "右侧", where);
-            return;
-        }
-        if (rightCave) {
-            startTerrainDetour(yaw - TERRAIN_DETOUR_ANGLE, "左侧", where);
-            return;
-        }
-        startTerrainClimb(where);
+    private static boolean takeoffCriticalReplan(String reason) {
+        return reason != null && reason.contains("\u8d77\u98de");
     }
 
-    private void startTerrainDetour(double targetYaw, String side, String where) {
-        int x = (int) Math.floor(forwardX(targetYaw, TERRAIN_DETOUR_DISTANCE));
-        int z = (int) Math.floor(forwardZ(targetYaw, TERRAIN_DETOUR_DISTANCE));
-        terrainDetour = new BlockPos(x, mc.player.getBlockY(), z);
-        terrainDetourTicks = 0;
-        terrainDetourCooldown = TERRAIN_TRIGGER_COOLDOWN;
-        terrainProbeTicks = 0;
-        BaritoneHook.pathTo(x, z);
-        FOElytraLog.warn("%s下面是洞穴/峡谷 → 绕开（改从%s，临时航点 %s）", where, side, terrainDetour.toShortString());
-    }
-
-    private void startTerrainClimb(String where) {
-        if (terrainClimbTicks > 0) return;
-        terrainClimbTicks = TERRAIN_CLIMB_TICKS;
-        terrainClimbStartY = mc.player.getY();
-        terrainDetourCooldown = TERRAIN_TRIGGER_COOLDOWN;
-        terrainProbeTicks = 0;
-        if (!terrainClimbPausedBaritone) {
-            BaritoneHook.pause();
-            terrainClimbPausedBaritone = true;
-        }
-        FOElytraLog.warn("%s下面是洞穴/峡谷 → 绕开（改从上方：抬高 %.0f 格再继续）", where, TERRAIN_CLIMB_HEIGHT);
-    }
-
-    private boolean terrainClimbTick() {
-        if (terrainClimbTicks <= 0) return false;
-        terrainClimbTicks--;
-        if (terrainClimbTicks == 0) {
-            if (terrainClimbPausedBaritone) {
-                terrainClimbPausedBaritone = false;
-                BaritoneHook.resume();
-                BaritoneHook.resetState();
-            }
-            if (segmentTarget != null) BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
-            FOElytraLog.info("抬高完成（+%.0f 格，当前 Y=%.0f），继续飞原航点",
-                mc.player.getY() - terrainClimbStartY, mc.player.getY());
+    private boolean requeuePath(String reason, int x, int z) {
+        BounceProbe.mark("\u91cd\u89c4\u5212 " + reason);
+        if (!this.allowReplan(reason)) {
             return false;
         }
-        if (!mc.player.isGliding()) {
-            PlayerAction.pressJump(true);
+        return BaritoneHook.pathTo(x, z);
+    }
+
+    private boolean allowBariReset(String reason) {
+        if (!this.inNether()) {
+            this.lastResetTick = this.tickCounter;
             return true;
         }
-        PlayerAction.pressJump(false);
-        mc.player.setPitch(-90.0f);
-        if (terrainClimbTicks % 5 == 0) {
-            int slot = fireworkHotbarSlot();
-            if (slot >= 0) {
-                selectHotbar(slot);
-                InvHelper.useItem(Hand.MAIN_HAND);
-            }
+        int since = Math.max(0, this.tickCounter - this.lastResetTick);
+        if (since < 200) {
+            FOElytraLog.detail("\u4e0b\u754c\u8282\u6d41\uff1a%s \u7684 Baritone \u91cd\u7f6e/\u91cd\u6253\u5305\u8df3\u8fc7\uff08\u8ddd\u4e0a\u6b21 %d \u79d2\uff0c\u6700\u5c11 %d \u79d2\uff09", reason, since / 20, 10);
+            return false;
         }
+        this.lastResetTick = this.tickCounter;
+        FOElytraLog.detail("\u4e0b\u754c\u5141\u8bb8\u4e00\u6b21 Baritone \u91cd\u7f6e\uff1a%s\uff08\u8ddd\u4e0a\u6b21 %d \u79d2\uff09", reason, since / 20);
         return true;
     }
 
-    private void terrainDetourTick() {
-        if (terrainDetour == null) return;
-        terrainDetourTicks++;
-        double d = Math.hypot(mc.player.getX() - (terrainDetour.getX() + 0.5),
-            mc.player.getZ() - (terrainDetour.getZ() + 0.5));
-        boolean timeout = terrainDetourTicks > TERRAIN_DETOUR_TIMEOUT;
-        if (!timeout && d > Math.max(12.0, arriveRadius.get())) return;
-        FOElytraLog.info("绕行%s：恢复原航点 %s", timeout ? "超时" : "到达",
-            segmentTarget == null ? "无" : segmentTarget.toShortString());
-        terrainDetour = null;
-        terrainDetourTicks = 0;
-        if (segmentTarget != null) BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
-    }
-
-    private double forwardX(double yaw, double dist) {
-        return mc.player.getX() - Math.sin(Math.toRadians(yaw)) * dist;
-    }
-
-    private double forwardZ(double yaw, double dist) {
-        return mc.player.getZ() + Math.cos(Math.toRadians(yaw)) * dist;
-    }
-
-    private boolean caveAtHeading(double yaw, double dist) {
-        return caveBelow((int) Math.floor(forwardX(yaw, dist)), (int) Math.floor(forwardZ(yaw, dist)));
-    }
-
-    private void requestProbe(int x, int z, int depth) {
-        try {
-            TerrainProbe.request(x, z, depth);
-        } catch (Throwable t) {
-            FOElytraLog.detailError("TerrainProbe.request", t);
+    private void btSafetyTick() {
+        if (this.tickCounter % 40 != 0) {
+            return;
         }
-    }
-
-    private TerrainProbe.Column pollProbe(int x, int z, int depth) {
-        try {
-            return TerrainProbe.poll(x, z, depth);
-        } catch (Throwable t) {
-            return null;
+        if (!((Boolean)this.btSafetyTakeover.get()).booleanValue()) {
+            this.restoreBtSafety();
+            return;
         }
-    }
-
-    private boolean caveBelow(int x, int z) {
-        int depth = Math.max(8, probeDepth.get());
+        boolean ourChanged = false;
         try {
-            TerrainProbe.Column col = TerrainProbe.poll(x, z, depth);
-            if (col == null) {
-                TerrainProbe.request(x, z, depth);
-                col = TerrainProbe.probeLoaded(x, z, depth);
+            Double d;
+            Object object;
+            Settings.Setting<?> avoid = BaritoneHook.btSetting("elytraMinimumAvoidance");
+            double want = Math.max(0.2, Math.min(2.0, (Double)this.btAvoidMargin.get()));
+            if (avoid != null && (object = avoid.value) instanceof Double && Math.abs((d = (Double)object) - want) > 0.001) {
+                if (this.lastAppliedAvoid != null && Math.abs(d - this.lastAppliedAvoid) > 0.001) {
+                    this.btAvoidMargin.set(d);
+                    FOElytraLog.info("\u4f60\u5728 Baritone \u91cc\u628a\u907f\u8ba9\u4f59\u91cf\u6539\u6210 %.2f \u2192 \u4ee5\u4f60\u7684\u4e3a\u51c6\uff0c\u5df2\u540c\u6b65\u8fdb\u672c\u6a21\u5757\uff08\u4e0d\u518d\u5199\u56de\u53bb\uff09", d);
+                } else {
+                    ourChanged = true;
+                }
             }
-            if (col == null || col.pending() || !col.loaded()) return false;
-            return col.deepCave();
-        } catch (Throwable t) {
-            return false;
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("btSafetyTick(\u907f\u8ba9\u4f59\u91cf)", t);
+        }
+        try {
+            Integer i;
+            Object object;
+            Settings.Setting<?> look = BaritoneHook.btSetting("elytraSimulationTicks");
+            int want = Math.max(20, Math.min(60, (Integer)this.btLookahead.get()));
+            if (look != null && (object = look.value) instanceof Integer && (i = (Integer)object) != want) {
+                if (this.lastAppliedLook != null && i != this.lastAppliedLook) {
+                    this.btLookahead.set(i);
+                    FOElytraLog.info("\u4f60\u5728 Baritone \u91cc\u628a\u524d\u77bb tick \u6539\u6210 %d \u2192 \u4ee5\u4f60\u7684\u4e3a\u51c6\uff0c\u5df2\u540c\u6b65\u8fdb\u672c\u6a21\u5757\uff08\u4e0d\u518d\u5199\u56de\u53bb\uff09", i);
+                } else {
+                    ourChanged = true;
+                }
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("btSafetyTick(\u524d\u77bb tick)", t);
+        }
+        if (ourChanged) {
+            FOElytraLog.detail("Baritone \u5b89\u5168\u53c2\u6570\u548c\u672c\u6a21\u5757\u8bbe\u7f6e\u4e0d\u4e00\u81f4\uff1a\u6309\u5f53\u524d\u8bbe\u7f6e\u5199\u5165\u4e00\u6b21", new Object[0]);
+            this.applyBtSafety();
+        }
+    }
+
+    private void applyBtSafety() {
+        Object object;
+        if (!((Boolean)this.btSafetyTakeover.get()).booleanValue()) {
+            this.restoreBtSafety();
+            return;
+        }
+        try {
+            Settings.Setting<?> avoid = BaritoneHook.btSetting("elytraMinimumAvoidance");
+            if (avoid == null) {
+                FOElytraLog.detail("\u62ff\u4e0d\u5230 Baritone \u7684 elytraMinimumAvoidance\uff0c\u8df3\u8fc7\u907f\u8ba9\u4f59\u91cf\u63a5\u7ba1", new Object[0]);
+            } else {
+                double want;
+                if (this.prevBtAvoid == null && (object = avoid.value) instanceof Double) {
+                    Double d;
+                    this.prevBtAvoid = d = (Double)object;
+                }
+                if (BaritoneHook.btSet("elytraMinimumAvoidance", want = Math.max(0.2, Math.min(2.0, (Double)this.btAvoidMargin.get())))) {
+                    this.lastAppliedAvoid = want;
+                    FOElytraLog.info("\u5df2\u63a5\u7ba1 Baritone \u907f\u8ba9\u4f59\u91cf\uff1a%.2f\uff08\u539f\u6765\u662f %s\uff09\uff0c\u5173\u6a21\u5757\u65f6\u8fd8\u539f", want, this.prevBtAvoid == null ? "\u672a\u77e5" : String.format("%.2f", this.prevBtAvoid));
+                } else {
+                    FOElytraLog.warn("\u5199\u5165 elytraMinimumAvoidance \u5931\u8d25\uff0c\u4fdd\u6301 Baritone \u539f\u8bbe\u7f6e", new Object[0]);
+                }
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("applyBtSafety(\u907f\u8ba9\u4f59\u91cf)", t);
+        }
+        try {
+            Settings.Setting<?> look = BaritoneHook.btSetting("elytraSimulationTicks");
+            if (look == null) {
+                FOElytraLog.detail("\u62ff\u4e0d\u5230 Baritone \u7684 elytraSimulationTicks\uff0c\u8df3\u8fc7\u524d\u77bb\u63a5\u7ba1", new Object[0]);
+            } else {
+                int want;
+                if (this.prevBtLookahead == null && (object = look.value) instanceof Integer) {
+                    Integer i;
+                    this.prevBtLookahead = i = (Integer)object;
+                }
+                if (BaritoneHook.btSet("elytraSimulationTicks", want = Math.max(20, Math.min(60, (Integer)this.btLookahead.get())))) {
+                    this.lastAppliedLook = want;
+                    FOElytraLog.info("\u5df2\u63a5\u7ba1 Baritone \u524d\u77bb tick\uff1a%d\uff08\u539f\u6765\u662f %s\uff09\uff0c\u5173\u6a21\u5757\u65f6\u8fd8\u539f", want, this.prevBtLookahead == null ? "\u672a\u77e5" : String.valueOf(this.prevBtLookahead));
+                } else {
+                    FOElytraLog.warn("\u5199\u5165 elytraSimulationTicks \u5931\u8d25\uff0c\u4fdd\u6301 Baritone \u539f\u8bbe\u7f6e", new Object[0]);
+                }
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("applyBtSafety(\u524d\u77bb tick)", t);
+        }
+        this.btSafetySaved = this.prevBtAvoid != null || this.prevBtLookahead != null;
+    }
+
+    private void restoreAutoJumpIfOurs() {
+        Boolean cur = null;
+        try {
+            Object object;
+            Settings.Setting<?> s = BaritoneHook.btSetting("elytraAutoJump");
+            if (s != null && (object = s.value) instanceof Boolean) {
+                Boolean b;
+                cur = b = (Boolean)object;
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("restoreAutoJumpIfOurs", t);
+        }
+        if (cur != null && this.lastForcedAutoJump != null && !cur.equals(this.lastForcedAutoJump)) {
+            FOElytraLog.info("elytraAutoJump \u5728 Baritone \u91cc\u53c8\u88ab\u6539\u6210 %s\uff08\u4e0d\u662f\u672c\u6a21\u5757\u5199\u7684\uff09\u2192 \u4e0d\u8fd8\u539f\uff0c\u4fdd\u6301\u4f60\u7684\u503c", cur);
+            this.lastForcedAutoJump = null;
+            return;
+        }
+        this.lastForcedAutoJump = null;
+        BaritoneHook.btSet("elytraAutoJump", this.btAutoJump.get());
+    }
+
+    /*
+     * Enabled aggressive block sorting
+     * Enabled unnecessary exception pruning
+     * Enabled aggressive exception aggregation
+     */
+    private void restoreBtSafety() {
+        block16: {
+            Object object;
+            Settings.Setting<?> cur;
+            block15: {
+                if (!this.btSafetySaved) {
+                    return;
+                }
+                if (this.prevBtAvoid != null) {
+                    try {
+                        cur = BaritoneHook.btSetting("elytraMinimumAvoidance");
+                        if (cur != null && (object = cur.value) instanceof Double) {
+                            Double d = (Double)object;
+                            if (this.lastAppliedAvoid != null && Math.abs(d - this.lastAppliedAvoid) > 0.001) {
+                                FOElytraLog.info("\u907f\u8ba9\u4f59\u91cf\u5728 Baritone \u91cc\u53c8\u88ab\u6539\u6210 %.2f\uff08\u4e0d\u662f\u672c\u6a21\u5757\u5199\u7684\uff09\u2192 \u4e0d\u8fd8\u539f\uff0c\u4fdd\u6301\u4f60\u7684\u503c", d);
+                                this.prevBtAvoid = null;
+                                this.lastAppliedAvoid = null;
+                                break block15;
+                            }
+                        }
+                        if (BaritoneHook.btSet("elytraMinimumAvoidance", this.prevBtAvoid)) {
+                            FOElytraLog.info("\u5df2\u8fd8\u539f Baritone \u907f\u8ba9\u4f59\u91cf\uff08%.2f\uff09", this.prevBtAvoid);
+                            this.prevBtAvoid = null;
+                            this.lastAppliedAvoid = null;
+                        } else {
+                            FOElytraLog.warn("\u8fd8\u539f elytraMinimumAvoidance \u5931\u8d25\uff0cBaritone \u91cc\u53ef\u80fd\u8fd8\u662f\u63a5\u7ba1\u540e\u7684\u503c", new Object[0]);
+                        }
+                    }
+                    catch (Throwable t) {
+                        FOElytraLog.detailError("restoreBtSafety(\u907f\u8ba9\u4f59\u91cf)", t);
+                    }
+                }
+            }
+            if (this.prevBtLookahead != null) {
+                try {
+                    cur = BaritoneHook.btSetting("elytraSimulationTicks");
+                    if (cur != null && (object = cur.value) instanceof Integer) {
+                        Integer i = (Integer)object;
+                        if (this.lastAppliedLook != null && i != this.lastAppliedLook) {
+                            FOElytraLog.info("\u524d\u77bb tick \u5728 Baritone \u91cc\u53c8\u88ab\u6539\u6210 %d\uff08\u4e0d\u662f\u672c\u6a21\u5757\u5199\u7684\uff09\u2192 \u4e0d\u8fd8\u539f\uff0c\u4fdd\u6301\u4f60\u7684\u503c", i);
+                            this.prevBtLookahead = null;
+                            this.lastAppliedLook = null;
+                            break block16;
+                        }
+                    }
+                    if (BaritoneHook.btSet("elytraSimulationTicks", this.prevBtLookahead)) {
+                        FOElytraLog.info("\u5df2\u8fd8\u539f Baritone \u524d\u77bb tick\uff08%d\uff09", this.prevBtLookahead);
+                        this.prevBtLookahead = null;
+                        this.lastAppliedLook = null;
+                    } else {
+                        FOElytraLog.warn("\u8fd8\u539f elytraSimulationTicks \u5931\u8d25\uff0cBaritone \u91cc\u53ef\u80fd\u8fd8\u662f\u63a5\u7ba1\u540e\u7684\u503c", new Object[0]);
+                    }
+                }
+                catch (Throwable t) {
+                    FOElytraLog.detailError("restoreBtSafety(\u524d\u77bb tick)", t);
+                }
+            }
+        }
+        this.btSafetySaved = this.prevBtAvoid != null || this.prevBtLookahead != null;
+    }
+
+    private void logSegmentStability(String where) {
+        if (this.mobHitsInSegment == 0) {
+            FOElytraLog.info("\u672c\u6bb5\u7a33\u5b9a\u6027\uff08%s\uff09\uff1a\u6ca1\u88ab\u602a\u6253", where);
+        } else {
+            FOElytraLog.info("\u672c\u6bb5\u7a33\u5b9a\u6027\uff08%s\uff09\uff1a\u88ab\u602a\u6253 %d \u6b21", where, this.mobHitsInSegment);
+        }
+    }
+
+    private void resetSegmentStability() {
+        this.mobHitsInSegment = 0;
+    }
+
+    private void applyNetherSeedPause() {
+        if (!((Boolean)this.netherPredictOff.get()).booleanValue()) {
+            this.restoreNetherSeed();
+            return;
+        }
+        try {
+            Settings.Setting<?> st = BaritoneHook.btSetting("elytraNetherSeed");
+            if (st == null) {
+                FOElytraLog.detail("\u62ff\u4e0d\u5230 Baritone \u7684 elytraNetherSeed\uff0c\u8df3\u8fc7\u5173\u95ed\u5730\u5f62\u9884\u6d4b", new Object[0]);
+                return;
+            }
+            if (!this.netherSeedSaved) {
+                this.prevNetherSeed = st.value;
+                this.netherSeedSaved = true;
+            }
+            if (BaritoneHook.btSet("elytraNetherSeed", 0L)) {
+                FOElytraLog.info("\u5df2\u628a Baritone \u7684 elytraNetherSeed \u7f6e 0\uff08\u5173\u95ed\u4e0b\u754c\u5730\u5f62\u9884\u6d4b\uff09\uff0c\u5173\u6a21\u5757\u65f6\u8fd8\u539f", new Object[0]);
+            } else {
+                FOElytraLog.warn("\u5199\u5165 elytraNetherSeed \u5931\u8d25\uff0c\u4fdd\u6301 Baritone \u539f\u8bbe\u7f6e", new Object[0]);
+                this.restoreNetherSeed();
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("applyNetherSeedPause", t);
+            this.restoreNetherSeed();
+        }
+    }
+
+    private void restoreNetherSeed() {
+        if (!this.netherSeedSaved) {
+            return;
+        }
+        try {
+            if (this.prevNetherSeed != null && BaritoneHook.btSet("elytraNetherSeed", this.prevNetherSeed)) {
+                FOElytraLog.info("\u5df2\u8fd8\u539f Baritone \u7684 elytraNetherSeed\uff08%s\uff09", this.prevNetherSeed);
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("restoreNetherSeed", t);
+        }
+        finally {
+            this.netherSeedSaved = false;
+            this.prevNetherSeed = null;
         }
     }
 
     private int threatNear(double cx, double cy, double cz, double radius) {
         try {
             double scan = radius + 24.0;
-            var list = mc.world.getEntitiesByClass(Entity.class,
-                mc.player.getBoundingBox().expand(scan),
-                e -> e != null && e.isAlive() && e instanceof Monster
-                    && e.squaredDistanceTo(cx, cy, cz) <= radius * radius);
+            List list = this.mc.world.getEntitiesByClass(Entity.class, this.mc.player.getBoundingBox().expand(scan), e -> e != null && e.isAlive() && (e instanceof Monster || e instanceof HostileEntity) && AutoElytraFlight.horizontalDistanceSq(e.getX(), e.getZ(), cx, cz) <= radius * radius && Math.abs(e.getY() - cy) <= 8.0);
             return list.size();
-        } catch (Throwable t) {
+        }
+        catch (Throwable t) {
             return 0;
         }
     }
 
+    private static double horizontalDistanceSq(double ax, double az, double bx, double bz) {
+        double dx = ax - bx;
+        double dz = az - bz;
+        return dx * dx + dz * dz;
+    }
+
     private void abortLandingForSafety() {
-        if (supplyTask != null && supplyTask.isRunning()) supplyTask.abort("降落点不安全");
+        this.supplyTicks = 0;
+        this.supplyErrorRetryCount = 0;
+        this.manualTask = false;
+        this.supplyCooldown = Math.max(this.supplyCooldown, (Integer)this.supplyRetryDelay.get());
+        FOElytraLog.info("\u964d\u843d\u70b9\u4e0d\u5b89\u5168\uff0c\u53d6\u6d88\u8fd9\u6b21\u964d\u843d\uff0c\u7ee7\u7eed\u98de\uff08\u4e0b\u6b21\u518d\u8bd5\uff09", new Object[0]);
+        if (this.beginRecover("\u964d\u843d\u70b9\u4e0d\u5b89\u5168", RecoverAfter.PREPARE)) {
+            return;
+        }
+        if (this.supplyTask != null && this.supplyTask.isRunning()) {
+            this.supplyTask.abort("\u964d\u843d\u70b9\u4e0d\u5b89\u5168");
+        }
         BlockBreaker.cancel();
         PlayerAction.releaseAll();
         BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        landingY = Double.NaN;
-        landingTicks = 0;
-        manualTask = false;
-        supplyTicks = 0;
-        supplyErrorRetryCount = 0;
-        supplyCooldown = Math.max(supplyCooldown, supplyRetryDelay.get());
-        FOElytraLog.info("降落点不安全，取消这次降落，继续飞（下次再试）");
-        state = State.PREPARE;
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.landingY = Double.NaN;
+        this.landingTicks = 0;
+        this.state = State.PREPARE;
     }
 
     private boolean pickLandingColumn() {
-        double px = mc.player.getX();
-        double py = mc.player.getY();
-        double pz = mc.player.getZ();
-        if (landSkipWhenCrowded.get()) {
-            int crowd = threatNear(px, py, pz, LAND_THREAT_CROWD_RADIUS);
-            if (crowd >= LAND_THREAT_CROWD_COUNT) {
-                FOElytraLog.warn("%d 格内有 %d 只敌对生物（≥%d）：按设置跳过这次补给，继续飞",
-                    LAND_THREAT_CROWD_RADIUS, crowd, LAND_THREAT_CROWD_COUNT);
+        double groundCheckY;
+        double px = this.mc.player.getX();
+        double py = this.mc.player.getY();
+        double pz = this.mc.player.getZ();
+        int groundY = this.landingSurfaceY(this.mc.player.getBlockX(), this.mc.player.getBlockZ());
+        double d = groundCheckY = groundY == Integer.MIN_VALUE ? py : (double)groundY + 1.0;
+        if (((Boolean)this.landSkipWhenCrowded.get()).booleanValue()) {
+            int crowd = this.threatNear(px, groundCheckY, pz, 24.0);
+            FOElytraLog.detail("\u964d\u843d\u5b89\u5168\u9884\u68c0\uff1a\u534a\u5f84 %d \u683c\u5185\u654c\u5bf9\u751f\u7269 %d \u53ea\uff08\u6309\u5730\u9762 Y=%.0f \u67e5\uff0c\u4e0d\u6309\u98de\u884c Y=%.0f\uff09\u3001\u8df3\u8fc7\u7ebf %d \u53ea \u2192 %s", 24, crowd, groundCheckY, py, 5, crowd >= 5 ? "\u8df3\u8fc7\u8fd9\u6b21\u8865\u7ed9" : "\u53ef\u4ee5\u7ee7\u7eed\u9009\u70b9");
+            if (crowd >= 5) {
+                FOElytraLog.warn("%d \u683c\u5185\u6709 %d \u53ea\u654c\u5bf9\u751f\u7269\uff08\u2265%d\uff09\uff1a\u6309\u8bbe\u7f6e\u8df3\u8fc7\u8fd9\u6b21\u8865\u7ed9\uff0c\u7ee7\u7eed\u98de", 24, crowd, 5);
                 return false;
             }
         }
-        int[][] offsets = {{0, 0}, {8, 0}, {-8, 0}, {0, 8}, {0, -8}, {12, 12}, {-12, 12},
-            {12, -12}, {-12, -12}, {16, 0}, {-16, 0}, {0, 16}, {0, -16}};
-        landSkippedCave = 0;
-        landSkippedThreat = 0;
+        if (this.supplyHurtNoLand > 0) {
+            FOElytraLog.detail("\u521a\u5728\u8865\u7ed9\u91cc\u88ab\u6253\u8fc7\uff08\u8fd8\u5269 %d \u79d2\u51b7\u5374\uff09\uff0c\u8fd9\u6b21\u4e0d\u964d\u843d\u8865\u7ed9\uff0c\u7ee7\u7eed\u98de", this.supplyHurtNoLand / 20);
+            return false;
+        }
+        int[][] offsets = new int[][]{{0, 0}, {8, 0}, {-8, 0}, {0, 8}, {0, -8}, {12, 12}, {-12, 12}, {12, -12}, {-12, -12}, {16, 0}, {-16, 0}, {0, 16}, {0, -16}};
+        this.landSkippedThreat = 0;
+        this.landSkippedBasalt = 0;
+        this.landSkippedUnsafe = 0;
+        this.landSkippedAbove = 0;
+        this.basaltBiomeUnknown = false;
+        boolean noBasalt = (Boolean)this.noSupplyInBasaltDeltas.get();
+        boolean playerInBasalt = noBasalt && this.isBasaltDeltasAt(this.mc.player.getBlockX(), this.mc.player.getBlockZ());
         for (int[] off : offsets) {
-            int x = mc.player.getBlockX() + off[0];
-            int z = mc.player.getBlockZ() + off[1];
-            if (avoidCaves.get() && caveBelow(x, z)) {
-                landSkippedCave++;
-                FOElytraLog.detail("降落点 %d %d 地底是洞穴/峡谷，跳过", x, z);
+            int x = this.mc.player.getBlockX() + off[0];
+            int z = this.mc.player.getBlockZ() + off[1];
+            if (noBasalt && (playerInBasalt || this.isBasaltDeltasAt(x, z))) {
+                ++this.landSkippedBasalt;
+                FOElytraLog.detail("\u964d\u843d\u70b9 %d %d \u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\uff0c\u8df3\u8fc7\u8fd9\u6b21\u964d\u843d", x, z);
                 continue;
             }
-            if (landAvoidMobs.get() && threatNear(x + 0.5, py, z + 0.5, landSafeRadius.get()) > 0) {
-                landSkippedThreat++;
-                FOElytraLog.detail("降落点 %d %d 半径 %d 格内有敌对生物，换个点", x, z, landSafeRadius.get());
+            int surface = this.landingSurfaceY(x, z);
+            boolean loaded = surface != Integer.MIN_VALUE;
+            double surfaceY = loaded ? (double)surface + 1.0 : py;
+            StringBuilder note = new StringBuilder();
+            int verdict = this.landColumnVerdict(x, z, surface, note);
+            int threats = this.threatNear((double)x + 0.5, surfaceY, (double)z + 0.5, ((Integer)this.landSafeRadius.get()).intValue());
+            note.append("\uff5c\u602a ").append(threats).append(" \u53ea");
+            if (verdict == 1 || verdict == 2 || verdict == 3 || verdict == 4) {
+                ++this.landSkippedUnsafe;
+                FOElytraLog.detail("\u964d\u843d\u70b9 %d %d\uff08\u5730\u9762 Y=%.0f\uff09\u4e0d\u5b89\u5168\uff1a%s \u2192 \u7ed3\u8bba\uff1a\u8df3\u8fc7\uff08%s\uff09", x, z, surfaceY, note, this.verdictText(verdict));
                 continue;
             }
-            int surface = StuckEscape.surfaceY(mc.world, x, z);
-            landingTargetX = x + 0.5;
-            landingTargetZ = z + 0.5;
-            landingY = surface == Integer.MIN_VALUE ? Math.max(-64.0, py - 40.0) : surface;
-            FOElytraLog.info("降落点选在 %d %d（跳过地底是洞穴的 %d 个、附近有怪的 %d 个），地面 Y=%.0f",
-                x, z, landSkippedCave, landSkippedThreat, landingY);
+            if (verdict == 5) {
+                ++this.landSkippedAbove;
+                FOElytraLog.detail("\u964d\u843d\u70b9 %d %d\uff08\u5730\u9762 Y=%.0f\uff09\u7ad9\u4e0d\u7a33\uff1a%s \u2192 \u7ed3\u8bba\uff1a\u8df3\u8fc7\uff08\u5730\u8868\u4e0a\u65b9 %d \u683c\u88ab\u5835\uff09", x, z, surfaceY, note, 3);
+                continue;
+            }
+            if (((Boolean)this.landAvoidMobs.get()).booleanValue() && threats > 0) {
+                ++this.landSkippedThreat;
+                FOElytraLog.detail("\u964d\u843d\u70b9 %d %d\uff08\u5730\u9762 Y=%.0f\uff09\u534a\u5f84 %d \u683c\u5185\u6709 %d \u53ea\u654c\u5bf9\u751f\u7269\uff1a%s \u2192 \u7ed3\u8bba\uff1a\u6362\u4e2a\u70b9", x, z, surfaceY, this.landSafeRadius.get(), threats, note);
+                continue;
+            }
+            this.landingTargetX = (double)x + 0.5;
+            this.landingTargetZ = (double)z + 0.5;
+            this.landingY = loaded ? (double)surface : Math.max(-64.0, py - 40.0);
+            FOElytraLog.info("\u964d\u843d\u70b9\u9009\u5728 %d %d\uff08\u9644\u8fd1\u6709\u602a\u7684 %d \u4e2a\u3001\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u7684 %d \u4e2a\uff09\uff0c\u5730\u9762 Y=%.0f", x, z, this.landSkippedThreat, this.landSkippedBasalt, this.landingY);
+            FOElytraLog.detail("\u964d\u843d\u70b9 %d %d \u901a\u8fc7\u5b89\u5168\u68c0\u67e5\uff1a%s \u2192 \u7ed3\u8bba\uff1a\u5c31\u843d\u8fd9\u91cc", x, z, note);
+            FOElytraLog.detail("\u964d\u843d\u70b9\u5224\u5b9a\uff1a\u5171 %d \u4e2a\u5019\u9009\u3001%d \u4e2a\u56e0\u4e3a\u4e0b\u65b9\u5ca9\u6d46/\u6c34/\u60ac\u7a7a\u88ab\u8df3\u8fc7\uff08\u5f80\u4e0b\u67e5 %d \u683c\uff09\u3001%d \u4e2a\u56e0\u4e3a\u5730\u8868\u4e0a\u65b9 %d \u683c\u88ab\u5835\u88ab\u8df3\u8fc7\u3001%d \u4e2a\u56e0\u4e3a\u6709\u602a\u88ab\u8df3\u8fc7\uff08\u534a\u5f84 %d \u683c\u3001\u6309\u6bcf\u4e2a\u5019\u9009\u81ea\u5df1\u7684\u5730\u9762 Y \u67e5\u3001\u5782\u76f4\u5bb9\u5dee %d \u683c\uff09\u3001%d \u4e2a\u56e0\u4e3a\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u88ab\u8df3\u8fc7 \u2192 \u9009 (%d %d)\uff0c\u8be5\u70b9\u534a\u5f84\u5185\u654c\u5bf9\u751f\u7269 %d \u53ea", offsets.length, this.landSkippedUnsafe, 10, this.landSkippedAbove, 3, this.landSkippedThreat, this.landSafeRadius.get(), 8, this.landSkippedBasalt, x, z, threats);
             return true;
         }
-        FOElytraLog.warn("附近候选降落点全不合适（地底是洞穴 %d 个、附近有怪 %d 个）：不硬降，继续飞",
-            landSkippedCave, landSkippedThreat);
+        if (this.landSkippedBasalt >= offsets.length) {
+            this.skipSupplyInBasaltDeltas(this.basaltBiomeUnknown ? "\u8bfb\u4e0d\u5230\u751f\u7269\u7fa4\u7cfb\uff0c\u4fdd\u5b88\u8df3\u8fc7" : (playerInBasalt ? "\u73a9\u5bb6\u6b63\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32" : "\u5019\u9009\u964d\u843d\u70b9\u90fd\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32"));
+            this.basaltSkipHandled = true;
+            return false;
+        }
+        FOElytraLog.warn("\u672c\u6b21\u6ca1\u6709\u5b89\u5168\u964d\u843d\u70b9\uff08\u5019\u9009 %d \u4e2a\u90fd\u88ab\u5ca9\u6d46/\u6c34/\u602a/\u5730\u5f62\u6392\u9664\uff09\u2192 \u7ee7\u7eed\u98de\uff0c\u627e\u4e0b\u4e00\u4e2a\u5b89\u5168\u70b9", offsets.length);
+        FOElytraLog.detail("\u5019\u9009\u6392\u67e5\u6c47\u603b\uff1a\u4e0b\u65b9\u5ca9\u6d46/\u6c34/\u60ac\u7a7a %d \u4e2a\uff5c\u5730\u8868\u4e0a\u65b9\u88ab\u5835 %d \u4e2a\uff5c\u6709\u602a %d \u4e2a\uff5c\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32 %d \u4e2a\uff5c%d \u79d2\u5185\u4e0d\u518d\u8bd5\u7740\u964d\u843d", this.landSkippedUnsafe, this.landSkippedAbove, this.landSkippedThreat, this.landSkippedBasalt, 30);
+        this.supplyCooldown = Math.max(this.supplyCooldown, 600);
         return false;
     }
 
-    private boolean supplyHurtTick() {
-        float hp = mc.player.getHealth();
-        if (!hurtAbortSupply.get()) {
-            lastHurtHealth = hp;
+    private int landColumnVerdict(int x, int z, int surface, StringBuilder note) {
+        if (surface == Integer.MIN_VALUE) {
+            note.append("\u4e0b\u65b9\uff1a\u6574\u5217\u6ca1\u627e\u5230\u5b9e\u5fc3\u5730\u9762\uff08\u6d1e\u7a74/\u865a\u7a7a\uff09");
+            int aboveMissing = 0;
+            for (int i = 0; i < 3; ++i) {
+                if (!StuckEscape.blocked((World)this.mc.world, new BlockPos(x, this.mc.player.getBlockY() + i, z))) continue;
+                ++aboveMissing;
+            }
+            note.append("\uff5c\u4e0a\u65b9 3 \u683c\uff08\u6309\u4f60\u5f53\u524d\u9ad8\u5ea6\uff09\uff1a").append(aboveMissing).append(" \u683c\u6709\u65b9\u5757");
+            return 3;
+        }
+        int reason = 0;
+        Object below = "\u5f80\u4e0b 10 \u683c\u90fd\u662f\u7a7a\u6c14";
+        for (int i = 1; i <= 10; ++i) {
+            BlockPos p = new BlockPos(x, surface - i, z);
+            if (!this.mc.world.isChunkLoaded(p.getX() >> 4, p.getZ() >> 4)) {
+                below = "\u4e0b\u65b9\u533a\u5757\u6ca1\u52a0\u8f7d";
+                reason = 4;
+                break;
+            }
+            BlockState st = this.mc.world.getBlockState(p);
+            if (st.isOf(Blocks.LAVA)) {
+                below = "\u5ca9\u6d46\uff08\u5f80\u4e0b\u7b2c " + i + " \u683c\uff09";
+                reason = 1;
+                break;
+            }
+            if (!st.getFluidState().isEmpty()) {
+                below = "\u6c34\uff08\u5f80\u4e0b\u7b2c " + i + " \u683c\uff09";
+                reason = 2;
+                break;
+            }
+            if (st.getCollisionShape((BlockView)this.mc.world, p).isEmpty()) continue;
+            below = "\u5b9e\u5fc3\uff08\u5f80\u4e0b\u7b2c " + i + " \u683c\uff09";
+            break;
+        }
+        if (reason == 0 && ((String)below).startsWith("\u5f80\u4e0b")) {
+            reason = 3;
+        }
+        StringBuilder above = new StringBuilder();
+        boolean aboveBlocked = false;
+        for (int i = 0; i < 3; ++i) {
+            boolean blocked = StuckEscape.blocked((World)this.mc.world, new BlockPos(x, surface + i, z));
+            if (blocked) {
+                aboveBlocked = true;
+            }
+            if (i > 0) {
+                above.append('/');
+            }
+            above.append(blocked ? "\u6709\u65b9\u5757" : "\u7a7a");
+        }
+        note.append("\u4e0b\u65b9\uff1a").append((String)below).append("\uff5c\u5730\u8868\u4e0a\u65b9 ").append(3).append(" \u683c\uff1a").append((CharSequence)above);
+        if (reason == 0 && aboveBlocked) {
+            reason = 5;
+        }
+        return reason;
+    }
+
+    private String verdictText(int verdict) {
+        return switch (verdict) {
+            case 1 -> "\u4e0b\u65b9\u6709\u5ca9\u6d46";
+            case 2 -> "\u4e0b\u65b9\u6709\u6c34";
+            case 3 -> "\u4e0b\u65b9\u6ca1\u6709\u5b9e\u5fc3\u5730\u9762\uff08\u60ac\u7a7a\uff09";
+            case 4 -> "\u4e0b\u65b9\u533a\u5757\u6ca1\u52a0\u8f7d";
+            case 5 -> "\u5730\u8868\u4e0a\u65b9\u88ab\u5835";
+            default -> "\u6ca1\u95ee\u9898";
+        };
+    }
+
+    private boolean landingColumnTurnedBad() {
+        try {
+            int surface;
+            int tz;
+            int y0 = (int)Math.floor(this.mc.player.getY());
+            for (int i = 1; i <= 6; ++i) {
+                BlockPos p = new BlockPos(this.mc.player.getBlockX(), y0 - i, this.mc.player.getBlockZ());
+                if (!this.mc.world.isChunkLoaded(p.getX() >> 4, p.getZ() >> 4)) {
+                    return false;
+                }
+                BlockState st = this.mc.world.getBlockState(p);
+                if (st.isOf(Blocks.LAVA)) {
+                    return true;
+                }
+                if (st.getFluidState().isEmpty()) continue;
+                return true;
+            }
+            int tx = (int)Math.floor(this.landingTargetX);
+            int verdict = this.landColumnVerdict(tx, tz = (int)Math.floor(this.landingTargetZ), surface = this.landingSurfaceY(tx, tz), new StringBuilder());
+            return verdict == 1 || verdict == 2 || verdict == 3;
+        }
+        catch (Throwable t) {
             return false;
         }
-        double before = lastHurtHealth;
-        boolean dropped = lastHurtHealth >= 0.0 && lastHurtHealth - hp >= 2.0;
-        boolean hurt = mc.player.hurtTime > 0;
-        lastHurtHealth = hp;
-        if (!hurt && !dropped) return false;
-        FOElytraLog.warn("补给中被攻击（血量 %s → %.1f）→ 中断补给、原地起飞",
-            before < 0.0 ? String.format("%.1f", hp) : String.format("%.1f", before), hp);
-        if (supplyTask != null && supplyTask.isRunning()) supplyTask.abort("补给中被攻击");
+    }
+
+    private void abortLandingLavaWater(String why) {
+        FOElytraLog.warn("\u964d\u843d\u4e2d\u6b62\uff1a\u4e0b\u65b9\u51fa\u73b0\u5ca9\u6d46/\u6c34\uff08%s\uff09\u2192 \u62c9\u8d77\u6765\u7ee7\u7eed\u98de\uff0c\u627e\u4e0b\u4e00\u4e2a\u5b89\u5168\u70b9\u518d\u964d", why);
+        BaritoneHook.stop();
+        BlockBreaker.cancel();
+        PlayerAction.releaseAll();
+        PlayerAction.restoreHeldKeys();
+        this.landingY = Double.NaN;
+        this.landingTicks = 0;
+        this.supplyCooldown = Math.max(this.supplyCooldown, 600);
+        this.state = State.PREPARE;
+    }
+
+    private int landingSurfaceY(int x, int z) {
+        try {
+            if (!this.mc.world.isChunkLoaded(x >> 4, z >> 4)) {
+                return Integer.MIN_VALUE;
+            }
+            int top = this.mc.world.getTopYInclusive();
+            int bottom = this.mc.world.getBottomY();
+            for (int y = top; y > bottom; --y) {
+                BlockPos p = new BlockPos(x, y, z);
+                BlockState st = this.mc.world.getBlockState(p);
+                if (st.isAir() || !st.getFluidState().isEmpty() || st.getCollisionShape((BlockView)this.mc.world, p).isEmpty()) continue;
+                return y + 1;
+            }
+        }
+        finally {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    private boolean waitForUserScreen(String stage) {
+        if (!InvHelper.screenOpen()) {
+            return false;
+        }
+        if (InvHelper.hasContainerOpen()) {
+            FOElytraLog.detail("\u5173\u6389\u8865\u7ed9\u7559\u4e0b\u7684\u5bb9\u5668\u754c\u9762\uff08%s\uff09\uff0c\u7ee7\u7eed", stage);
+            InvHelper.closeScreen();
+            return false;
+        }
+        ++this.waitTicks;
+        if (this.waitTicks == 1) {
+            FOElytraLog.info("\u68c0\u6d4b\u5230\u4f60\u5f00\u7740\u754c\u9762\uff1a\u7b49\u4f60\u5173\u6389\u518d\u7ee7\u7eed\uff08%s\uff09", stage);
+        } else if (this.waitTicks % 100 == 0) {
+            FOElytraLog.warn("\u4ecd\u5728\u7b49\u4f60\u5173\u95ed\u754c\u9762\uff08%s\uff0c\u5df2\u7b49 %d \u79d2\uff09", stage, this.waitTicks / 20);
+        }
+        return true;
+    }
+
+    private boolean isBasaltDeltasAt(int x, int z) {
+        if (!this.inNether() || this.mc.player == null) {
+            return false;
+        }
+        try {
+            return this.mc.world.getBiomeAccess().getBiome(new BlockPos(x, this.mc.player.getBlockY(), z)).getKey().map(key -> "minecraft:basalt_deltas".equals(key.getValue().toString())).orElse(false);
+        }
+        catch (Throwable t) {
+            if (!this.basaltBiomeUnknown) {
+                this.basaltBiomeUnknown = true;
+                FOElytraLog.warn("\u8bfb\u4e0d\u5230\u751f\u7269\u7fa4\u7cfb\uff08%s\uff09\uff0c\u4fdd\u5b88\u6309\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u5904\u7406\uff1a\u8fd9\u6b21\u4e0d\u964d\u843d\u8865\u7ed9", String.valueOf(t));
+            }
+            return true;
+        }
+    }
+
+    private void skipSupplyInBasaltDeltas(String why) {
+        boolean first = this.supplyCooldown < 600;
+        this.landingY = Double.NaN;
+        this.landingTicks = 0;
+        this.manualTask = false;
+        this.supplyTicks = 0;
+        this.supplyErrorRetryCount = 0;
+        this.supplyCooldown = Math.max(this.supplyCooldown, 600);
+        if (first) {
+            FOElytraLog.warn("\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\uff0c\u8df3\u8fc7\u8fd9\u6b21\u8865\u7ed9\uff0c\u7ee7\u7eed\u98de\uff08%s\uff09", why);
+            FOElytraLog.info("\u8fd9\u6b21\u8865\u7ed9 %d \u79d2\u5185\u4e0d\u518d\u8bd5\uff0c\u4e5f\u4e0d\u4f1a\u9a6c\u4e0a\u4e0b\u843d", 30);
+        }
+        if (this.beginRecover("\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u4e0d\u8865\u7ed9", RecoverAfter.PREPARE)) {
+            return;
+        }
+        if (this.supplyTask != null && this.supplyTask.isRunning()) {
+            this.supplyTask.abort("\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\u4e0d\u8865\u7ed9");
+        }
         BlockBreaker.cancel();
         PlayerAction.releaseAll();
         BaritoneHook.stop();
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        manualTask = false;
-        supplyTicks = 0;
-        supplyErrorRetryCount = 0;
-        supplyCooldown = SUPPLY_HURT_COOLDOWN;
-        lastHurtHealth = -1.0;
-        FOElytraLog.info("补给已中断，这次补给 %d 秒内不再试（先起飞）", SUPPLY_HURT_COOLDOWN / 20);
-        state = State.PREPARE;
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.state = State.PREPARE;
+    }
+
+    private boolean beginRecover(String reason, RecoverAfter after) {
+        if (this.supplyTask == null || !this.supplyTask.recoverNeeded()) {
+            return false;
+        }
+        if (this.supplyTask.isRecovering()) {
+            return true;
+        }
+        if (!this.supplyTask.beginRecover(reason)) {
+            return false;
+        }
+        this.recoverArmed = true;
+        this.recoverAfter = after;
+        this.recoverWatchdog = 0;
+        BaritoneHook.stop();
+        BlockBreaker.cancel();
+        PlayerAction.releaseAll();
+        PlayerAction.restoreHeldKeys();
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.state = State.RECOVER;
+        FOElytraLog.warn("\u5148\u5f52\u4f4d\uff08%s\uff09\uff1a\u628a\u653e\u4e0b\u7684\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u6536\u56de\u6765\u518d\u7ee7\u7eed", reason);
+        return true;
+    }
+
+    private void recoverTick() {
+        if (this.supplyTask == null) {
+            this.finishRecover();
+            return;
+        }
+        if (InvHelper.screenOpen()) {
+            PlayerAction.restoreHeldKeys();
+        }
+        this.supplyTask.tick();
+        if (this.supplyTask.status() == TaskStatus.RUNNING) {
+            ++this.recoverWatchdog;
+            if (this.recoverWatchdog % 100 == 0) {
+                FOElytraLog.info("\u5f52\u4f4d\u4e2d\uff08%d \u79d2\uff09\uff1a%s", this.recoverWatchdog / 20, this.supplyTask.progress());
+            }
+            if (this.recoverWatchdog <= 500) {
+                return;
+            }
+            FOElytraLog.warn("\u5f52\u4f4d\u8d85\u65f6\uff08%d \u79d2\uff09\uff0c\u4e0d\u518d\u7b49\uff1a%s", 25, this.supplyTask.progress());
+            this.supplyTask.abort("\u5f52\u4f4d\u8d85\u65f6");
+        }
+        this.finishRecover();
+    }
+
+    private void finishRecover() {
+        this.recoverArmed = false;
+        this.supplyTask = null;
+        BaritoneHook.stop();
+        BlockBreaker.cancel();
+        PlayerAction.releaseAll();
+        PlayerAction.restoreHeldKeys();
+        PlayerAction.clearStuckSneak();
+        this.manualTask = false;
+        this.supplyTicks = 0;
+        this.landingY = Double.NaN;
+        FOElytraLog.info("\u5f52\u4f4d\u6d41\u7a0b\u7ed3\u675f", new Object[0]);
+        switch (this.recoverAfter.ordinal()) {
+            case 1: {
+                String reason = this.pendingFailReason == null ? "\u4efb\u52a1\u5931\u8d25" : this.pendingFailReason;
+                this.pendingFailReason = null;
+                this.recoveryJustRan = true;
+                this.fail(reason);
+                break;
+            }
+            case 2: {
+                String message = this.pendingFinishMessage == null ? "\u4efb\u52a1\u7ed3\u675f" : this.pendingFinishMessage;
+                this.pendingFinishMessage = null;
+                this.recoveryJustRan = true;
+                this.finish(message);
+                break;
+            }
+            case 3: {
+                this.state = State.IDLE;
+                if (!this.isActive()) break;
+                this.toggle();
+                break;
+            }
+            case 0: {
+                this.state = State.PREPARE;
+            }
+        }
+    }
+
+    private void startRecoverRunner() {
+        if (this.recoverRunner != null) {
+            return;
+        }
+        try {
+            if (!this.isActive()) {
+                RecoverRunner runner = new RecoverRunner();
+                MeteorClient.EVENT_BUS.subscribe((Object)runner);
+                this.recoverRunner = runner;
+                FOElytraLog.detail("\u6a21\u5757\u5df2\u5173\u95ed\uff1a\u5f52\u4f4d\u6539\u7531\u72ec\u7acb\u8ba1\u65f6\u5668\u7ee7\u7eed\uff08\u62ff\u5230\u4e1c\u897f\u624d\u4f1a\u505c\uff09", new Object[0]);
+            }
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("startRecoverRunner", t);
+        }
+    }
+
+    private void stopRecoverRunner() {
+        Object runner = this.recoverRunner;
+        this.recoverRunner = null;
+        if (runner == null) {
+            return;
+        }
+        try {
+            MeteorClient.EVENT_BUS.unsubscribe(runner);
+            FOElytraLog.detail("\u5f52\u4f4d\u8ba1\u65f6\u5668\u5df2\u505c", new Object[0]);
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("stopRecoverRunner", t);
+        }
+    }
+
+    private boolean supplyHurtTick() {
+        float hp = this.mc.player.getHealth();
+        if (!((Boolean)this.hurtAbortSupply.get()).booleanValue()) {
+            this.lastHurtHealth = hp;
+            return false;
+        }
+        double before = this.lastHurtHealth;
+        boolean dropped = this.lastHurtHealth >= 0.0 && this.lastHurtHealth - (double)hp >= 2.0;
+        boolean hurt = this.mc.player.hurtTime > 0;
+        this.lastHurtHealth = hp;
+        if (!hurt && !dropped) {
+            return false;
+        }
+        ++this.mobHitsInSegment;
+        BounceProbe.mark("\u8865\u7ed9\u4e2d\u88ab\u653b\u51fb");
+        FOElytraLog.warn("\u8865\u7ed9\u4e2d\u88ab\u653b\u51fb\uff08\u8840\u91cf %s \u2192 %.1f\uff09\u2192 \u4e2d\u65ad\u8865\u7ed9\u3001\u539f\u5730\u8d77\u98de", before < 0.0 ? String.format("%.1f", Float.valueOf(hp)) : String.format("%.1f", before), Float.valueOf(hp));
+        this.manualTask = false;
+        this.supplyTicks = 0;
+        this.supplyErrorRetryCount = 0;
+        this.lastHurtHealth = -1.0;
+        this.supplyCooldown = 600;
+        this.supplyHurtNoLand = 600;
+        FOElytraLog.detail("\u8fd9\u6bb5\u65f6\u95f4\uff08%d \u79d2\uff09\u4e0d\u964d\u843d\u3001\u4e5f\u4e0d\u91cd\u8bd5\u8865\u7ed9\uff1b\u5982\u679c\u843d\u70b9\u9644\u8fd1\u672c\u6765\u5c31\u6709\u602a\uff0c\u8bf4\u660e\u964d\u843d\u70b9\u7684\u67e5\u602a\u6f0f\u4e86\uff08\u73b0\u5728\u6309\u6bcf\u4e2a\u5019\u9009\u70b9\u81ea\u5df1\u7684\u5730\u9762\u9ad8\u5ea6\u67e5\u602a\uff0c\u5782\u76f4\u5bb9\u5dee %d \u683c\uff09", 30, 8);
+        if (this.beginRecover("\u8865\u7ed9\u4e2d\u88ab\u653b\u51fb", RecoverAfter.PREPARE)) {
+            FOElytraLog.info("\u8fd9\u6b21\u8865\u7ed9 %d \u79d2\u5185\u4e0d\u518d\u8bd5\uff08\u5148\u628a\u653e\u4e0b\u7684\u4e1c\u897f\u6536\u56de\u6765\u518d\u8d77\u98de\uff09", 30);
+            return true;
+        }
+        if (this.supplyTask != null && this.supplyTask.isRunning()) {
+            this.supplyTask.abort("\u8865\u7ed9\u4e2d\u88ab\u653b\u51fb");
+        }
+        BlockBreaker.cancel();
+        PlayerAction.releaseAll();
+        BaritoneHook.stop();
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        FOElytraLog.info("\u8865\u7ed9\u5df2\u4e2d\u65ad\uff0c\u8fd9\u6b21\u8865\u7ed9 %d \u79d2\u5185\u4e0d\u518d\u8bd5\uff08\u5148\u8d77\u98de\uff09", 30);
+        this.state = State.PREPARE;
         return true;
     }
 
     private void placeTorchBeforeSupply() {
-        if (!torchBeforeSupply.get() || torchPlacedThisLanding) return;
-        torchPlacedThisLanding = true;
-        int slot = findTorchHotbar();
-        if (slot < 0) {
-            FOElytraLog.detail("想插火把但背包里没有火把或灯笼，跳过");
+        if (!((Boolean)this.torchBeforeSupply.get()).booleanValue() || this.torchPlacedThisLanding) {
             return;
         }
-        BlockPos target = InvHelper.findPlaceTarget(mc.player, 2);
+        this.torchPlacedThisLanding = true;
+        int slot = this.findTorchHotbar();
+        if (slot < 0) {
+            FOElytraLog.detail("\u60f3\u63d2\u706b\u628a\u4f46\u80cc\u5305\u91cc\u6ca1\u6709\u706b\u628a\u6216\u706f\u7b3c\uff0c\u8df3\u8fc7", new Object[0]);
+            return;
+        }
+        BlockPos target = InvHelper.findPlaceTarget((PlayerEntity)this.mc.player, 2);
         if (target == null) {
-            FOElytraLog.detail("想插火把但附近没有可放的位置，跳过");
+            FOElytraLog.detail("\u60f3\u63d2\u706b\u628a\u4f46\u9644\u8fd1\u6ca1\u6709\u53ef\u653e\u7684\u4f4d\u7f6e\uff0c\u8df3\u8fc7", new Object[0]);
             return;
         }
         if (InvHelper.placeBlock(target, slot)) {
-            FOElytraLog.info("降落点插了火把（%s），降低刷怪", target.toShortString());
+            FOElytraLog.info("\u964d\u843d\u70b9\u63d2\u4e86\u706b\u628a\uff08%s\uff09\uff0c\u964d\u4f4e\u5237\u602a", target.toShortString());
         } else {
-            FOElytraLog.detail("插火把失败（%s），继续补给", target.toShortString());
+            FOElytraLog.detail("\u63d2\u706b\u628a\u5931\u8d25\uff08%s\uff09\uff0c\u7ee7\u7eed\u8865\u7ed9", target.toShortString());
         }
     }
 
     private int findTorchHotbar() {
-        int slot = InvHelper.findSlot(s -> s.isOf(Items.TORCH) || s.isOf(Items.SOUL_TORCH)
-            || s.isOf(Items.LANTERN) || s.isOf(Items.SOUL_LANTERN), 0, 9);
-        if (slot >= 0) return slot;
-        int bag = InvHelper.findSlot(s -> s.isOf(Items.TORCH) || s.isOf(Items.SOUL_TORCH)
-            || s.isOf(Items.LANTERN) || s.isOf(Items.SOUL_LANTERN), 9, 36);
-        if (bag < 0) return -1;
+        int slot = InvHelper.findSlot(s -> s.isOf(Items.TORCH) || s.isOf(Items.SOUL_TORCH) || s.isOf(Items.LANTERN) || s.isOf(Items.SOUL_LANTERN), 0, 9);
+        if (slot >= 0) {
+            return slot;
+        }
+        int bag = InvHelper.findSlot(s -> s.isOf(Items.TORCH) || s.isOf(Items.SOUL_TORCH) || s.isOf(Items.LANTERN) || s.isOf(Items.SOUL_LANTERN), 9, 36);
+        if (bag < 0) {
+            return -1;
+        }
         int empty = InvHelper.findEmptyHotbarSlot();
-        if (empty < 0) return -1;
+        if (empty < 0) {
+            return -1;
+        }
         InvHelper.moveInvToHotbar(bag, empty);
         return empty;
     }
 
-    private boolean stuckEscapeActive() {
-        return stuckEscapeMode != STUCK_ESCAPE_NONE && (state == State.TAKEOFF || state == State.FLYING);
+    private void flying() {
+        boolean lavaNow;
+        if (this.segmentTarget == null) {
+            this.state = State.PREPARE;
+            return;
+        }
+        if (this.lavaEscaping()) {
+            return;
+        }
+        this.fireworkStallTick();
+        this.takeoffFireworkTick();
+        if (!BaritoneHook.isFlying()) {
+            double dz;
+            double dx = this.mc.player.getX() - ((double)this.segmentTarget.getX() + 0.5);
+            double dist = Math.sqrt(dx * dx + (dz = this.mc.player.getZ() - ((double)this.segmentTarget.getZ() + 0.5)) * dz);
+            if (dist <= (double)((Integer)this.arriveRadius.get()).intValue()) {
+                FOElytraLog.info("\u5230\u8fbe\u76ee\u6807 %d, %d\uff08\u8bef\u5dee %.1f \u683c\uff09", this.segmentTarget.getX(), this.segmentTarget.getZ(), dist);
+                this.segFailWindow.reset();
+                this.segResetDone = false;
+                this.spinWindow.reset();
+                BaritoneHook.clearSegFailCounter();
+                this.segmentTarget = null;
+                if (this.lavaPredictor != null) {
+                    this.lavaPredictor.reset();
+                }
+                this.logSegmentStability("\u5230\u8fbe\u76ee\u6807");
+                this.resetSegmentStability();
+                if (this.mode.get() == Mode.SingleTarget) {
+                    this.finish("\u5df2\u5230\u8fbe\u76ee\u6807\u5750\u6807");
+                    return;
+                }
+                this.state = State.PREPARE;
+                return;
+            }
+            this.segFailWindow.accumulate(this.tickCounter);
+            FOElytraLog.warn("\u672c\u6bb5\u63d0\u524d\u7ed3\u675f\uff08\u8ddd\u76ee\u6807 %.0f \u683c\uff0c\u7b2c %d \u6b21\uff09", dist, this.segFailWindow.getCount(this.tickCounter));
+            this.logSegmentStability("\u672c\u6bb5\u63d0\u524d\u7ed3\u675f");
+            this.resetSegmentStability();
+            if (this.lavaPredictor != null) {
+                this.lavaPredictor.reset();
+            }
+            this.state = State.PREPARE;
+            return;
+        }
+        if (this.lavaPredictor != null) {
+            this.lavaPredictor.tick(this.mc, this.segmentTarget);
+            if (this.lavaPredictor.isAvoiding()) {
+                return;
+            }
+        }
+        if (this.flightStatusCheck()) {
+            return;
+        }
+        if (!this.lavaDanger() && ((Boolean)this.autoSupply.get()).booleanValue() && this.supplyCooldown <= 0 && ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET) == 0) {
+            FOElytraLog.warn("\u70df\u82b1\u5df2\u7ecf\u7528\u5149\uff0c\u7acb\u523b\u964d\u843d\u8865\u7ed9\uff08%s\uff09", this.supplyReason());
+            if (this.startSupply()) {
+                return;
+            }
+            this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
+        }
+        if (((Boolean)this.pauseOnPlayers.get()).booleanValue() && this.playerNearby((Double)this.playerRange.get())) {
+            if (!this.pausedByPlayer) {
+                this.pausedByPlayer = true;
+                if (this.eat.isEating()) {
+                    FOElytraLog.detail("\u6709\u73a9\u5bb6\u5728\u9644\u8fd1\u8981\u8ba9\u884c\uff1a\u5148\u505c\u4e0b\u8fdb\u98df\uff08\u514d\u5f97\u8fdb\u98df\u7ed3\u675f\u65f6\u628a\u8ba9\u884c\u7684\u6682\u505c\u9876\u6389\uff09", new Object[0]);
+                    this.eat.stop();
+                }
+                BaritoneHook.pause();
+                FOElytraLog.info("\u9644\u8fd1\u6709\u73a9\u5bb6\uff0c\u6682\u505c\u98de\u884c\u7b49\u5f85\u5176\u79bb\u5f00", new Object[0]);
+            }
+            return;
+        }
+        if (this.pausedByPlayer) {
+            this.pausedByPlayer = false;
+            if (!this.hovering && !this.fireballs.isEngaging()) {
+                BaritoneHook.resume();
+            }
+            FOElytraLog.info("\u73a9\u5bb6\u5df2\u79bb\u5f00\uff0c\u7ee7\u7eed\u98de\u884c", new Object[0]);
+        }
+        if (this.fireballs.isEngaging() && this.fireballs.pausedBaritone()) {
+            return;
+        }
+        if (!((Boolean)this.chunkWait.get()).booleanValue()) {
+            if (this.hovering) {
+                this.hovering = false;
+                if (!this.pausedByPlayer && !this.fireballs.pausedBaritone()) {
+                    BaritoneHook.resume();
+                }
+                FOElytraLog.info("\u5df2\u5173\u95ed\u533a\u5757\u7b49\u5f85\uff0c\u6062\u590d\u98de\u884c", new Object[0]);
+            }
+        } else if (this.tickCounter % 10 == 0) {
+            float ratio = this.unloadedChunkRatio((Integer)this.chunkRadius.get());
+            if (!this.hovering && (double)ratio > (Double)this.unloadedRatio.get() && this.openBelowWithin(7)) {
+                this.hovering = true;
+                this.hoverStart = this.tickCounter;
+                BaritoneHook.pause();
+                FOElytraLog.warn("\u672a\u52a0\u8f7d\u533a\u5757 %.0f%% \u4e14\u811a\u4e0b 7 \u683c\u5185\u6ca1\u6709\u65b9\u5757\uff0c\u6682\u505c\u7b49\u5f85\uff08\u539f\u5730\u76d8\u65cb\u8865\u70df\u82b1\uff09", Float.valueOf(ratio * 100.0f));
+            } else if (this.hovering) {
+                boolean timeout;
+                boolean loaded = ratio <= 0.05f;
+                boolean bl = timeout = this.tickCounter - this.hoverStart > (Integer)this.hoverTimeout.get();
+                if (loaded || timeout) {
+                    this.hovering = false;
+                    if (timeout) {
+                        FOElytraLog.warn("\u7b49\u5f85\u533a\u5757\u8d85\u65f6\uff08%d tick\uff09\uff0c\u5f3a\u5236\u6062\u590d\u98de\u884c", this.hoverTimeout.get());
+                    } else {
+                        FOElytraLog.info("\u533a\u5757\u52a0\u8f7d\u5b8c\u6210\uff08\u672a\u52a0\u8f7d %.0f%%\uff09\uff0c\u7ee7\u7eed\u98de\u884c", Float.valueOf(ratio * 100.0f));
+                    }
+                    if (!this.pausedByPlayer && !this.fireballs.pausedBaritone()) {
+                        BaritoneHook.resume();
+                    }
+                }
+            }
+        }
+        if (this.hovering) {
+            return;
+        }
+        if (this.tickCounter % 20 == 0) {
+            PlayerAction.clearStuckSneak();
+        }
+        if (!(lavaNow = this.lavaDanger()) && ((Boolean)this.autoMend.get()).booleanValue() && this.mendCooldown <= 0 && MendTask.shouldRepair((Integer)this.mendDurability.get())) {
+            FOElytraLog.info("\u9798\u7fc5\u8010\u4e45\u4e0d\u8db3\uff0c\u51c6\u5907\u964d\u843d\u4fee\u590d", new Object[0]);
+            if (this.startMend()) {
+                return;
+            }
+            this.mendCooldown = 100;
+        }
+        if (!lavaNow && ((Boolean)this.autoSupply.get()).booleanValue() && this.supplyCooldown <= 0 && this.supplyNeeded()) {
+            FOElytraLog.info("\u89e6\u53d1\u8865\u7ed9\uff1a%s", this.supplyReason());
+            if (this.startSupply()) {
+                return;
+            }
+            this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
+        }
     }
 
-    private void resetStuckState() {
-        stuckTracker.reset();
-        stuckNow = false;
-        stuckFireworkHold = false;
-        stuckEscapeMode = STUCK_ESCAPE_NONE;
-        stuckEscapeTicks = 0;
-        stuckEscapeSpot = null;
-        stuckHealthStopped = false;
-        flightProgressTicks = 0;
-        takeoffCeilingChecked = false;
-        landingY = Double.NaN;
-        landingTicks = 0;
-        landingAngle = 0.0;
-    }
-
-    private boolean stuckTick() {
-        if (!stuckEscape.get()) {
-            stuckTracker.reset();
-            stuckNow = false;
+    private boolean openBelowWithin(int depth) {
+        int cy;
+        if (this.mc.world == null || this.mc.player == null) {
             return false;
         }
-        if (stuckNow) return true;
-        boolean detected = stuckTracker.sample(mc, stuckSpeedThreshold.get(), stuckMoveThreshold.get(), stuckHoldTicks.get());
-        if (!detected) return false;
-        stuckNow = true;
-        boolean ceiling = StuckEscape.ceilingBlocked(mc.world, mc.player.getBlockPos(), STUCK_CEILING_UP);
-        FOElytraLog.warn("卡住：水平速度 %.3f，20 tick 位移 %.2f 格（%s）→ 暂停烟花、尝试脱离",
-            stuckTracker.lastSpeed(), stuckTracker.lastMove(), ceiling ? "顶到天花板" : "侧面撞墙");
-        FOElytraLog.detail("卡住判定：连续 %d tick 未推进｜位置 %d %d %d｜滑翔 %s｜血量 %.1f｜目标 %s",
-            stuckTracker.holdTicks(), mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ(),
-            mc.player.isGliding() ? "是" : "否", mc.player.getHealth(),
-            segmentTarget == null ? "无" : segmentTarget.toShortString());
-        return beginStuckEscape(ceiling ? "卡天花板" : "撞墙");
-    }
-
-    private boolean beginStuckEscape(String reason) {
-        stuckEscapeTicks = 0;
-        PlayerAction.pressUse(false);
-        PlayerAction.pressForward(false);
-        PlayerAction.pressJump(false);
-        BaritoneHook.stop();
-        stuckFireworkHold = true;
-
-        if (mc.player.getHealth() <= stuckHealthGuard.get().floatValue()) {
-            stuckHealthStop();
-            return true;
+        int x = this.mc.player.getBlockX();
+        int z = this.mc.player.getBlockZ();
+        int y = this.mc.player.getBlockY() - 1;
+        for (int i = 0; i < depth && (cy = y - i) >= this.mc.world.getBottomY(); ++i) {
+            if (!this.mc.world.isChunkLoaded(x >> 4, z >> 4)) {
+                return false;
+            }
+            if (this.mc.world.getBlockState(new BlockPos(x, cy, z)).isAir()) continue;
+            return false;
         }
-
-        BlockPos spot = StuckEscape.findOpenSpot(mc.world, mc.player.getBlockPos(),
-            STUCK_OPEN_SPOT_RADIUS, STUCK_CLEAR_UP, STUCK_SPOT_BUDGET);
-        if (spot != null) {
-            stuckEscapeMode = STUCK_ESCAPE_WALK;
-            stuckEscapeSpot = spot;
-            BaritoneHook.command("goto " + spot.getX() + " " + spot.getY() + " " + spot.getZ());
-            FOElytraLog.warn("脱离（%s）：暂停烟花，交给 Baritone 地面走到最近的开阔点 %s", reason, spot.toShortString());
-            return true;
-        }
-        return aimAtOpening(reason);
-    }
-
-    private boolean aimAtOpening(String reason) {
-        FindPathToOpen.Takeoff t = FindPathToOpen.getTakeoffDirection(ESCAPE_RAY_DISTANCE, openSafeDist.get(), 1.7, 0.0);
-        BlockPos end = t == null ? null : t.end;
-        if (end != null && !StuckEscape.skyClear(mc.world, end, STUCK_CLEAR_UP)) end = null;
-        if (end == null) {
-            stuckEscapeFails++;
-            FOElytraLog.err("卡住（%s）第 %d 次脱离失败：附近找不到能走到的开阔点，也没有通向天空的开口", reason, stuckEscapeFails);
-            fail("撞墙/卡天花板后脱离失败（" + reason + "）：周围既没有开阔点也没有开口，停下来请自己走出去");
-            return true;
-        }
-        stuckEscapeMode = STUCK_ESCAPE_NONE;
-        stuckEscapeSpot = null;
-        stuckEscapeFails = 0;
-        stuckNow = false;
-        stuckTracker.reset();
-        stuckFireworkHold = false;
-        takeoffCeilingChecked = false;
-        flightSettingsApplied = false;
-        takeoffPhase = TakeoffPhase.FLY_TO_OPEN;
-        openTriesDone = 0;
-        openEnd = null;
-        clearingHead = false;
-        takeoffTicks = 0;
-        takeoffFireworksUsed = 0;
-        takeoffFireworkCooldown = 0;
-        jumpAttempts = 0;
-        jumpSeq = 0;
-        glidingLostTicks = 0;
-        mc.player.setYaw(t.yaw);
-        mc.player.setPitch(t.pitch);
-        state = State.TAKEOFF;
-        FOElytraLog.warn("脱离（%s）：改为对准开口 yaw %.0f° / pitch %.0f° → %s 再飞",
-            reason, t.yaw, t.pitch, end.toShortString());
         return true;
     }
 
-    private void stuckEscapeTick() {
-        PlayerAction.pressUse(false);
-        stuckFireworkHold = true;
-        if (InvHelper.screenOpen()) return;
-        if (stuckEscapeMode != STUCK_ESCAPE_WALK) {
-            stuckEscapeMode = STUCK_ESCAPE_NONE;
+    private void inputStuckTick() {
+        if (this.mc.player == null) {
             return;
         }
-        stuckEscapeTicks++;
-        BlockPos spot = stuckEscapeSpot;
-        if (spot == null) {
-            endStuckEscapeWalk("开阔点丢失");
+        if (!this.mc.player.isUsingItem()) {
+            this.usingItemTicks = 0;
             return;
         }
-        boolean arrived = StuckEscape.horizontalDistance(mc.player.getX(), mc.player.getZ(), spot)
-            <= STUCK_WALK_ARRIVE_DISTANCE;
-        if (arrived && mc.player.isOnGround() && !mc.player.isGliding()) {
-            FOElytraLog.info("脱离成功：已走到开阔点 %s，重新起飞", spot.toShortString());
-            stuckEscapeFails = 0;
-            endStuckEscapeWalk(null);
-            return;
-        }
-        if (stuckEscapeTicks > STUCK_WALK_TIMEOUT_TICKS) {
-            stuckEscapeFails++;
-            FOElytraLog.warn("脱离失败：走了 %d 秒还没到开阔点 %s（第 %d 次）",
-                stuckEscapeTicks / 20, spot.toShortString(), stuckEscapeFails);
-            endStuckEscapeWalk("走不到开阔点");
-            return;
-        }
-        if (stuckEscapeTicks == 1 || stuckEscapeTicks % STUCK_WALK_REPATH_TICKS == 0) {
-            BaritoneHook.command("goto " + spot.getX() + " " + spot.getY() + " " + spot.getZ());
-        }
-        if (stuckEscapeTicks % 200 == 0) {
-            FOElytraLog.info("脱离中：距开阔点 %.0f 格（已走 %d 秒）",
-                StuckEscape.horizontalDistance(mc.player.getX(), mc.player.getZ(), spot), stuckEscapeTicks / 20);
+        if (++this.usingItemTicks > 40 && this.tickCounter - this.usingItemLogTick > 100 && !this.eat.isEating() && !this.lavaEscaping()) {
+            this.usingItemLogTick = this.tickCounter;
+            FOElytraLog.warn("\u300c\u6b63\u5728\u4f7f\u7528\u7269\u54c1\u300d\u5df2\u7ecf\u5361\u4f4f %.0f \u79d2\uff08\u4e0d\u662f\u5728\u8fdb\u98df\u3001\u4e5f\u4e0d\u662f\u5ca9\u6d46\u81ea\u6551\uff09\uff1a\u624b\u6301 %s\uff5c\u53f3\u952e\u952e %s\uff5c\u754c\u9762 %s\uff5c\u8fd9\u4e00\u6bb5\u539f\u7248\u4e0d\u4f1a\u518d\u63a5\u53d7\u4efb\u4f55\u53f3\u952e", (double)this.usingItemTicks / 20.0, this.mc.player.getMainHandStack().isEmpty() ? "\u7a7a\u624b" : this.mc.player.getMainHandStack().getName().getString(), this.mc.options.useKey.isPressed() ? "\u6309\u4e0b" : "\u6ca1\u6309", this.mc.currentScreen != null ? "\u5f00\u7740" : "\u65e0");
         }
     }
 
-    private void endStuckEscapeWalk(String why) {
-        BaritoneHook.stop();
-        stuckEscapeMode = STUCK_ESCAPE_NONE;
-        stuckEscapeSpot = null;
-        stuckEscapeTicks = 0;
-        if (stuckEscapeFails >= STUCK_ESCAPE_MAX_FAILS) {
-            stuckNow = false;
-            stuckTracker.reset();
-            stuckFireworkHold = false;
-            segFailStrikes++;
-            FOElytraLog.err("连续 %d 次卡住都没脱离成功：本段飞行停止，先交给 Baritone 地面走出去", stuckEscapeFails);
-            state = State.PREPARE;
+    private void autoMendTick() {
+        if (!((Boolean)this.autoMend.get()).booleanValue() || this.mendCooldown > 0) {
             return;
         }
-        if (why == null) {
-            stuckNow = false;
-            stuckTracker.reset();
-            stuckFireworkHold = false;
-            takeoffCeilingChecked = false;
-            flightSettingsApplied = false;
-            takeoffPhase = TakeoffPhase.INIT;
-            openTriesDone = 0;
-            takeoffTicks = 0;
-            jumpAttempts = 0;
-            jumpSeq = 0;
-            state = State.TAKEOFF;
+        if (!MendTask.shouldRepair((Integer)this.mendDurability.get())) {
             return;
         }
-        stuckFireworkHold = true;
-        aimAtOpening(why);
-    }
-
-    private void stuckHealthStop() {
-        stuckHealthStopped = true;
-        stuckNow = false;
-        stuckFireworkHold = true;
-        stuckEscapeMode = STUCK_ESCAPE_NONE;
-        stuckEscapeSpot = null;
-        PlayerAction.pressUse(false);
-        PlayerAction.pressForward(false);
-        BaritoneHook.stop();
-        FOElytraLog.err("卡住期间血量只剩 %.1f（保护线 %.1f）：已经停掉烟花和推进", mc.player.getHealth(), stuckHealthGuard.get());
-        FOElytraLog.warn("卡住时血量低于保护线：不再放烟花，就地滑翔降落；想继续请手动接管或重新起飞");
-    }
-
-    private void stuckHealthHoldTick() {
-        PlayerAction.pressUse(false);
-        stuckFireworkHold = true;
-        if (mc.player.isOnGround() && !mc.player.isGliding()) {
-            stuckHealthStopped = false;
-            stuckTracker.reset();
-            FOElytraLog.info("血量保护：已经落地，本段停止飞行（可重新起飞或手动接管）");
-            state = State.PREPARE;
+        if (this.state == State.MEND || this.state == State.SUPPLY || this.state == State.LANDING || this.state == State.RECOVER || this.state == State.FAILED) {
             return;
         }
-        if (tickCounter % 100 == 0) {
-            FOElytraLog.warn("血量保护中（%.1f 血）：正在滑翔下降，不放烟花", mc.player.getHealth());
+        if (this.lavaEscaping() || this.mc.player.isInLava()) {
+            return;
         }
+        if (!this.safeLandingBelow()) {
+            if (this.tickCounter - this.mendSkipLogTick > 200) {
+                this.mendSkipLogTick = this.tickCounter;
+                FOElytraLog.detail("\u9798\u7fc5\u8010\u4e45\u5df2\u5230\u7ebf\uff0c\u4f46\u811a\u4e0b\u8fd9\u6bb5\u843d\u70b9\u4e0d\u5b89\u5168\uff08\u5ca9\u6d46/\u6c34/\u60ac\u7a7a\uff09\u2192 \u8fd9\u6b21\u5148\u4e0d\u4fee\uff0c\u98de\u5230\u6709\u9646\u5730\u7684\u5730\u65b9\u518d\u4fee", new Object[0]);
+            }
+            return;
+        }
+        FOElytraLog.info("\u9798\u7fc5\u8010\u4e45\u4e0d\u8db3\uff0c\u7acb\u523b\u51c6\u5907\u964d\u843d\u4fee\u590d", new Object[0]);
+        BounceProbe.mark("\u8010\u4e45\u5230\u7ebf\u964d\u843d\u4fee\u8865");
+        if (this.startMend()) {
+            return;
+        }
+        this.mendCooldown = 100;
     }
 
-    private boolean noProgressTick() {
-        flightProgressTicks++;
-        if (flightProgressTicks != NO_PROGRESS_TICKS) return false;
-        double moved = Math.hypot(mc.player.getX() - flightStartX, mc.player.getZ() - flightStartZ);
-        if (moved >= NO_PROGRESS_DISTANCE) return false;
-        FOElytraLog.warn("起飞后 %d 秒只飞了 %.1f 格（不足 %.0f 格）：判定没进展，停止本段飞行",
-            NO_PROGRESS_TICKS / 20, moved, NO_PROGRESS_DISTANCE);
-        stuckNow = true;
-        return beginStuckEscape("起飞后没进展");
-    }
-
-    private boolean stuckRescueTick() {
-
-        if (spinPauseTicks > 0) {
-            if (--spinPauseTicks == 0) {
-                BaritoneHook.resume();
-                BaritoneHook.resetState();
-                BaritoneHook.repackChunks();
-                FOElytraLog.warn("原地绕圈复飞：重置 Baritone 并冲向开阔地");
-                startOpenAreaEscape();
+    private boolean safeLandingBelow() {
+        try {
+            int i;
+            int x = this.mc.player.getBlockX();
+            int z = this.mc.player.getBlockZ();
+            int y = this.mc.player.getBlockY();
+            int ground = Integer.MIN_VALUE;
+            for (i = 1; i <= 16; ++i) {
+                BlockState st = this.mc.world.getBlockState(new BlockPos(x, y - i, z));
+                if (!st.getFluidState().isEmpty()) {
+                    return false;
+                }
+                if (st.isAir()) continue;
+                ground = y - i;
+                break;
+            }
+            if (ground == Integer.MIN_VALUE) {
+                return false;
+            }
+            for (i = 1; i <= 3; ++i) {
+                if (this.mc.world.getBlockState(new BlockPos(x, ground + i, z)).isAir()) continue;
+                return false;
             }
             return true;
         }
-
-        int segFails = BaritoneHook.segFailCount();
-        if (segFails > 25) {
-            if (segFails > 30) {
-                fail("baritone寻路异常（Baritone 连续报 'Failed to compute/recompute segment'）");
-                return true;
-            }
-            if (BaritoneHook.consumeSegResetRequest()) {
-                BaritoneHook.resetState();
-                BaritoneHook.repackChunks();
-                FOElytraLog.warn("SegFailed！正在重置 baritone!（6 tick 内 %d 条段失败消息）", segFails);
-                startOpenAreaEscape();
-                return true;
-            }
-        }
-
-        if (segFailStrikes >= 4 && !segResetDone) {
-            segResetDone = true;
-            BaritoneHook.resetState();
-            BaritoneHook.repackChunks();
-            FOElytraLog.warn("SegFailed！正在重置 baritone!");
-            startOpenAreaEscape();
-            return true;
-        }
-        if (segFailStrikes > 8) {
-            fail("baritone 寻路异常（连续 " + segFailStrikes + " 段无法抵达目标）");
-            return true;
-        }
-
-        if (tickCounter % Math.max(100, stuckTicks.get()) == 0) {
-            BlockPos now = mc.player.getBlockPos();
-            if (lastSpinPos != null && now.isWithinDistance(lastSpinPos, Math.max(25.0, stuckDistance.get()))) {
-                FOElytraLog.warn("SegFailed！原地绕圈（第 %d 次）", spinTimes + 1);
-                spinTimes++;
-
-                if (spinTimes > 4) {
-                    fail("baritone 寻路异常？！疑似原地转圈");
-                    return true;
-                }
-                if (spinTimes > 1) {
-                    BaritoneHook.pause();
-                    spinPauseTicks = 20;
-                } else {
-                    BaritoneHook.resetState();
-                }
-            }
-            lastSpinPos = now;
-        }
-        return false;
-    }
-
-    private void flying() {
-        if (segmentTarget == null) {
-            state = State.PREPARE;
-            return;
-        }
-
-        if (lavaEscaping()) return;
-
-        if (stuckHealthStopped) {
-            stuckHealthHoldTick();
-            return;
-        }
-
-        if (!BaritoneHook.isFlying()) {
-            if (flightGrace > 0) {
-                flightGrace--;
-                return;
-            }
-            double dx = mc.player.getX() - (segmentTarget.getX() + 0.5);
-            double dz = mc.player.getZ() - (segmentTarget.getZ() + 0.5);
-            double dist = Math.sqrt(dx * dx + dz * dz);
-
-            if (dist <= arriveRadius.get()) {
-                FOElytraLog.info("到达目标 %d, %d（误差 %.1f 格）", segmentTarget.getX(), segmentTarget.getZ(), dist);
-                stuckStrikes = 0;
-                segFailStrikes = 0;
-                segResetDone = false;
-                spinTimes = 0;
-                BaritoneHook.clearSegFailCounter();
-                segmentTarget = null;
-                if (lavaPredictor != null) lavaPredictor.reset();
-                if (mode.get() == Mode.SingleTarget) {
-                    finish("已到达目标坐标");
-                    return;
-                }
-                state = State.PREPARE;
-                return;
-            }
-
-            segFailStrikes++;
-
-            FOElytraLog.warn("本段提前结束（距目标 %.0f 格，第 %d 次）", dist, segFailStrikes);
-            if (lavaPredictor != null) lavaPredictor.reset();
-            state = State.PREPARE;
-            return;
-        }
-
-        if (lavaPredictor != null) {
-                           lavaPredictor.tick(mc, segmentTarget);
-            if (lavaPredictor.isAvoiding()) {
-                return;
-            }
-        }
-
-        if (flightStatusCheck()) return;
-
-        if (!lavaDanger() && autoSupply.get() && supplyCooldown <= 0
-            && ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET) == 0) {
-            FOElytraLog.warn("烟花已经用光，立刻降落补给（%s）", supplyReason());
-            if (startSupply()) return;
-            supplyCooldown = supplyRetryDelay.get();
-        }
-
-        if (pauseOnPlayers.get() && playerNearby(playerRange.get())) {
-            if (!pausedByPlayer) {
-                pausedByPlayer = true;
-                BaritoneHook.pause();
-                FOElytraLog.info("附近有玩家，暂停飞行等待其离开");
-            }
-            hover(hoverFirework.get());
-            return;
-        }
-        if (pausedByPlayer) {
-            pausedByPlayer = false;
-            if (!hovering && !fireballs.isEngaging()) BaritoneHook.resume();
-            FOElytraLog.info("玩家已离开，继续飞行");
-        }
-
-        if (fireballs.isEngaging() && fireballs.pausedBaritone()) {
-            hover(hoverFirework.get());
-            return;
-        }
-
-        if (!chunkWait.get()) {
-
-            if (hovering) {
-                hovering = false;
-                if (!pausedByPlayer && !fireballs.pausedBaritone()) BaritoneHook.resume();
-                FOElytraLog.info("已关闭区块等待，恢复飞行");
-            }
-        } else {
-            float ratio = unloadedChunkRatio(chunkRadius.get());
-            if (!hovering && ratio > unloadedRatio.get()) {
-                hovering = true;
-                hoverStart = tickCounter;
-                BaritoneHook.pause();
-                FOElytraLog.warn("未加载区块 %.0f%%，暂停等待（原地盘旋补烟花）", ratio * 100);
-            } else if (hovering) {
-                boolean loaded = ratio <= Math.max(0.05, unloadedRatio.get() * 0.2);
-                boolean timeout = tickCounter - hoverStart > hoverTimeout.get();
-                if (loaded || timeout) {
-                    hovering = false;
-                    if (timeout) FOElytraLog.warn("等待区块超时（%d tick），强制恢复飞行", hoverTimeout.get());
-                    else FOElytraLog.info("区块加载完成，继续飞行");
-                    if (!pausedByPlayer && !fireballs.pausedBaritone()) BaritoneHook.resume();
-                }
-            }
-        }
-        if (hovering) {
-            hover(hoverFirework.get());
-            return;
-        }
-
-        if (terrainClimbTick()) return;
-        terrainDetourTick();
-        terrainTick();
-
-        if (stuckTick()) return;
-        if (noProgressTick()) return;
-
-        if (stuckFix.get() && stuckRescueTick()) return;
-
-        if (fireworkRefill.get()) refillHotbarFireworks();
-
-        boolean lavaNow = lavaDanger();
-
-        if (!lavaNow && autoMend.get() && mendCooldown <= 0 && MendTask.shouldRepair(mendDurability.get())) {
-            FOElytraLog.info("鞘翅耐久不足，准备降落修复");
-            if (startMend()) return;
-
-            mendCooldown = 100;
-        }
-
-        if (!lavaNow && autoSupply.get() && supplyCooldown <= 0 && supplyNeeded()) {
-            FOElytraLog.info("触发补给：%s", supplyReason());
-            if (startSupply()) return;
-            supplyCooldown = supplyRetryDelay.get();
+        catch (Throwable t) {
+            return false;
         }
     }
 
-    private void hover(int fireworkInterval) {
-        if (tickCounter % 10 == 0) {
-            mc.player.setYaw(mc.player.getYaw() + 180.0f);
+    private void fireworkStallTick() {
+        int total = ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET);
+        if (this.fireworkSeenTotal < 0 || total < this.fireworkSeenTotal) {
+            this.lastFireworkConsumeTick = this.tickCounter;
         }
-        mc.player.setPitch(0.0f);
-        if (fireworkInterval > 0 && hoverTicker++ >= fireworkInterval) {
-            hoverTicker = 0;
-            if (mc.player.getVelocity().y < 0.2) useFirework();
+        this.fireworkSeenTotal = total;
+        if (this.tickCounter - this.lastFireworkConsumeTick < 600) {
+            return;
         }
+        if (this.mc.player.getVelocity().y > -0.05) {
+            return;
+        }
+        if (this.tickCounter - this.fireworkStallLogTick < 200) {
+            return;
+        }
+        this.fireworkStallLogTick = this.tickCounter;
+        ItemStack chest = ItemHelper.wornElytra((PlayerEntity)this.mc.player);
+        FOElytraLog.warn("\u5df2\u7ecf %.0f \u79d2\u6ca1\u6d88\u8017\u70df\u82b1\u3001\u8fd8\u5728\u6389\u9ad8\u5ea6\uff08vy %.2f\uff09\u2192 \u53ef\u80fd\u653e\u4e0d\u51fa\u70df\u82b1\uff1a\u624b\u6301 %s\uff08\u5feb\u6377\u680f\u7b2c %d \u683c\uff09\uff5c\u6ed1\u7fd4 %s\uff5c\u63a5\u5730 %s\uff5c\u5feb\u6377\u680f\u70df\u82b1 %d \u53d1\uff5cBaritone %s\uff5c\u80f8\u7532\u69fd %s\uff08\u8010\u4e45 %d / \u6ee1 %d\uff09\uff5c\u6b63\u5728\u4f7f\u7528\u7269\u54c1 %s\uff5c\u53f3\u952e\u952e %s\uff5c\u754c\u9762 %s", (double)(this.tickCounter - this.lastFireworkConsumeTick) / 20.0, this.mc.player.getVelocity().y, this.mc.player.getMainHandStack().isEmpty() ? "\u7a7a\u624b" : this.mc.player.getMainHandStack().getName().getString(), this.mc.player.getInventory().getSelectedSlot() + 1, this.mc.player.isGliding() ? "\u662f" : "\u5426", this.mc.player.isOnGround() ? "\u662f" : "\u5426", ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET), BaritoneHook.isFlying() ? "\u63a5\u7ba1\u4e2d" : "\u672a\u63a5\u7ba1", chest.isEmpty() ? "\u7a7a\u7684/\u4e0d\u662f\u9798\u7fc5" : chest.getName().getString(), ItemHelper.remainingDurability(chest), chest.getMaxDamage(), this.mc.player.isUsingItem() ? "\u662f" : "\u5426", this.mc.options.useKey.isPressed() ? "\u6309\u4e0b" : "\u6ca1\u6309", this.mc.currentScreen != null ? "\u5f00\u7740" : "\u65e0");
     }
 
     private void refillHotbarFireworks() {
-        if (stuckFireworkHold) return;
-        if (ItemHelper.countInHotbar(mc.player, Items.FIREWORK_ROCKET) >= fireworkHotbarMin.get()) return;
-
+        if (ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET) >= (Integer)this.fireworkHotbarMin.get()) {
+            this.checkFireworkTotal();
+            return;
+        }
         int source = InvHelper.findSlot(s -> s.isOf(Items.FIREWORK_ROCKET), 9, 36);
-        if (source < 0) return;
-
+        if (source < 0) {
+            return;
+        }
         int target = InvHelper.findEmptyHotbarSlot();
         if (target < 0) {
-            for (int i = 0; i < 9; i++) {
-                ItemStack s = mc.player.getInventory().getStack(i);
-                if (s.isOf(Items.FIREWORK_ROCKET)) continue;
-                if (ItemHelper.isFood(s) || s.isOf(Items.TOTEM_OF_UNDYING) || s.isOf(Items.ELYTRA)
-                    || s.isOf(Items.ENDER_CHEST) || ItemHelper.isShulkerBox(s)) {
-                    continue;
-                }
+            for (int i = 0; i < 9; ++i) {
+                ItemStack s2 = this.mc.player.getInventory().getStack(i);
+                if (s2.isOf(Items.FIREWORK_ROCKET) || ItemHelper.isFood(s2) || s2.isOf(Items.TOTEM_OF_UNDYING) || s2.isOf(Items.ELYTRA) || s2.isOf(Items.ENDER_CHEST) || ItemHelper.isShulkerBox(s2)) continue;
                 target = i;
                 break;
             }
         }
-        if (target < 0) return;
-
+        if (target < 0) {
+            return;
+        }
         InvHelper.moveInvToHotbar(source, target);
+        this.checkFireworkTotal();
     }
 
-    private boolean useFirework() {
-        if (stuckFireworkHold) return false;
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) {
-                mc.player.getInventory().setSelectedSlot(i);
-                return InvHelper.useItem(Hand.MAIN_HAND);
-            }
+    private void checkFireworkTotal() {
+        if (this.mc.player == null) {
+            return;
         }
-        return false;
+        int total = ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET);
+        if (total > 128) {
+            return;
+        }
+        if (this.tickCounter - this.lowFireworkWarnTick < 1200) {
+            return;
+        }
+        this.lowFireworkWarnTick = this.tickCounter;
+        ItemStack hotbar5 = this.mc.player.getInventory().getStack(5);
+        boolean foodOk = this.matchesFoodSlot(hotbar5) && hotbar5.getCount() > 18;
+        boolean totemOk = this.mc.player.getInventory().getStack(3).isOf(Items.TOTEM_OF_UNDYING) || this.mc.player.getInventory().getStack(4).isOf(Items.TOTEM_OF_UNDYING);
+        FOElytraLog.warn("\u80cc\u5305\u70df\u82b1\u53ea\u5269 %d \u4e2a\uff08\u4e0d\u8db3 2 \u645e\uff09\uff1a\u5feb\u6377\u680f\u98df\u7269 %s\u3001\u5feb\u6377\u680f 3/4 \u56fe\u817e %s \u2192 \u4e0d\u8db3\u5c31\u63d0\u524d\u627e\u4f4d\u7f6e\u964d\u843d", total, foodOk ? "\u591f" : "\u4e0d\u591f", totemOk ? "\u5728" : "\u4e0d\u5728");
     }
 
     private boolean playerNearby(double range) {
-        for (var entity : mc.world.getPlayers()) {
-            if (entity == mc.player || entity.isDead()) continue;
-            if (entity.squaredDistanceTo(mc.player) <= range * range) return true;
+        for (AbstractClientPlayerEntity entity : this.mc.world.getPlayers()) {
+            if (entity == this.mc.player || entity.isDead() || !(entity.squaredDistanceTo((Entity)this.mc.player) <= range * range)) continue;
+            return true;
         }
         return false;
     }
 
     private float unloadedChunkRatio(int radius) {
         try {
-            ChunkPos center = new ChunkPos(mc.player.getBlockPos());
-            int r = Math.min(mc.options.getClampedViewDistance(), radius);
+            ChunkPos center = new ChunkPos(this.mc.player.getBlockPos());
+            int r = Math.min(this.mc.options.getClampedViewDistance(), radius);
             int total = 0;
             int unloaded = 0;
-            for (int dx = -r; dx <= r; dx++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    total++;
-                    if (mc.world.getChunk(center.x + dx, center.z + dz, ChunkStatus.FULL, false) == null) unloaded++;
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    ++total;
+                    if (this.mc.world.getChunk(center.x + dx, center.z + dz, ChunkStatus.FULL, false) != null) continue;
+                    ++unloaded;
                 }
             }
-            return total > 0 ? (float) unloaded / total : 0f;
-        } catch (Throwable t) {
-            return 0f;
+            return total > 0 ? (float)unloaded / (float)total : 0.0f;
+        }
+        catch (Throwable t) {
+            return 0.0f;
         }
     }
 
     private void fireballTick() {
-        boolean enabled = deflectFireballs.get();
-        FireballDeflector.Result result = fireballs.tick(
-            enabled,
-            fireballPauseBaritone.get(),
-            fireballMax.get(),
-            fireballRange.get(),
-            !fireballFailOnMultiple.get(),
-            this::resumeBaritoneIfIdle
-        );
-
+        boolean enabled = (Boolean)this.deflectFireballs.get();
+        FireballDeflector.Result result = this.fireballs.tick(enabled, (Boolean)this.fireballPauseBaritone.get(), (Integer)this.fireballMax.get(), (Double)this.fireballRange.get(), (Boolean)this.fireballFailOnMultiple.get() == false, this::resumeBaritoneIfIdle);
         if (result == FireballDeflector.Result.TOO_MANY) {
-
-            if (!fireballTooManyWarned) {
-                fireballTooManyWarned = true;
-                FOElytraLog.err("火球太多（超过 %d 个），拦不过来！", fireballMax.get());
+            if (!this.fireballTooManyWarned) {
+                this.fireballTooManyWarned = true;
+                FOElytraLog.err("\u706b\u7403\u592a\u591a\uff08\u8d85\u8fc7 %d \u4e2a\uff09\uff0c\u62e6\u4e0d\u8fc7\u6765\uff01", this.fireballMax.get());
             }
-            fail("火球太多无法拦截");
+            this.fail("\u706b\u7403\u592a\u591a\u65e0\u6cd5\u62e6\u622a");
             return;
         }
-
-        if (fireballs.tooManyCount() > 0) {
-            if (!fireballTooManyWarned) {
-                fireballTooManyWarned = true;
-                FOElytraLog.err("火球太多（超过 %d 个），只拦最近的一个！", fireballMax.get());
+        if (this.fireballs.tooManyCount() > 0) {
+            if (!this.fireballTooManyWarned) {
+                this.fireballTooManyWarned = true;
+                FOElytraLog.err("\u706b\u7403\u592a\u591a\uff08\u8d85\u8fc7 %d \u4e2a\uff09\uff0c\u53ea\u62e6\u6700\u8fd1\u7684\u4e00\u4e2a\uff01", this.fireballMax.get());
             }
         } else {
-            fireballTooManyWarned = false;
+            this.fireballTooManyWarned = false;
         }
     }
 
     private void resumeBaritoneIfIdle() {
-        if (!hovering && !pausedByPlayer) BaritoneHook.resume();
+        if (!this.hovering && !this.pausedByPlayer) {
+            BaritoneHook.resume();
+        }
     }
 
     private void ensureLava() {
-        int fireT = lavaTriggerTicks.get();
-        int fastT = lavaFastTriggerTicks.get();
-        boolean ignoreGliding = lavaIgnoreGlidingFire.get();
-        int cd = lavaCooldownTicks.get();
-        int retries = lavaMaxRetries.get();
-        double p = lavaPitch.get();
-        boolean f = lavaUseFirework.get();
-        boolean swim = lavaSwimToSafety.get();
-        int radius = lavaSearchRadius.get();
-        boolean potion = lavaDrinkFireRes.get();
-        if (lava == null || fireT != lavaCacheTrigger || fastT != lavaCacheFastTrigger || cd != lavaCacheCooldown
-            || retries != lavaCacheRetries || radius != lavaCacheRadius
-            || ignoreGliding != lavaCacheIgnoreGliding || p != lavaCachePitch || f != lavaCacheFirework
-            || swim != lavaCacheSwim || potion != lavaCachePotion) {
-
-            if (lava != null) lava.release(mc);
-            lava = new LavaEscape(fireT, fastT, ignoreGliding, cd, retries, p, f, swim, radius, potion);
-            lavaCacheTrigger = fireT;
-            lavaCacheFastTrigger = fastT;
-            lavaCacheIgnoreGliding = ignoreGliding;
-            lavaCacheCooldown = cd;
-            lavaCacheRetries = retries;
-            lavaCacheRadius = radius;
-            lavaCachePitch = p;
-            lavaCacheFirework = f;
-            lavaCacheSwim = swim;
-            lavaCachePotion = potion;
+        boolean ignoreGliding = (Boolean)this.lavaIgnoreGlidingFire.get();
+        boolean f = (Boolean)this.lavaUseFirework.get();
+        boolean swim = (Boolean)this.lavaSwimToSafety.get();
+        int radius = (Integer)this.lavaSearchRadius.get();
+        boolean potion = (Boolean)this.lavaDrinkFireRes.get();
+        double pitch = (Double)this.lavaLookPitch.get();
+        if (this.lava == null || radius != this.lavaCacheRadius || ignoreGliding != this.lavaCacheIgnoreGliding || f != this.lavaCacheFirework || swim != this.lavaCacheSwim || potion != this.lavaCachePotion || Math.abs(pitch - this.lavaCachePitch) > 0.001) {
+            if (this.lava != null) {
+                this.lava.release(this.mc);
+            }
+            this.lava = new LavaEscape(f, swim, radius, potion, ignoreGliding, (float)pitch);
+            this.lavaCacheIgnoreGliding = ignoreGliding;
+            this.lavaCacheRadius = radius;
+            this.lavaCacheFirework = f;
+            this.lavaCacheSwim = swim;
+            this.lavaCachePotion = potion;
+            this.lavaCachePitch = pitch;
         }
     }
 
     private void ensureLavaPredictor() {
-        boolean en = lavaPredictEnabled.get();
-        double horizon = lavaPredictHorizon.get();
-        double urgent = lavaPredictUrgent.get();
-        int lateral = lavaPredictLateral.get();
-        int back = lavaPredictReturn.get();
-        int cd = lavaPredictCooldown.get();
-        boolean warnOnly = lavaPredictWarnOnly.get();
-        boolean pauseBt = lavaPredictPauseBaritone.get();
-        double deflect = lavaPredictDeflect.get();
-        if (lavaPredictor == null || en != pdCacheEnabled || horizon != pdCacheHorizon || urgent != pdCacheUrgent
-            || lateral != pdCacheLateral || back != pdCacheReturn || cd != pdCacheCooldown
-            || warnOnly != pdCacheWarnOnly || pauseBt != pdCachePauseBaritone || deflect != pdCacheDeflect) {
-            if (lavaPredictor != null) lavaPredictor.release(mc);
-            lavaPredictor = new LavaPredictor(new LavaPredictor.Options(
-                en, horizon, urgent, lateral, back, cd, warnOnly, pauseBt, deflect));
-            pdCacheEnabled = en;
-            pdCacheHorizon = horizon;
-            pdCacheUrgent = urgent;
-            pdCacheLateral = lateral;
-            pdCacheReturn = back;
-            pdCacheCooldown = cd;
-            pdCacheWarnOnly = warnOnly;
-            pdCachePauseBaritone = pauseBt;
-            pdCacheDeflect = deflect;
-            FOElytraLog.detail("岩浆预测（实验性）：%s（预测 %.1f 秒 / 紧急 %.1f 秒 / 侧偏 %d 格 / "
-                    + "绕行结束 %d 格 / 防抖 %d tick / 只预警 %s / 紧急暂停 Baritone %s / 偏转 %.0f°）",
-                en ? "已启用" : "已关闭", horizon, urgent, lateral, back, cd,
-                warnOnly ? "是" : "否", pauseBt ? "是" : "否", deflect);
+        boolean en = (Boolean)this.lavaPredictEnabled.get();
+        double horizon = (Double)this.lavaPredictHorizon.get();
+        double urgent = (Double)this.lavaPredictUrgent.get();
+        int lateral = (Integer)this.lavaPredictLateral.get();
+        int back = (Integer)this.lavaPredictReturn.get();
+        int cd = (Integer)this.lavaPredictCooldown.get();
+        boolean warnOnly = (Boolean)this.lavaPredictWarnOnly.get();
+        boolean pauseBt = (Boolean)this.lavaPredictPauseBaritone.get();
+        double deflect = (Double)this.lavaPredictDeflect.get();
+        if (this.lavaPredictor == null || en != this.pdCacheEnabled || horizon != this.pdCacheHorizon || urgent != this.pdCacheUrgent || lateral != this.pdCacheLateral || back != this.pdCacheReturn || cd != this.pdCacheCooldown || warnOnly != this.pdCacheWarnOnly || pauseBt != this.pdCachePauseBaritone || deflect != this.pdCacheDeflect) {
+            if (this.lavaPredictor != null) {
+                this.lavaPredictor.release(this.mc);
+            }
+            this.lavaPredictor = new LavaPredictor(new LavaPredictor.Options(en, horizon, urgent, lateral, back, cd, warnOnly, pauseBt, deflect));
+            this.pdCacheEnabled = en;
+            this.pdCacheHorizon = horizon;
+            this.pdCacheUrgent = urgent;
+            this.pdCacheLateral = lateral;
+            this.pdCacheReturn = back;
+            this.pdCacheCooldown = cd;
+            this.pdCacheWarnOnly = warnOnly;
+            this.pdCachePauseBaritone = pauseBt;
+            this.pdCacheDeflect = deflect;
+            FOElytraLog.detail("\u5ca9\u6d46\u9884\u6d4b\uff08\u5b9e\u9a8c\u6027\uff09\uff1a%s\uff08\u9884\u6d4b %.1f \u79d2 / \u7d27\u6025 %.1f \u79d2 / \u4fa7\u504f %d \u683c / \u7ed5\u884c\u7ed3\u675f %d \u683c / \u9632\u6296 %d tick / \u53ea\u9884\u8b66 %s / \u7d27\u6025\u6682\u505c Baritone %s / \u504f\u8f6c %.0f\u00b0\uff09", en ? "\u5df2\u542f\u7528" : "\u5df2\u5173\u95ed", horizon, urgent, lateral, back, cd, warnOnly ? "\u662f" : "\u5426", pauseBt ? "\u662f" : "\u5426", deflect);
         }
     }
 
     private void lavaTick() {
-        if (lava == null) return;
-        LavaEscape.Result result = lava.tick(lavaEscape.get());
-
-        if (result == LavaEscape.Result.ESCAPING) {
-
-            if (state == State.SUPPLY || state == State.MEND) {
-                abortChildTasks();
-                state = State.PREPARE;
-                FOElytraLog.warn("补给/修复过程中掉进岩浆，已中止并准备脱离");
-            }
-
-            supplyCooldown = Math.max(supplyCooldown, supplyRetryDelay.get());
-            mendCooldown = Math.max(mendCooldown, supplyRetryDelay.get());
-        } else if (result == LavaEscape.Result.FAILED) {
-
-            boolean noFirework = lava.failedNoFirework();
-            String lavaWhy = lava.lastReason();
-            lava.reset();
-            if (lavaFailAbort.get()) {
-
-                failNoLogout(noFirework
-                    ? "逃离岩浆失败：快捷栏里找不到烟花（" + lavaWhy + "）"
-                    : "逃离岩浆失败（连续自救都没能脱险：" + lavaWhy + "）");
-            } else {
-                FOElytraLog.warn("逃离岩浆失败，但按设置继续跑图（原因：%s；严格做法是直接结束任务）", lavaWhy);
-                restoreViewAfterLava();
-            }
-        }
-
-        if (lava.consumeJustFinished()) restoreViewAfterLava();
-    }
-
-    private void restoreViewAfterLava() {
-        if (!lavaRestoreView.get() || mc.player == null) return;
-
-        float yaw = mc.player.getYaw();
-        Float aim = aimYaw();
-        if (aim != null) yaw = aim;
-        float pitch = lavaRestorePitch.get().floatValue();
-
-        mc.player.setYaw(yaw);
-        mc.player.setPitch(pitch);
-        viewHoldTicks = lavaRestoreHold.get();
-        FOElytraLog.info("已脱离岩浆：视角回调到目标方向（yaw %.0f° / pitch %.0f°%s）",
-            yaw, pitch, aim == null ? "，没有目标就只压平俯仰" : "");
-
-        if (lavaReplan.get() && segmentTarget != null) {
-            BaritoneHook.pathTo(segmentTarget.getX(), segmentTarget.getZ());
-
-            if (!BaritoneHook.isFlying() && state == State.FLYING) state = State.PREPARE;
-            if (state == State.TAKEOFF) {
-                flightSettingsApplied = false;
-                takeoffPhase = TakeoffPhase.INIT;
-                takeoffTicks = 0;
-                jumpAttempts = 0;
-                openTriesDone = 0;
-                openEnd = null;
-                clearingHead = false;
-            }
-        }
-    }
-
-    private void lavaViewHoldTick() {
-        if (viewHoldTicks <= 0 || mc.player == null) return;
-        if (BaritoneHook.isFlying() || lavaEscaping()) {
-            viewHoldTicks = 0;
+        if (this.lava == null) {
             return;
         }
-        viewHoldTicks--;
-        Float aim = aimYaw();
-        if (aim != null) mc.player.setYaw(aim);
-        mc.player.setPitch(lavaRestorePitch.get().floatValue());
+        LavaEscape.Result result = this.lava.tick((Boolean)this.lavaEscape.get());
+        if (result == LavaEscape.Result.ESCAPING) {
+            BounceProbe.mark("\u5ca9\u6d46\u81ea\u6551\u89e6\u53d1");
+            this.lavaWasEscaping = true;
+            if (this.state == State.SUPPLY || this.state == State.MEND) {
+                this.abortChildTasks();
+                this.state = State.PREPARE;
+                FOElytraLog.warn("\u8865\u7ed9/\u4fee\u590d\u8fc7\u7a0b\u4e2d\u6389\u8fdb\u5ca9\u6d46\uff0c\u5df2\u4e2d\u6b62\u5e76\u51c6\u5907\u8131\u79bb", new Object[0]);
+            }
+            this.supplyCooldown = Math.max(this.supplyCooldown, (Integer)this.supplyRetryDelay.get());
+            this.mendCooldown = Math.max(this.mendCooldown, (Integer)this.supplyRetryDelay.get());
+        } else if (result == LavaEscape.Result.FAILED) {
+            this.lavaWasEscaping = false;
+            boolean noFirework = this.lava.failedNoFirework() || ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET) <= 0;
+            String lavaWhy = this.lava.lastReason();
+            BounceProbe.mark("\u5ca9\u6d46\u81ea\u6551\u5931\u8d25\uff1a" + lavaWhy);
+            this.lava.reset();
+            if (((Boolean)this.lavaFailAbort.get()).booleanValue()) {
+                FOElytraLog.warn("\u9003\u79bb\u5ca9\u6d46\u5931\u8d25\uff1a\u6309\u300c\u5931\u8d25\u81ea\u52a8\u767b\u51fa\u300d\u7684\u8bbe\u7f6e\u5904\u7406\uff08\u9ed8\u8ba4\u4e0d\u767b\u51fa\uff0c\u4f1a\u7559\u5728\u539f\u5730\u7b49\u4f60\u624b\u52a8\u63a5\u7ba1\uff09", new Object[0]);
+                this.fail(noFirework ? "\u6ca1\u6709\u70df\u82b1\uff0c\u81ea\u6551\u65e0\u6548\uff08\u70df\u82b1 0 \u53d1 / \u5feb\u6377\u680f\u6ca1\u70df\u82b1\uff1a" + lavaWhy + "\uff09" : "\u9003\u79bb\u5ca9\u6d46\u5931\u8d25\uff08" + lavaWhy + "\uff09");
+            } else {
+                FOElytraLog.warn("\u9003\u79bb\u5ca9\u6d46\u5931\u8d25\uff0c\u4f46\u6309\u8bbe\u7f6e\u7ee7\u7eed\u8dd1\u56fe\uff08\u539f\u56e0\uff1a%s\uff1b\u4e25\u683c\u505a\u6cd5\u662f\u76f4\u63a5\u7ed3\u675f\u4efb\u52a1\uff09", lavaWhy);
+            }
+        } else if (this.lavaWasEscaping) {
+            this.lavaWasEscaping = false;
+            this.handBackToBaritone("\u5df2\u8131\u79bb\u5ca9\u6d46");
+        }
     }
 
-    private Float aimYaw() {
-        if (mc.player == null) return null;
-        if (mode.get() == Mode.Direction && directionInitialised) return directionFrozen;
-        if (segmentTarget != null) {
-            double dx = (segmentTarget.getX() + 0.5) - mc.player.getX();
-            double dz = (segmentTarget.getZ() + 0.5) - mc.player.getZ();
-            if (Math.abs(dx) < 0.01 && Math.abs(dz) < 0.01) return null;
-            return (float) ((Math.toDegrees(Math.atan2(-dx, dz)) + 360.0) % 360.0);
+    private boolean clearAhead(float yaw, float pitch, int blocks) {
+        double yawRad = Math.toRadians(yaw);
+        double pitchRad = Math.toRadians(pitch);
+        double dx = -Math.sin(yawRad) * Math.cos(pitchRad);
+        double dy = -Math.sin(pitchRad);
+        double dz = Math.cos(yawRad) * Math.cos(pitchRad);
+        Vec3d eye = this.mc.player.getEyePos();
+        for (int i = 1; i <= blocks; ++i) {
+            BlockPos p = BlockPos.ofFloored((double)(eye.x + dx * (double)i), (double)(eye.y + dy * (double)i), (double)(eye.z + dz * (double)i));
+            if (this.mc.world.getBlockState(p).isAir()) continue;
+            return false;
         }
-        return null;
+        return true;
+    }
+
+    private boolean waitForBaritoneTakeoff() {
+        int waited;
+        if (!((Boolean)this.takeoffByBaritone.get()).booleanValue()) {
+            return false;
+        }
+        if (this.mc.player != null && this.walledInOneBlock() && AutoElytraFlight.blockingBlocks(1).isEmpty()) {
+            return false;
+        }
+        if (this.btTakeoffWaitTick == 0) {
+            this.btTakeoffWaitTick = this.tickCounter;
+            BaritoneHook.btSet("elytraAutoJump", true);
+            this.lastForcedAutoJump = true;
+            FOElytraLog.info("\u5148\u4ea4\u7ed9 Baritone \u7684\u81ea\u52a8\u8d77\u8df3\uff08\u5b83\u81ea\u5df1\u627e\u8df3\u53f0\u8d70\u8fc7\u53bb\u8df3\uff09\uff1b%.0f \u79d2\u6ca1\u63a5\u7ba1\u5c31\u6539\u7528\u672c\u63d2\u4ef6\u7684\u539f\u5730\u8d77\u8df3 + \u70df\u82b1", 6.0);
+        }
+        if ((waited = this.tickCounter - this.btTakeoffWaitTick) < 120) {
+            if (waited > 0 && waited % 40 == 0) {
+                FOElytraLog.detail("\u7b49 Baritone \u81ea\u52a8\u8d77\u8df3\uff1a\u5df2 %.0f \u79d2\uff08\u5b83\u8981\u8d70\u5230\u6709\u843d\u5dee\u7684\u5730\u65b9\uff0c\u5e73\u5730/\u6d1e\u91cc\u4f1a\u5931\u8d25\uff09", (double)waited / 20.0);
+            }
+            return true;
+        }
+        if (!this.btTakeoffFallbackLogged) {
+            this.btTakeoffFallbackLogged = true;
+            FOElytraLog.warn("Baritone \u81ea\u52a8\u8d77\u8df3 %.0f \u79d2\u6ca1\u63a5\u7ba1\uff08\u5b83\u5fc5\u987b\u8d70\u5230\u6709\u843d\u5dee\u7684\u5730\u65b9\u624d\u80fd\u8df3\uff0c\u5e73\u5730/\u5bc6\u95ed\u5730\u5f62\u4f1a\u5931\u8d25\uff09 \u2192 \u6539\u7528\u672c\u63d2\u4ef6\u7684\u539f\u5730\u8d77\u8df3 + \u8865\u70df\u82b1", 6.0);
+            BaritoneHook.btSet("elytraAutoJump", false);
+            this.lastForcedAutoJump = false;
+            this.takeoffDelayTicks = 0;
+        }
+        return false;
+    }
+
+    private void handBackToBaritone(String why) {
+        if (this.mc.player == null) {
+            return;
+        }
+        if (this.segmentTarget == null) {
+            FOElytraLog.info("%s\uff1a\u8fd9\u4e00\u6bb5\u6ca1\u6709\u822a\u7ebf\u76ee\u6807\uff0cBaritone \u4ea4\u4e0d\u56de\u6765\uff08\u6211\u5728 %d %d %d\uff09", why, this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ());
+            return;
+        }
+        BounceProbe.mark(why + " \u4ea4\u56de Baritone");
+        if (BaritoneHook.isFlying()) {
+            FOElytraLog.info("%s \u2192 Baritone \u7684\u9798\u7fc5\u8fdb\u7a0b\u8fd8\u5728\u98de\uff08isActive\uff09\uff0c\u4e0d\u91cd\u53d1\u822a\u7ebf\uff08\u91cd\u53d1\u4f1a\u6253\u65ad\u5b83\uff0c\u53c2\u8003\u5b9e\u73b0\u53ea\u5728\u8d77\u59cb\u4e0b\u53d1\u4e00\u6b21\uff09", why);
+            return;
+        }
+        FOElytraLog.info("%s \u2192 \u7acb\u523b\u4ea4\u56de Baritone\uff08%d, %d\uff09\uff5c\u6211\u5728 %d %d %d", why, this.segmentTarget.getX(), this.segmentTarget.getZ(), this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ());
+        this.lastReplanTick = this.tickCounter;
+        this.replanEver = true;
+        BaritoneHook.pathTo(this.segmentTarget.getX(), this.segmentTarget.getZ());
+    }
+
+    private boolean solidAt(BlockPos p) {
+        BlockState s = this.mc.world.getBlockState(p);
+        return !s.isAir() && s.getFluidState().isEmpty();
+    }
+
+    private boolean walledInOneBlock() {
+        int[][] dirs;
+        BlockPos p = this.mc.player.getBlockPos();
+        for (int[] d : dirs = new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+            if (this.solidAt(p.add(d[0], 0, d[1])) && this.solidAt(p.add(d[0], 1, d[1]))) continue;
+            return false;
+        }
+        return true;
+    }
+
+    private void clearShaftTakeoff() {
+        this.shaftColumn = null;
+        this.shaftTicks = 0;
+        PlayerAction.pressForward(false);
+        PlayerAction.pressJump(false);
+    }
+
+    private boolean shaftAlignTick() {
+        if (this.mc.player == null || this.mc.world == null) {
+            return false;
+        }
+        if (this.mc.player.isGliding() || !this.mc.player.isOnGround()) {
+            if (this.shaftColumn != null) {
+                this.clearShaftTakeoff();
+            }
+            return false;
+        }
+        if (!AutoElytraFlight.blockingBlocks(1).isEmpty()) {
+            return false;
+        }
+        if (!this.walledInOneBlock()) {
+            if (this.shaftColumn != null) {
+                this.clearShaftTakeoff();
+            }
+            return false;
+        }
+        if (this.shaftColumn == null) {
+            this.shaftColumn = this.mc.player.getBlockPos();
+            this.shaftTicks = 0;
+            FOElytraLog.warn("\u56db\u9762 1 \u683c\u90fd\u88ab\u5835\u6b7b\u3001\u53ea\u6709\u5934\u9876\u662f\u7ad6\u76f4\u5f00\u53e3 \u2192 \u4e0d\u8d70 Baritone \u7684\u627e\u8df3\u53f0\uff0c\u76f4\u63a5\u539f\u5730\u8d77\u8df3 + \u653e\u70df\u82b1\uff08%d %d %d\uff09", this.shaftColumn.getX(), this.shaftColumn.getY(), this.shaftColumn.getZ());
+        }
+        double cx = (double)this.shaftColumn.getX() + 0.5;
+        double cz = (double)this.shaftColumn.getZ() + 0.5;
+        double off = Math.hypot(this.mc.player.getX() - cx, this.mc.player.getZ() - cz);
+        if (off > 0.25 && this.shaftTicks++ < 40) {
+            float yaw = (float)Math.toDegrees(Math.atan2(-(cx - this.mc.player.getX()), cz - this.mc.player.getZ()));
+            this.mc.player.setYaw(yaw);
+            PlayerAction.pressForward(true);
+            return true;
+        }
+        PlayerAction.pressForward(false);
+        return false;
+    }
+
+    private void takeoffFireworkTick() {
+        if (this.takeoffFireworkPending <= 0) {
+            return;
+        }
+        if (this.mc.player == null) {
+            this.takeoffFireworkPending = 0;
+            return;
+        }
+        ++this.takeoffFireworkPending;
+        if (!this.mc.player.isGliding() || this.mc.player.isOnGround()) {
+            if (this.takeoffFireworkPending > 60) {
+                this.takeoffFireworkPending = 0;
+                FOElytraLog.detail("\u8d77\u98de\u540e\u8865\u70df\u82b1\uff1a60 tick \u5185\u6ca1\u8fdb\u6ed1\u7fd4\uff0c\u8fd9\u6b21\u4e0d\u653e", new Object[0]);
+            }
+            return;
+        }
+        if (this.walledInOneBlock()) {
+            this.mc.player.setPitch(-90.0f);
+            FOElytraLog.detail("\u8d77\u98de\u540e\u8865\u70df\u82b1\uff1a\u56db\u9762\u5835\u6b7b\u7684\u7ad6\u76f4\u4e95 \u2192 \u62ac\u5934 -90\u00b0 \u5f80\u6b63\u4e0a\u65b9\u63a8", new Object[0]);
+        } else if (!this.clearAhead(this.mc.player.getYaw(), this.mc.player.getPitch(), 8)) {
+            this.takeoffFireworkPending = 0;
+            FOElytraLog.detail("\u8d77\u98de\u540e\u8865\u70df\u82b1\uff1a\u524d\u65b9 8 \u683c\u6709\u969c\u788d\uff08\u5bc6\u95ed\u7a7a\u95f4\uff09\uff0c\u8fd9\u6b21\u4e0d\u653e\uff0c\u76f4\u63a5\u4ea4\u7ed9 Baritone", new Object[0]);
+            this.handBackToBaritone("\u8d77\u98de\u540e\u524d\u65b9\u6709\u969c\u788d\u6ca1\u653e\u70df\u82b1");
+            return;
+        }
+        int slot = InvHelper.findSlot(s -> s.isOf(Items.FIREWORK_ROCKET), 0, 9);
+        if (slot < 0) {
+            this.takeoffFireworkPending = 0;
+            FOElytraLog.detail("\u8d77\u98de\u540e\u8865\u70df\u82b1\uff1a\u5feb\u6377\u680f 0~8 \u6ca1\u6709\u70df\u82b1\uff0c\u8df3\u8fc7\uff08\u7b49\u300c\u81ea\u52a8\u8865\u5145\u5feb\u6377\u680f\u70df\u82b1\u300d\uff09", new Object[0]);
+            this.handBackToBaritone("\u8d77\u98de\u540e\u6ca1\u70df\u82b1\u53ef\u8865");
+            return;
+        }
+        this.takeoffFireworkPending = 0;
+        InvHelper.selectSlot(slot);
+        boolean ok = InvHelper.useItem(Hand.MAIN_HAND);
+        this.handBackToBaritone(ok ? "\u8d77\u98de\u540e\u8865\u4e86\u4e00\u53d1\u70df\u82b1\uff08\u5feb\u6377\u680f\u7b2c " + (slot + 1) + " \u683c\uff09" : "\u8d77\u98de\u540e\u8865\u70df\u82b1\u6ca1\u53d1\u51fa\u53bb\uff08\u5feb\u6377\u680f\u7b2c " + (slot + 1) + " \u683c\uff09");
     }
 
     private void safetyTick() {
-        if (mc.player == null) return;
-
-        if (autoLogout.get()) {
-            int totems = ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING);
-            if (mc.player.getHealth() < logoutHealth.get() && totems <= logoutTotemMin.get()) {
-                FOElytraLog.err("血量 %.1f 且图腾 %d 个，执行自动登出", mc.player.getHealth(), totems);
-                disconnect("血量过低且图腾不足");
+        if (this.mc.player == null) {
+            return;
+        }
+        if (((Boolean)this.autoLogout.get()).booleanValue()) {
+            int totems = ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING);
+            if ((double)this.mc.player.getHealth() < (Double)this.logoutHealth.get() && totems <= (Integer)this.logoutTotemMin.get()) {
+                FOElytraLog.err("\u8840\u91cf %.1f \u4e14\u56fe\u817e %d \u4e2a\uff0c\u6267\u884c\u81ea\u52a8\u767b\u51fa", Float.valueOf(this.mc.player.getHealth()), totems);
+                this.disconnect("\u8840\u91cf\u8fc7\u4f4e\u4e14\u56fe\u817e\u4e0d\u8db3");
             }
         }
     }
 
     private void disconnect(String reason) {
         try {
-            var handler = mc.getNetworkHandler();
+            ClientPlayNetworkHandler handler = this.mc.getNetworkHandler();
             if (handler != null) {
-                handler.getConnection().disconnect(Text.of("[AutoElytraFlight] 自动登出：" + reason));
+                handler.getConnection().disconnect(Text.of((String)("[AutoElytraFlight] \u81ea\u52a8\u767b\u51fa\uff1a" + reason)));
             }
-        } catch (Throwable t) {
-            FOElytraLog.err("自动登出失败: %s", String.valueOf(t));
         }
-
-        if (state != State.FAILED) state = State.DONE;
-        releaseEverything();
-        if (disableOnFinish.get() && isActive()) toggle();
+        catch (Throwable t) {
+            FOElytraLog.err("\u81ea\u52a8\u767b\u51fa\u5931\u8d25: %s", String.valueOf(t));
+        }
+        if (this.state != State.FAILED) {
+            this.state = State.DONE;
+        }
+        this.releaseEverything();
+        if (((Boolean)this.disableOnFinish.get()).booleanValue() && this.isActive()) {
+            this.toggle();
+        }
     }
 
-    private String foodPriorityRaw = "\u0000";
-    private List<Item> foodPriorityParsed = List.of();
-
     private List<Item> foodPriorityList() {
-        String raw = foodPriority.get();
-        String key = raw == null ? "" : raw;
-        if (!key.equals(foodPriorityRaw)) {
-            foodPriorityRaw = key;
-            foodPriorityParsed = FoodPriority.parse(key);
-            if (!foodPriorityParsed.isEmpty()) {
-                FOElytraLog.detail("食物优先级：%d 项已解析（%s）｜进食与补给共用", foodPriorityParsed.size(), key);
+        String key;
+        List ordered = (List)this.foodPriorityOrdered.get();
+        if (ordered != null && !ordered.isEmpty()) {
+            return ordered;
+        }
+        String raw = (String)this.foodPriority.get();
+        String string = key = raw == null ? "" : raw;
+        if (!key.equals(this.foodPriorityRaw)) {
+            this.foodPriorityRaw = key;
+            this.foodPriorityParsed = FoodPriority.parse(key);
+            if (!this.foodPriorityParsed.isEmpty()) {
+                FOElytraLog.detail("\u98df\u7269\u4f18\u5148\u7ea7\uff08\u65e7\u7248\u6587\u672c\uff09\uff1a%d \u9879\u5df2\u89e3\u6790\uff5c\u8fdb\u98df\u4e0e\u8865\u7ed9\u5171\u7528", this.foodPriorityParsed.size());
             }
         }
-        return foodPriorityParsed;
+        return this.foodPriorityParsed;
+    }
+
+    private void migrateFoodPriority() {
+        List ordered = (List)this.foodPriorityOrdered.get();
+        if (ordered != null && !ordered.isEmpty()) {
+            return;
+        }
+        String raw = (String)this.foodPriority.get();
+        if (raw == null || raw.trim().isEmpty()) {
+            return;
+        }
+        ArrayList<Item> parsed = new ArrayList<Item>();
+        int dropped = 0;
+        for (Item item : FoodPriority.parse(raw)) {
+            if (item == null) continue;
+            if (!SettingHelper.isFood(item)) {
+                ++dropped;
+                continue;
+            }
+            if (parsed.contains(item)) continue;
+            parsed.add(item);
+        }
+        if (dropped > 0) {
+            FOElytraLog.warn("\u98df\u7269\u4f18\u5148\u7ea7\uff1a\u5df2\u79fb\u9664 %d \u4e2a\u975e\u98df\u7269\u7269\u54c1\uff08\u4e0d\u80fd\u5403\u7684\u4e1c\u897f\u4e0d\u53c2\u4e0e\u4f18\u5148\u7ea7\uff09", dropped);
+        }
+        if (parsed.isEmpty()) {
+            return;
+        }
+        this.foodPriorityOrdered.setAll(parsed);
+        FOElytraLog.info("\u98df\u7269\u4f18\u5148\u7ea7\uff1a\u5df2\u628a\u65e7\u914d\u7f6e\u8fc1\u79fb\u5230\u65b0\u5217\u8868\uff08%d \u9879\uff0c\u987a\u5e8f\u4fdd\u7559\uff1b\u65e7\u6587\u672c\u53ef\u4ee5\u6e05\u7a7a\u4e86\uff09", parsed.size());
+    }
+
+    private List<Item> junkProtectedExtras() {
+        ArrayList<Item> out = new ArrayList<Item>();
+        if (this.foodPriorityList() != null) {
+            out.addAll(this.foodPriorityList());
+        }
+        if (this.supplyFoodItems.get() != null) {
+            out.addAll((Collection)this.supplyFoodItems.get());
+        }
+        if (this.storeItems.get() != null) {
+            out.addAll((Collection)this.storeItems.get());
+        }
+        if (this.restockItems.get() != null) {
+            out.addAll((Collection)this.restockItems.get());
+        }
+        if (this.foodWhitelist.get() != null) {
+            out.addAll((Collection)this.foodWhitelist.get());
+        }
+        return out;
+    }
+
+    private int fireworkTargetStacks() {
+        int base = 21;
+        if (((Boolean)this.infinityElytra.get()).booleanValue()) {
+            base = 26;
+        } else if (((Boolean)this.autoMend.get()).booleanValue() && (Integer)this.targetXpBottles.get() > 0) {
+            base = 23;
+        }
+        return Math.max(base, (Integer)this.targetFireworkStacks.get());
     }
 
     private SupplyOptions supplyOptions() {
-        return new SupplyOptions(
-            targetFireworkStacks.get(),
-            targetXpBottles.get(),
-            targetFoodCount.get(),
-            targetTotems.get(),
-            targetElytraCount.get(),
-            minEnderChests.get(),
-            maxShulkers.get(),
-            placeRadius.get(),
-            actionDelay.get(),
-            autoPlaceEnderChest.get(),
-            autoPickupEnderChest.get(),
-            useBaritoneMine.get(),
-            storeLoot.get(),
-            freeSlotWhenFull.get(),
-            storeItems.get() == null ? List.<Item>of() : storeItems.get(),
-            supplyFoodItems.get() == null ? List.<Item>of() : supplyFoodItems.get(),
-            debugMessages.get(),
-            foodPriorityList()
-        );
+        return new SupplyOptions(this.fireworkTargetStacks(), (Integer)this.targetXpBottles.get(), (Integer)this.targetFoodCount.get(), (Integer)this.targetTotems.get(), (Integer)this.targetElytraCount.get(), (Integer)this.minEnderChests.get(), (Integer)this.maxShulkers.get(), (Integer)this.placeRadius.get(), (Integer)this.actionDelay.get(), (Boolean)this.autoPlaceEnderChest.get(), (Boolean)this.autoPickupEnderChest.get(), (Boolean)this.useBaritoneMine.get(), (Boolean)this.storeLoot.get(), this.storeItems.get() == null ? List.of() : (List)this.storeItems.get(), this.supplyFoodItems.get() == null ? List.of() : (List)this.supplyFoodItems.get(), (Boolean)this.debugMessages.get(), this.foodPriorityList());
     }
 
     private int supplyErrorRetriesMax() {
         try {
-            return Math.max(1, supplyErrorRetries.get());
-        } catch (Throwable t) {
+            return Math.max(1, (Integer)this.supplyErrorRetries.get());
+        }
+        catch (Throwable t) {
             return 3;
         }
     }
 
     private boolean startSupply() {
-        if (supplyTask != null && supplyTask.isRunning()) {
-            FOElytraLog.warn("上一次补给还没结束");
+        BounceProbe.mark("\u5f00\u59cb\u8865\u7ed9");
+        if (this.supplyTask != null && this.supplyTask.isRunning()) {
+            FOElytraLog.warn("\u4e0a\u4e00\u6b21\u8865\u7ed9\u8fd8\u6ca1\u7ed3\u675f", new Object[0]);
             return false;
         }
-        eat.stop();
-        mc.options.useKey.setPressed(false);
+        if (((Boolean)this.noSupplyInBasaltDeltas.get()).booleanValue() && this.isBasaltDeltasAt(this.mc.player.getBlockX(), this.mc.player.getBlockZ())) {
+            FOElytraLog.warn("\u73b0\u5728\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\uff0c\u8df3\u8fc7\u8fd9\u6b21\u8865\u7ed9\uff0c\u7ee7\u7eed\u98de", new Object[0]);
+            FOElytraLog.info("\u8fd9\u6b21\u8865\u7ed9 %d \u79d2\u5185\u4e0d\u518d\u8bd5\uff08\u8d77\u98de\u524d\u5c31\u5728\u7384\u6b66\u5ca9\u4e09\u89d2\u6d32\uff0c\u4ec0\u4e48\u90fd\u4e0d\u4f1a\u653e\u4e0b\uff09", 30);
+            this.supplyCooldown = Math.max(this.supplyCooldown, 600);
+            return false;
+        }
+        if (this.totemIsOnlyShortage() && this.totemHasNoRoom()) {
+            FOElytraLog.warn("\u80cc\u5305\u6ca1\u6709\u7a7a\u4f4d\u653e\u66f4\u591a\u56fe\u817e\uff08\u5feb\u6377\u680f 3/4 \u5df2\u6ee1\u3001\u80cc\u5305\u65e0\u7a7a\u4f4d\uff09\uff0c\u5148\u817e\u683c\u5b50", new Object[0]);
+            this.exhaustedItems.add(Items.TOTEM_OF_UNDYING);
+            this.exhaustedCooldown = 2400;
+            this.supplyCooldown = Math.max(this.supplyCooldown, (Integer)this.supplyRetryDelay.get());
+            FOElytraLog.warn("\u5148\u4e0d\u964d\u843d\u8865\u7ed9\uff1a\u8fd9\u6b21\u53ea\u4e3a\u56fe\u817e\u6765\uff0c\u800c\u56fe\u817e\u6ca1\u5730\u65b9\u653e\uff08%d \u79d2\u5185\u4e0d\u518d\u4e3a\u5b83\u964d\u843d\uff09", 120);
+            return false;
+        }
+        this.eat.stop();
         BaritoneHook.stop();
-        supplyTask = new SupplyTask(supplyOptions());
-        supplyTask.start();
-        waitTicks = 0;
-        landingY = Double.NaN;
-        landingTicks = 0;
-        landingAngle = 0.0;
-        torchPlacedThisLanding = false;
-        lastHurtHealth = -1.0;
-        stuckNow = false;
-        stuckTracker.reset();
-        stuckFireworkHold = false;
-        stuckHealthStopped = false;
-        state = State.LANDING;
-        FOElytraLog.info("准备降落补给（目标 %d 组烟花 / %d 瓶 / %d 食物 / %d 图腾 / %d 鞘翅）",
-            targetFireworkStacks.get(), targetXpBottles.get(), targetFoodCount.get(),
-            targetTotems.get(), targetElytraCount.get());
+        this.supplyTask = new SupplyTask(this.supplyOptions());
+        this.supplyTask.start();
+        this.waitTicks = 0;
+        this.landingY = Double.NaN;
+        this.landingTicks = 0;
+        this.landingAngle = 0.0;
+        this.torchPlacedThisLanding = false;
+        this.lastHurtHealth = -1.0;
+        this.state = State.LANDING;
+        FOElytraLog.info("\u51c6\u5907\u964d\u843d\u8865\u7ed9\uff08\u76ee\u6807 %d \u7ec4\u70df\u82b1 / %d \u74f6 / %d \u98df\u7269 / %d \u56fe\u817e / %d \u9798\u7fc5\uff09", this.fireworkTargetStacks(), this.targetXpBottles.get(), this.targetFoodCount.get(), this.targetTotems.get(), this.targetElytraCount.get());
         return true;
     }
 
     private void infinityElytraTick() {
-        if (!infinityElytra.get() || mc.player == null) return;
-        if (state != State.TAKEOFF && state != State.FLYING && state != State.LANDING) return;
-        if (!mc.player.isGliding() && !BaritoneHook.isFlying()) return;
-
-        if (tickCounter % 12 == 0) {
-            mc.player.stopGliding();
+        if (!((Boolean)this.infinityElytra.get()).booleanValue() || this.mc.player == null) {
+            return;
+        }
+        if (this.state != State.TAKEOFF && this.state != State.FLYING && this.state != State.LANDING) {
+            return;
+        }
+        if (!this.mc.player.isGliding() && !BaritoneHook.isFlying()) {
+            return;
+        }
+        if (this.tickCounter % 12 == 0) {
             PlayerAction.sendStartFallFlying();
-        } else if (tickCounter % 12 == 1) {
-            mc.player.startGliding();
+        } else if (this.tickCounter % 12 == 1) {
+            this.mc.player.startGliding();
             PlayerAction.sendStartFallFlying();
         }
     }
 
+    private boolean totemHasNoRoom() {
+        if (this.mc.player == null) {
+            return false;
+        }
+        PlayerInventory inv = this.mc.player.getInventory();
+        if (!inv.getStack(3).isOf(Items.TOTEM_OF_UNDYING) || !inv.getStack(4).isOf(Items.TOTEM_OF_UNDYING)) {
+            return false;
+        }
+        for (int i = 0; i < 36; ++i) {
+            ItemStack s = inv.getStack(i);
+            if (!s.isOf(Items.TOTEM_OF_UNDYING) || s.getCount() >= s.getMaxCount()) continue;
+            return false;
+        }
+        return InvHelper.emptyBackpackSlots() == 0;
+    }
+
+    private boolean totemIsOnlyShortage() {
+        if (this.mc.player == null) {
+            return false;
+        }
+        if (this.isExhausted(Items.TOTEM_OF_UNDYING)) {
+            return false;
+        }
+        if (ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING) >= (Integer)this.minTotems.get()) {
+            return false;
+        }
+        if (!this.isExhausted(Items.FIREWORK_ROCKET) && ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)) < (Integer)this.minFireworkStacks.get()) {
+            return false;
+        }
+        if (!this.foodExhaustedNow() && this.countFood() < (Integer)this.minFoodCount.get()) {
+            return false;
+        }
+        if (((Boolean)this.autoMend.get()).booleanValue() && !this.isExhausted(Items.EXPERIENCE_BOTTLE) && ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE) < (Integer)this.minXpBottles.get()) {
+            return false;
+        }
+        if (!this.isExhausted(Items.ELYTRA) && ItemHelper.totalElytraDurability((PlayerEntity)this.mc.player) < (Integer)this.minElytraDurability.get()) {
+            return false;
+        }
+        return (Boolean)this.autoRestock.get() == false || (Boolean)this.restockTriggerSupply.get() == false || InventoryRestocker.shortage((List)this.restockItems.get(), (Integer)this.restockStacks.get()) == null || !this.restockShortageNotExhausted();
+    }
+
     private void supplyTick() {
-        if (supplyTask == null) {
-            state = State.PREPARE;
+        if (this.supplyTask == null) {
+            this.state = State.PREPARE;
             return;
         }
-        if (supplyHurtTick()) return;
-
-        if (InvHelper.screenOpen()) PlayerAction.restoreHeldKeys();
-
-        // V5.2：把「正被火球纠缠」告诉补给状态机，让它不要把这段时间算成挖掘超时
-        supplyTask.setThreatActive(fireballs.isEngaging());
-        supplyTask.tick();
-        TaskStatus status = supplyTask.status();
-
+        if (this.supplyHurtTick()) {
+            return;
+        }
+        if (InvHelper.screenOpen()) {
+            PlayerAction.restoreHeldKeys();
+        }
+        this.supplyTask.tick();
+        TaskStatus status = this.supplyTask.status();
         if (status == TaskStatus.RUNNING) {
-
-            supplyTicks++;
-            if (supplyTicks % 100 == 0) {
-                FOElytraLog.info("补给进行中（%d 秒）：%s", supplyTicks / 20, supplyTask.progress());
+            ++this.supplyTicks;
+            if (this.supplyTicks % 100 == 0) {
+                FOElytraLog.info("\u8865\u7ed9\u8fdb\u884c\u4e2d\uff08%d \u79d2\uff09\uff1a%s", this.supplyTicks / 20, this.supplyTask.progress());
             }
-
-            if (supplyTicks > 2400) {
-                FOElytraLog.warn("补给超时（%d 秒），中止本次补给（%s）", supplyTicks / 20, supplyTask.progress());
-                supplyTask.abort("补给超时");
-                supplyTicks = 0;
-                manualTask = false;
-
-                supplyErrorRetryCount++;
-                if (supplyErrorRetryCount >= supplyErrorRetriesMax()) {
-                    failSupply("补给连续 " + supplyErrorRetryCount + " 次超时（每次 2 分钟还没跑完；"
-                        + "最后一次卡在：" + supplyTask.progress() + "）——请检查末影箱/潜影盒是否有空间、"
-                        + "快捷栏是否留了空位，或把「补给重试等待」调大后再试");
+            if (this.supplyTicks > 2400) {
+                FOElytraLog.warn("\u8865\u7ed9\u8d85\u65f6\uff08%d \u79d2\uff09\uff0c\u4e2d\u6b62\u672c\u6b21\u8865\u7ed9\uff08%s\uff09", this.supplyTicks / 20, this.supplyTask.progress());
+                String stuckAt = this.supplyTask.progress();
+                this.supplyTicks = 0;
+                this.manualTask = false;
+                ++this.supplyErrorRetryCount;
+                if (this.supplyErrorRetryCount >= this.supplyErrorRetriesMax()) {
+                    this.failSupply("\u8865\u7ed9\u8fde\u7eed " + this.supplyErrorRetryCount + " \u6b21\u8d85\u65f6\uff08\u6bcf\u6b21 2 \u5206\u949f\u8fd8\u6ca1\u8dd1\u5b8c\uff1b\u6700\u540e\u4e00\u6b21\u5361\u5728\uff1a" + stuckAt + "\uff09\u2014\u2014\u8bf7\u68c0\u67e5\u672b\u5f71\u7bb1/\u6f5c\u5f71\u76d2\u662f\u5426\u6709\u7a7a\u95f4\u3001\u5feb\u6377\u680f\u662f\u5426\u7559\u4e86\u7a7a\u4f4d\uff0c\u6216\u628a\u300c\u8865\u7ed9\u91cd\u8bd5\u7b49\u5f85\u300d\u8c03\u5927\u540e\u518d\u8bd5");
                     return;
                 }
-                supplyCooldown = supplyRetryDelay.get();
-                FOElytraLog.warn("补给超时第 %d/%d 次：%d tick 后才会再试（不会立刻重开）",
-                    supplyErrorRetryCount, supplyErrorRetriesMax(), supplyCooldown);
-                state = State.PREPARE;
+                this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
+                FOElytraLog.warn("\u8865\u7ed9\u8d85\u65f6\u7b2c %d/%d \u6b21\uff1a%d tick \u540e\u624d\u4f1a\u518d\u8bd5\uff08\u4e0d\u4f1a\u7acb\u523b\u91cd\u5f00\uff09", this.supplyErrorRetryCount, this.supplyErrorRetriesMax(), this.supplyCooldown);
+                if (this.beginRecover("\u8865\u7ed9\u8d85\u65f6", RecoverAfter.PREPARE)) {
+                    return;
+                }
+                this.supplyTask.abort("\u8865\u7ed9\u8d85\u65f6");
+                this.state = State.PREPARE;
             }
             return;
         }
-        supplyTicks = 0;
+        this.supplyTicks = 0;
         if (status == TaskStatus.IDLE) {
-            failSupply("补给任务被中止");
+            this.failSupply("\u8865\u7ed9\u4efb\u52a1\u88ab\u4e2d\u6b62");
             return;
         }
-
         if (status == TaskStatus.DONE) {
-
-            if (startFullSupplyPending) {
-                startFullSupplyPending = false;
-                if (fullSupplyNeeded()) {
-                    FOElytraLog.warn("任务开始补给完成，但仍有缺口（%s）；按设置继续起飞", supplyReason());
-                } else {
-                    FOElytraLog.info("任务开始：物资已补满，起飞");
-                }
-            }
-
-            Set<Item> gone = supplyTask.exhaustedItems();
-            boolean foodGone = supplyTask.foodExhausted();
-            if (!gone.isEmpty() || foodGone) {
-                exhaustedItems.addAll(gone);
-                if (foodGone) foodExhaustedCache = true;
-                exhaustedCooldown = SUPPLY_EXHAUSTED_COOLDOWN;
-                supplyRetries = 0;
-                supplyCooldown = Math.max(supplyCooldown, supplyRetryDelay.get());
-                FOElytraLog.warn("补给任务判定这些暂时取不到：%s —— 不再反复降落补给，先用现有的继续跑"
-                    + "（要补就往末影箱里塞 / 给背包腾出格子；%d 秒后会再试一次）",
-                    describeExhausted(), SUPPLY_EXHAUSTED_COOLDOWN / 20);
-            } else if (supplyNeeded() && !manualTask) {
-                supplyRetries++;
-                if (supplyRetries >= maxSupplyRetries.get()) {
-                    failSupply("连续 " + supplyRetries + " 次补给仍未达标（" + supplyReason() + "）");
-                    return;
-                }
-                supplyCooldown = supplyRetryDelay.get();
-                FOElytraLog.warn("补给后仍有缺口（第 %d 次）：%s；%d tick 后重试",
-                    supplyRetries, supplyReason(), supplyCooldown);
-            } else {
-                supplyRetries = 0;
-                FOElytraLog.info("补给完成%s", manualTask ? "" : "，继续跑图");
-            }
-            manualTask = false;
-            supplyErrorRetryCount = 0;
-            state = State.PREPARE;
-        } else {
-            manualTask = false;
-
-            supplyErrorRetryCount++;
-            if (supplyErrorRetryCount >= supplyErrorRetriesMax()) {
-                failSupply("补给连续 " + supplyErrorRetryCount + " 次出错（最后一次：" + supplyTask.failReason() + "）");
+            if (this.supplyTask.recoverNeeded() && this.beginRecover("\u8865\u7ed9\u6536\u5c3e", RecoverAfter.PREPARE)) {
                 return;
             }
-            FOElytraLog.warn("补给过程中出错（第 %d/%d 次）：%s —— 先不判失败，%d tick 后重试补给",
-                supplyErrorRetryCount, supplyErrorRetriesMax(), supplyTask.failReason(),
-                supplyRetryDelay.get());
-
+            if (this.startFullSupplyPending) {
+                this.startFullSupplyPending = false;
+                if (this.fullSupplyNeeded()) {
+                    FOElytraLog.warn("\u4efb\u52a1\u5f00\u59cb\u8865\u7ed9\u5b8c\u6210\uff0c\u4f46\u4ecd\u6709\u7f3a\u53e3\uff08%s\uff09\uff1b\u6309\u8bbe\u7f6e\u7ee7\u7eed\u8d77\u98de", this.supplyReason());
+                } else {
+                    FOElytraLog.info("\u4efb\u52a1\u5f00\u59cb\uff1a\u7269\u8d44\u5df2\u8865\u6ee1\uff0c\u8d77\u98de", new Object[0]);
+                }
+            }
+            Set<Item> gone = this.supplyTask.exhaustedItems();
+            boolean foodGone = this.supplyTask.foodExhausted();
+            if (!gone.isEmpty() || foodGone) {
+                this.exhaustedItems.addAll(gone);
+                if (foodGone) {
+                    this.foodExhaustedCache = true;
+                }
+                this.exhaustedCooldown = 2400;
+                this.supplyRetries = 0;
+                this.supplyCooldown = Math.max(this.supplyCooldown, (Integer)this.supplyRetryDelay.get());
+                FOElytraLog.warn("\u8865\u7ed9\u4efb\u52a1\u5224\u5b9a\u8fd9\u4e9b\u6682\u65f6\u53d6\u4e0d\u5230\uff1a%s \u2014\u2014 \u4e0d\u518d\u53cd\u590d\u964d\u843d\u8865\u7ed9\uff0c\u5148\u7528\u73b0\u6709\u7684\u7ee7\u7eed\u8dd1\uff08\u8981\u8865\u5c31\u5f80\u672b\u5f71\u7bb1\u91cc\u585e / \u7ed9\u80cc\u5305\u817e\u51fa\u683c\u5b50\uff1b%d \u79d2\u540e\u4f1a\u518d\u8bd5\u4e00\u6b21\uff09", this.describeExhausted(), 120);
+            } else if (this.supplyGapAfterRun() && !this.manualTask) {
+                ++this.supplyRetries;
+                if (this.supplyRetries >= (Integer)this.maxSupplyRetries.get()) {
+                    this.failSupply("\u8fde\u7eed " + this.supplyRetries + " \u6b21\u8865\u7ed9\u4ecd\u672a\u8fbe\u6807\uff08" + this.supplyReason() + "\uff09");
+                    return;
+                }
+                this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
+                FOElytraLog.warn("\u8865\u7ed9\u540e\u4ecd\u6709\u7f3a\u53e3\uff08\u7b2c %d \u6b21\uff09\uff1a%s\uff1b%d tick \u540e\u91cd\u8bd5", this.supplyRetries, this.supplyReason(), this.supplyCooldown);
+            } else {
+                this.supplyRetries = 0;
+                FOElytraLog.info("\u8865\u7ed9\u5b8c\u6210%s", this.manualTask ? "" : "\uff0c\u7ee7\u7eed\u8dd1\u56fe");
+            }
+            this.manualTask = false;
+            this.supplyErrorRetryCount = 0;
+            this.state = State.PREPARE;
+        } else {
+            this.manualTask = false;
+            ++this.supplyErrorRetryCount;
+            if (this.supplyErrorRetryCount >= this.supplyErrorRetriesMax()) {
+                this.failSupply("\u8865\u7ed9\u8fde\u7eed " + this.supplyErrorRetryCount + " \u6b21\u51fa\u9519\uff08\u6700\u540e\u4e00\u6b21\uff1a" + this.supplyTask.failReason() + "\uff09");
+                return;
+            }
+            FOElytraLog.warn("\u8865\u7ed9\u8fc7\u7a0b\u4e2d\u51fa\u9519\uff08\u7b2c %d/%d \u6b21\uff09\uff1a%s \u2014\u2014 \u5148\u4e0d\u5224\u5931\u8d25\uff0c%d tick \u540e\u91cd\u8bd5\u8865\u7ed9", this.supplyErrorRetryCount, this.supplyErrorRetriesMax(), this.supplyTask.failReason(), this.supplyRetryDelay.get());
+            this.supplyTicks = 0;
+            this.supplyCooldown = (Integer)this.supplyRetryDelay.get();
+            if (this.beginRecover("\u8865\u7ed9\u51fa\u9519\uff1a" + this.supplyTask.failReason(), RecoverAfter.PREPARE)) {
+                return;
+            }
             BaritoneHook.stop();
             PlayerAction.releaseAll();
-            if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-            supplyTicks = 0;
-            supplyCooldown = supplyRetryDelay.get();
-            state = State.PREPARE;
+            if (InvHelper.hasContainerOpen()) {
+                InvHelper.closeScreen();
+            }
+            this.state = State.PREPARE;
         }
     }
 
     private boolean isExhausted(Item item) {
-        return exhaustedCooldown > 0 && exhaustedItems.contains(item);
+        return this.exhaustedCooldown > 0 && this.exhaustedItems.contains(item);
     }
 
     private boolean foodExhaustedNow() {
-        return exhaustedCooldown > 0 && foodExhaustedCache;
+        return this.exhaustedCooldown > 0 && this.foodExhaustedCache;
     }
 
     private String describeExhausted() {
         StringBuilder sb = new StringBuilder();
-        for (Item it : exhaustedItems) {
-            if (sb.length() > 0) sb.append("、");
+        for (Item it : this.exhaustedItems) {
+            if (sb.length() > 0) {
+                sb.append("\u3001");
+            }
             sb.append(it.getName().getString());
         }
-        if (foodExhaustedCache) {
-            if (sb.length() > 0) sb.append("、");
-            sb.append("食物");
+        if (this.foodExhaustedCache) {
+            if (sb.length() > 0) {
+                sb.append("\u3001");
+            }
+            sb.append("\u98df\u7269");
         }
-        return sb.length() == 0 ? "无" : sb.toString();
+        return sb.length() == 0 ? "\u65e0" : sb.toString();
     }
 
     private boolean supplyNeeded() {
-        if (!isExhausted(Items.FIREWORK_ROCKET)
-            && ItemHelper.toStacks(Items.FIREWORK_ROCKET,
-                ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)) < minFireworkStacks.get()) return true;
-        if (!foodExhaustedNow() && countFood() < minFoodCount.get()) return true;
-        if (!isExhausted(Items.TOTEM_OF_UNDYING)
-            && ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING) < minTotems.get()) return true;
-
-        if (autoMend.get() && !isExhausted(Items.EXPERIENCE_BOTTLE)
-            && ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE) < minXpBottles.get()) return true;
-        if (!isExhausted(Items.ELYTRA)
-            && ItemHelper.totalElytraDurability(mc.player) < minElytraDurability.get()) return true;
-
-        if (autoRestock.get() && restockTriggerSupply.get()
-            && InventoryRestocker.shortage(restockItems.get(), restockStacks.get()) != null
-            && restockShortageNotExhausted()) return true;
-        return false;
+        if (!this.isExhausted(Items.FIREWORK_ROCKET) && ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)) < (Integer)this.minFireworkStacks.get()) {
+            return true;
+        }
+        if (!this.foodExhaustedNow() && this.countFood() < (Integer)this.minFoodCount.get()) {
+            return true;
+        }
+        if (!this.isExhausted(Items.TOTEM_OF_UNDYING) && ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING) < (Integer)this.minTotems.get()) {
+            return true;
+        }
+        if (((Boolean)this.autoMend.get()).booleanValue() && !this.isExhausted(Items.EXPERIENCE_BOTTLE) && ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE) < (Integer)this.minXpBottles.get()) {
+            return true;
+        }
+        return !this.isExhausted(Items.ELYTRA) && ItemHelper.totalElytraDurability((PlayerEntity)this.mc.player) < (Integer)this.minElytraDurability.get();
     }
 
     private String supplyStockSignature(String need) {
-        if (mc.player == null) return "";
+        if (this.mc.player == null) {
+            return "";
+        }
         StringBuilder sb = new StringBuilder();
-        if (need.contains("烟花")) sb.append("fw=").append(ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)).append(';');
-        if (need.contains("经验瓶")) sb.append("xp=").append(ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE)).append(';');
-        if (need.contains("图腾")) sb.append("tot=").append(ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING)).append(';');
-        if (need.contains("食物")) sb.append("food=").append(countFood()).append(';');
+        if (need.contains("\u70df\u82b1")) {
+            sb.append("fw=").append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)).append(';');
+        }
+        if (need.contains("\u7ecf\u9a8c\u74f6")) {
+            sb.append("xp=").append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE)).append(';');
+        }
+        if (need.contains("\u56fe\u817e")) {
+            sb.append("tot=").append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING)).append(';');
+        }
+        if (need.contains("\u98df\u7269")) {
+            sb.append("food=").append(this.countFood()).append(';');
+        }
         if (sb.length() == 0) {
-            sb.append("all=").append(ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)).append(',')
-                .append(ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE)).append(',')
-                .append(ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING)).append(',')
-                .append(countFood()).append(',')
-                .append(countUsableElytra());
+            sb.append("all=").append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)).append(',').append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE)).append(',').append(ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING)).append(',').append(this.countFood()).append(',').append(this.countUsableElytra());
         }
         return sb.toString();
     }
 
     private void registerUnobtainableFromNeed(String need) {
-        Set<Item> blocked = new LinkedHashSet<>();
-        if (need.contains("烟花")) blocked.add(Items.FIREWORK_ROCKET);
-        if (need.contains("经验瓶")) blocked.add(Items.EXPERIENCE_BOTTLE);
-        if (need.contains("图腾")) blocked.add(Items.TOTEM_OF_UNDYING);
-        boolean foodBlocked = need.contains("食物");
-        if (blocked.isEmpty() && !foodBlocked) return;
-
-        exhaustedItems.addAll(blocked);
-        if (foodBlocked) foodExhaustedCache = true;
-        exhaustedCooldown = SUPPLY_EXHAUSTED_COOLDOWN;
-        supplyRetries = 0;
-        FOElytraLog.warn("连续 %d 轮都为「%s」降落补给，却一点进展都没有（多半是背包没空位放，"
-            + "或者那个盒子里的东西拿不出来）→ 先当成「暂时取不到」：%d 秒内不再为它降落，"
-            + "用现有的物资继续飞（时间到了会自动再试一次）",
-            supplyNoProgressRounds, need.trim(), SUPPLY_EXHAUSTED_COOLDOWN / 20);
-        FOElytraLog.detail("活锁保护登记：缺口「%s」→ 登记 %s（冷却 %d tick）",
-            need.trim(), describeExhausted(), SUPPLY_EXHAUSTED_COOLDOWN);
+        LinkedHashSet<Item> blocked = new LinkedHashSet<Item>();
+        if (need.contains("\u70df\u82b1")) {
+            blocked.add(Items.FIREWORK_ROCKET);
+        }
+        if (need.contains("\u7ecf\u9a8c\u74f6")) {
+            blocked.add(Items.EXPERIENCE_BOTTLE);
+        }
+        if (need.contains("\u56fe\u817e")) {
+            blocked.add(Items.TOTEM_OF_UNDYING);
+        }
+        boolean foodBlocked = need.contains("\u98df\u7269");
+        if (blocked.isEmpty() && !foodBlocked) {
+            return;
+        }
+        this.exhaustedItems.addAll(blocked);
+        if (foodBlocked) {
+            this.foodExhaustedCache = true;
+        }
+        this.exhaustedCooldown = 2400;
+        this.supplyRetries = 0;
+        FOElytraLog.warn("\u8fde\u7eed %d \u8f6e\u90fd\u4e3a\u300c%s\u300d\u964d\u843d\u8865\u7ed9\uff0c\u5374\u4e00\u70b9\u8fdb\u5c55\u90fd\u6ca1\u6709\uff08\u591a\u534a\u662f\u80cc\u5305\u6ca1\u7a7a\u4f4d\u653e\uff0c\u6216\u8005\u90a3\u4e2a\u76d2\u5b50\u91cc\u7684\u4e1c\u897f\u62ff\u4e0d\u51fa\u6765\uff09\u2192 \u5148\u5f53\u6210\u300c\u6682\u65f6\u53d6\u4e0d\u5230\u300d\uff1a%d \u79d2\u5185\u4e0d\u518d\u4e3a\u5b83\u964d\u843d\uff0c\u7528\u73b0\u6709\u7684\u7269\u8d44\u7ee7\u7eed\u98de\uff08\u65f6\u95f4\u5230\u4e86\u4f1a\u81ea\u52a8\u518d\u8bd5\u4e00\u6b21\uff09", this.supplyNoProgressRounds, need.trim(), 120);
+        FOElytraLog.detail("\u6d3b\u9501\u4fdd\u62a4\u767b\u8bb0\uff1a\u7f3a\u53e3\u300c%s\u300d\u2192 \u767b\u8bb0 %s\uff08\u51b7\u5374 %d tick\uff09", need.trim(), this.describeExhausted(), 2400);
     }
 
     private boolean restockShortageNotExhausted() {
-        if (exhaustedCooldown <= 0) return true;
-        List<Item> items = restockItems.get();
-        if (items == null || items.isEmpty()) return true;
+        if (this.exhaustedCooldown <= 0) {
+            return true;
+        }
+        List<Item> items = this.restockItems.get();
+        if (items == null || items.isEmpty()) {
+            return true;
+        }
         for (Item it : items) {
-            if (!InventoryRestocker.isShort(mc.player, it, restockStacks.get())) continue;
-            if (!isExhausted(it)) return true;
+            if (!InventoryRestocker.isShort((PlayerEntity)this.mc.player, it, (Integer)this.restockStacks.get()) || this.isExhausted(it)) continue;
+            return true;
         }
         return false;
     }
 
     private String supplyNeedText() {
-        if (mc.player == null) return "";
-        int fwNeed = Math.max(0, targetFireworkStacks.get()
-            - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)));
-        int xpNeed = 0;
-        if (autoMend.get()) {
-            xpNeed = (int) Math.ceil(Math.max(0,
-                targetXpBottles.get() - ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE)) / 64.0);
+        if (this.mc.player == null) {
+            return "";
         }
-        ItemStack hotbar3 = mc.player.getInventory().getStack(3);
-        ItemStack hotbar4 = mc.player.getInventory().getStack(4);
-        ItemStack hotbar5 = mc.player.getInventory().getStack(5);
+        int fwNeed = Math.max(0, this.fireworkTargetStacks() - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)));
+        int xpNeed = 0;
+        if (((Boolean)this.autoMend.get()).booleanValue()) {
+            xpNeed = (int)Math.ceil((double)Math.max(0, (Integer)this.targetXpBottles.get() - ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE)) / 64.0);
+        }
+        ItemStack hotbar3 = this.mc.player.getInventory().getStack(3);
+        ItemStack hotbar4 = this.mc.player.getInventory().getStack(4);
+        ItemStack hotbar5 = this.mc.player.getInventory().getStack(5);
         boolean hasTotem = hotbar3.isOf(Items.TOTEM_OF_UNDYING) || hotbar4.isOf(Items.TOTEM_OF_UNDYING);
-        boolean hasFood = matchesFoodSlot(hotbar5) && hotbar5.getCount() > 18;
-
+        boolean hasFood = this.matchesFoodSlot(hotbar5) && hotbar5.getCount() > 18;
         StringBuilder sb = new StringBuilder();
-        if (fwNeed != 0 && !isExhausted(Items.FIREWORK_ROCKET)) sb.append("烟花 ").append(fwNeed).append(" 组；");
-        if (xpNeed != 0 && !isExhausted(Items.EXPERIENCE_BOTTLE)) sb.append("经验瓶 ").append(xpNeed).append(" 组；");
-        if (!hasTotem && !isExhausted(Items.TOTEM_OF_UNDYING)) sb.append("快捷栏 3/4 格没有图腾；");
-        if (!hasFood && !foodExhaustedNow()) sb.append("快捷栏 5 格没有食物（或不足 19 个）；");
+        if (fwNeed != 0 && !this.isExhausted(Items.FIREWORK_ROCKET)) {
+            sb.append("\u70df\u82b1 ").append(fwNeed).append(" \u7ec4\uff1b");
+        }
+        if (xpNeed != 0 && !this.isExhausted(Items.EXPERIENCE_BOTTLE)) {
+            sb.append("\u7ecf\u9a8c\u74f6 ").append(xpNeed).append(" \u7ec4\uff1b");
+        }
+        if (!hasTotem && !this.isExhausted(Items.TOTEM_OF_UNDYING)) {
+            sb.append("\u5feb\u6377\u680f 3/4 \u683c\u6ca1\u6709\u56fe\u817e\uff1b");
+        }
+        if (!hasFood && !this.foodExhaustedNow()) {
+            sb.append("\u5feb\u6377\u680f 5 \u683c\u6ca1\u6709\u98df\u7269\uff08\u6216\u4e0d\u8db3 19 \u4e2a\uff09\uff1b");
+        }
         return sb.toString();
     }
 
     private boolean matchesFoodSlot(ItemStack s) {
-        if (s.isEmpty()) return false;
-        List<Item> whitelist = supplyFoodItems.get();
-        if (whitelist != null && !whitelist.isEmpty()) return whitelist.contains(s.getItem());
+        if (s.isEmpty()) {
+            return false;
+        }
+        List whitelist = (List)this.supplyFoodItems.get();
+        if (whitelist != null && !whitelist.isEmpty()) {
+            return whitelist.contains(s.getItem());
+        }
         return ItemHelper.isFood(s);
     }
 
     private boolean fullSupplyNeeded() {
-        if (mc.player == null) return false;
-        int fwGap = targetFireworkStacks.get() - ItemHelper.toStacks(Items.FIREWORK_ROCKET,
-            ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET));
-        if (fwGap >= 1 && !isExhausted(Items.FIREWORK_ROCKET)) return true;
-        if (autoMend.get() && !isExhausted(Items.EXPERIENCE_BOTTLE)) {
-            int xpGap = targetXpBottles.get() - ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE);
-            if (xpGap >= 64) return true;
+        int xpGap;
+        if (this.mc.player == null) {
+            return false;
         }
-        int totemGap = targetTotems.get() - ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING);
-        if (totemGap >= 1 && !isExhausted(Items.TOTEM_OF_UNDYING)) return true;
-        if (!foodExhaustedNow() && countFood() < targetFoodCount.get() - 32) return true;
-        return !isExhausted(Items.ELYTRA) && countUsableElytra() < targetElytraCount.get();
+        int fwGap = this.fireworkTargetStacks() - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET));
+        if (fwGap >= 1 && !this.isExhausted(Items.FIREWORK_ROCKET)) {
+            return true;
+        }
+        if (((Boolean)this.autoMend.get()).booleanValue() && !this.isExhausted(Items.EXPERIENCE_BOTTLE) && (xpGap = (Integer)this.targetXpBottles.get() - ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE)) >= 64) {
+            return true;
+        }
+        int totemGap = (Integer)this.targetTotems.get() - ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING);
+        if (totemGap >= 1 && !this.isExhausted(Items.TOTEM_OF_UNDYING)) {
+            return true;
+        }
+        if (!this.foodExhaustedNow() && this.countFood() < (Integer)this.targetFoodCount.get() - 32) {
+            return true;
+        }
+        return !this.isExhausted(Items.ELYTRA) && this.countUsableElytra() < (Integer)this.targetElytraCount.get();
     }
 
     private String fullSupplyGap() {
-        if (mc.player == null) return "无";
-        StringBuilder sb = new StringBuilder();
-        int fwGap = targetFireworkStacks.get() - ItemHelper.toStacks(Items.FIREWORK_ROCKET,
-            ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET));
-        if (fwGap >= 1) sb.append("烟花还差 ").append(fwGap).append(" 组；");
-        if (autoMend.get()) {
-            int xpGap = targetXpBottles.get() - ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE);
-            if (xpGap >= 64) sb.append("经验瓶还差 ").append(xpGap).append("；");
+        int totemGap;
+        int xpGap;
+        if (this.mc.player == null) {
+            return "\u65e0";
         }
-        int totemGap = targetTotems.get() - ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING);
-        if (totemGap >= 1) sb.append("图腾还差 ").append(totemGap).append("；");
-        if (countFood() < targetFoodCount.get() - 32) sb.append("食物还差 ").append(targetFoodCount.get() - countFood()).append("；");
-        if (countUsableElytra() < targetElytraCount.get()) sb.append("备用鞘翅还差 ").append(targetElytraCount.get() - countUsableElytra()).append("；");
-        return sb.length() == 0 ? "无（差额都不值得降落）" : sb.toString();
+        StringBuilder sb = new StringBuilder();
+        int fwGap = this.fireworkTargetStacks() - ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET));
+        if (fwGap >= 1) {
+            sb.append("\u70df\u82b1\u8fd8\u5dee ").append(fwGap).append(" \u7ec4\uff1b");
+        }
+        if (((Boolean)this.autoMend.get()).booleanValue() && (xpGap = (Integer)this.targetXpBottles.get() - ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE)) >= 64) {
+            sb.append("\u7ecf\u9a8c\u74f6\u8fd8\u5dee ").append(xpGap).append("\uff1b");
+        }
+        if ((totemGap = (Integer)this.targetTotems.get() - ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING)) >= 1) {
+            sb.append("\u56fe\u817e\u8fd8\u5dee ").append(totemGap).append("\uff1b");
+        }
+        if (this.countFood() < (Integer)this.targetFoodCount.get() - 32) {
+            sb.append("\u98df\u7269\u8fd8\u5dee ").append((Integer)this.targetFoodCount.get() - this.countFood()).append("\uff1b");
+        }
+        if (this.countUsableElytra() < (Integer)this.targetElytraCount.get()) {
+            sb.append("\u5907\u7528\u9798\u7fc5\u8fd8\u5dee ").append((Integer)this.targetElytraCount.get() - this.countUsableElytra()).append("\uff1b");
+        }
+        return sb.length() == 0 ? "\u65e0\uff08\u5dee\u989d\u90fd\u4e0d\u503c\u5f97\u964d\u843d\uff09" : sb.toString();
     }
 
     private int countUsableElytra() {
-        if (mc.player == null) return 0;
+        if (this.mc.player == null) {
+            return 0;
+        }
         int n = 0;
-        for (int i = 0; i < 41; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isOf(Items.ELYTRA)
-                && ItemHelper.hasEnchantment(s, net.minecraft.enchantment.Enchantments.UNBREAKING, 3)
-                && s.getDamage() < 15) n++;
+        for (int i = 0; i < 41; ++i) {
+            ItemStack s = this.mc.player.getInventory().getStack(i);
+            if (!s.isOf(Items.ELYTRA) || !ItemHelper.hasEnchantment(s, (RegistryKey<Enchantment>)Enchantments.UNBREAKING, 3) || s.getDamage() >= 15) continue;
+            ++n;
         }
         return n;
     }
 
     private String supplyReason() {
-        String restock = autoRestock.get()
-            ? InventoryRestocker.shortage(restockItems.get(), restockStacks.get())
-            : null;
-        return "烟花 " + ItemHelper.toStacks(Items.FIREWORK_ROCKET,
-            ItemHelper.countInInventory(mc.player, Items.FIREWORK_ROCKET)) + " 组 / 食物 " + countFood()
-            + " / 经验瓶 " + ItemHelper.countInInventory(mc.player, Items.EXPERIENCE_BOTTLE)
-            + " / 图腾 " + ItemHelper.countInInventory(mc.player, Items.TOTEM_OF_UNDYING)
-            + " / 鞘翅总耐久 " + ItemHelper.totalElytraDurability(mc.player)
-            + (restock == null ? "" : " / 清单缺口：" + restock);
+        return "\u70df\u82b1 " + ItemHelper.toStacks(Items.FIREWORK_ROCKET, ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET)) + " \u7ec4 / \u98df\u7269 " + this.countFood() + " / \u7ecf\u9a8c\u74f6 " + ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.EXPERIENCE_BOTTLE) + " / \u56fe\u817e " + ItemHelper.countInInventory((PlayerEntity)this.mc.player, Items.TOTEM_OF_UNDYING) + " / \u9798\u7fc5\u603b\u8010\u4e45 " + ItemHelper.totalElytraDurability((PlayerEntity)this.mc.player);
+    }
+
+    private boolean supplyGapAfterRun() {
+        Needs taskNeeds;
+        if (this.supplyTask != null && (taskNeeds = this.supplyTask.needs()) != null && taskNeeds.isEmpty()) {
+            return false;
+        }
+        return this.supplyNeeded();
     }
 
     private boolean lavaDanger() {
-        if (mc.player == null) return false;
-        if (lava != null && lava.isEscaping()) return true;
-        return mc.player.isOnFire() || mc.player.isInLava();
+        if (this.mc.player == null) {
+            return false;
+        }
+        if (this.lava != null && this.lava.isEscaping()) {
+            return true;
+        }
+        return this.mc.player.isOnFire() || this.mc.player.isInLava();
     }
 
     private boolean lavaEscaping() {
-        return lava != null && lava.isEscaping();
+        return this.lava != null && this.lava.isEscaping();
     }
 
     private int countFood() {
         int n = 0;
-        List<Item> whitelist = supplyFoodItems.get();
+        List whitelist = (List)this.supplyFoodItems.get();
         boolean useWhitelist = whitelist != null && !whitelist.isEmpty();
-        for (int i = 0; i < 36; i++) {
-            ItemStack s = mc.player.getInventory().getStack(i);
-            if (s.isEmpty()) continue;
-            if (useWhitelist ? whitelist.contains(s.getItem()) : ItemHelper.isFood(s)) n += s.getCount();
+        for (int i = 0; i < 36; ++i) {
+            ItemStack s = this.mc.player.getInventory().getStack(i);
+            if (s.isEmpty() || !(useWhitelist ? whitelist.contains(s.getItem()) : ItemHelper.isFood(s))) continue;
+            n += s.getCount();
         }
         return n;
     }
 
     private void landing() {
-        if (InvHelper.screenOpen()) {
-            if (waitTicks % 200 == 0) FOElytraLog.warn("等你关闭界面后再开始补给（已等 %d 秒）", waitTicks / 20);
-            if (waitTicks++ > 2400) {
-                fail("等你关界面等了 2 分钟，补给取消（可手动触发补给键重试）");
+        if (this.waitForUserScreen("\u51c6\u5907\u964d\u843d\u8865\u7ed9")) {
+            if (this.waitTicks > 2400) {
+                this.fail("\u7b49\u4f60\u5173\u754c\u9762\u7b49\u4e86 2 \u5206\u949f\uff0c\u8865\u7ed9\u53d6\u6d88\uff08\u53ef\u624b\u52a8\u89e6\u53d1\u8865\u7ed9\u952e\u91cd\u8bd5\uff09");
             }
             return;
         }
-        if (mc.player.isOnGround() && !mc.player.isGliding()) {
+        this.waitTicks = 0;
+        if (this.mc.player.isOnGround() && !this.mc.player.isGliding()) {
             BaritoneHook.stop();
-            landingY = Double.NaN;
-            stuckFireworkHold = false;
-            placeTorchBeforeSupply();
-            state = State.SUPPLY;
-            FOElytraLog.detail("已落地（%d %d %d），进入补给执行",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ());
+            this.landingY = Double.NaN;
+            this.placeTorchBeforeSupply();
+            this.state = State.SUPPLY;
+            FOElytraLog.detail("\u5df2\u843d\u5730\uff08%d %d %d\uff09\uff0c\u8fdb\u5165\u8865\u7ed9\u6267\u884c", this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ());
+            BounceProbe.mark("\u843d\u5730\u8fdb\u5165\u8865\u7ed9");
             return;
         }
-        if (supplyHurtTick()) return;
-        if (!landForSupply.get()) {
-            BaritoneHook.stop();
-            landingY = Double.NaN;
-            placeTorchBeforeSupply();
-            state = State.SUPPLY;
+        if (this.supplyHurtTick()) {
             return;
         }
-
-        if (Double.isNaN(landingY)) {
-            if (!pickLandingColumn()) {
-                abortLandingForSafety();
+        if (!((Boolean)this.landForSupply.get()).booleanValue()) {
+            BaritoneHook.stop();
+            this.landingY = Double.NaN;
+            this.placeTorchBeforeSupply();
+            this.state = State.SUPPLY;
+            return;
+        }
+        if (Double.isNaN(this.landingY)) {
+            if (!this.pickLandingColumn()) {
+                if (this.basaltSkipHandled) {
+                    this.basaltSkipHandled = false;
+                    return;
+                }
+                this.abortLandingForSafety();
                 return;
             }
-            landingTicks = 0;
-            landingAngle = 0.0;
-            stuckFireworkHold = false;
-            stuckNow = false;
-            stuckTracker.reset();
+            this.landingTicks = 0;
+            this.landingAngle = 0.0;
             BaritoneHook.stop();
-            FOElytraLog.info("开始收敛下降：目标地面 Y=%.0f（当前 Y=%.1f），已停掉绕圈飞行", landingY, mc.player.getY());
+            FOElytraLog.info("\u5f00\u59cb\u6536\u655b\u4e0b\u964d\uff1a\u76ee\u6807\u5730\u9762 Y=%.0f\uff08\u5f53\u524d Y=%.1f\uff09\uff0c\u5df2\u505c\u6389\u7ed5\u5708\u98de\u884c", this.landingY, this.mc.player.getY());
         }
-
-        landingTicks++;
-        waitTicks++;
-        descentTick();
-
-        if (landingTicks % 60 == 0) {
-            double above = mc.player.getY() - landingY;
-            FOElytraLog.info("下降中（%d 秒）：高度 %.1f｜离地面 %.1f 格｜盘旋半径 %.1f｜滑翔 %s",
-                landingTicks / 20, mc.player.getY(), above, Math.max(LANDING_SPIRAL_MIN_RADIUS, above / LANDING_SPIRAL_DIVISOR),
-                mc.player.isGliding() ? "是" : "否");
+        ++this.landingTicks;
+        ++this.waitTicks;
+        this.descentTick();
+        if (this.landingTicks % 60 == 0) {
+            double above = this.mc.player.getY() - this.landingY;
+            FOElytraLog.info("\u4e0b\u964d\u4e2d\uff08%d \u79d2\uff09\uff1a\u9ad8\u5ea6 %.1f\uff5c\u79bb\u5730\u9762 %.1f \u683c\uff5c\u76d8\u65cb\u534a\u5f84 %.1f\uff5c\u6ed1\u7fd4 %s", this.landingTicks / 20, this.mc.player.getY(), above, Math.max(4.0, above / 8.0), this.mc.player.isGliding() ? "\u662f" : "\u5426");
         }
-        if (waitTicks > 2400) {
-            failSupply("降落超时，无法补给");
+        if (this.waitTicks > 2400) {
+            this.failSupply("\u964d\u843d\u8d85\u65f6\uff0c\u65e0\u6cd5\u8865\u7ed9");
         }
     }
 
     private void descentTick() {
-        if (!mc.player.isGliding()) {
-            mc.player.setPitch(mc.player.isOnGround() ? 0.0f : 20.0f);
+        if (this.landingTicks % 10 == 0 && this.landingColumnTurnedBad()) {
+            this.abortLandingLavaWater("\u76ee\u6807\u70b9\u6216\u6b63\u4e0b\u65b9\u6709\u5ca9\u6d46/\u6c34");
             return;
         }
-        double above = mc.player.getY() - landingY;
-        double radius = Math.max(LANDING_SPIRAL_MIN_RADIUS, above / LANDING_SPIRAL_DIVISOR);
-        landingAngle += LANDING_SPIRAL_STEP;
-        double aimX = landingTargetX;
-        double aimZ = landingTargetZ;
-        if (above > LANDING_SPIRAL_MIN_RADIUS) {
-            aimX += Math.cos(landingAngle) * radius;
-            aimZ += Math.sin(landingAngle) * radius;
+        if (!this.mc.player.isGliding()) {
+            return;
         }
-        double dx = aimX - mc.player.getX();
-        double dz = aimZ - mc.player.getZ();
-        mc.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
-        mc.player.setPitch(above > LANDING_NO_FIREWORK_ABOVE ? 8.0f : 22.0f);
+        double above = this.mc.player.getY() - this.landingY;
+        double radius = Math.max(4.0, above / 8.0);
+        this.landingAngle += 0.25;
+        double aimX = this.landingTargetX;
+        double aimZ = this.landingTargetZ;
+        if (above > 4.0) {
+            aimX += Math.cos(this.landingAngle) * radius;
+            aimZ += Math.sin(this.landingAngle) * radius;
+        }
+        double dx = aimX - this.mc.player.getX();
+        double dz = aimZ - this.mc.player.getZ();
+        this.checkGlideReachable(above);
+    }
 
-        double vy = Math.max(0.05, -mc.player.getVelocity().y);
-        boolean withinCutoff = above / vy < LANDING_CUTOFF_SECONDS;
-        boolean noFirework = above <= LANDING_NO_FIREWORK_ABOVE || withinCutoff;
-        if (noFirework) return;
-        if (landingTicks % LANDING_FIREWORK_INTERVAL != 0) return;
-        if (mc.player.getVelocity().y >= 0.2) return;
-        useFirework();
+    private void checkGlideReachable(double above) {
+        if (this.landingTicks < 40) {
+            return;
+        }
+        if (above <= 4.0) {
+            return;
+        }
+        double flat = Math.hypot(this.landingTargetX - this.mc.player.getX(), this.landingTargetZ - this.mc.player.getZ());
+        double needRatio = flat / Math.max(1.0, above);
+        if (needRatio <= 10.0) {
+            return;
+        }
+        FOElytraLog.warn("\u6ed1\u7fd4\u9ad8\u5ea6\u4e0d\u8db3\u4ee5\u5230\u8fbe\u964d\u843d\u70b9\uff08\u5e73\u8ddd %.0f \u683c / \u9ad8\u5ea6\u5dee %.0f \u683c\uff0c\u8fd8\u5dee %d \u683c\u9ad8\u5ea6\uff09\u2192 \u5c31\u5730\u964d\u843d/\u4ea4\u7ed9 Baritone", flat, above, Math.max(0, (int)Math.round(flat / 10.0 - above)));
+        BaritoneHook.stop();
+        PlayerAction.releaseAll();
+        PlayerAction.restoreHeldKeys();
+        this.landingY = Double.NaN;
+        this.landingTicks = 0;
+        this.supplyCooldown = Math.max(this.supplyCooldown, 600);
+        this.state = State.PREPARE;
     }
 
     private MendTask.Options mendOptions() {
-        return new MendTask.Options(
-            mendDurability.get(),
-            Math.max(1, mendDurability.get() / 4),
-            minBottles.get(),
-            repairToDamage.get(),
-            requireGround.get(),
-            requireNetherWastes.get(),
-            requireMending.get(),
-            mendPitch.get(),
-            throwDelay.get(),
-            maxThrows.get(),
-            landingTimeout.get()
-        );
+        return new MendTask.Options((Integer)this.mendDurability.get(), Math.max(1, (Integer)this.mendDurability.get() / 4), (Integer)this.minBottles.get(), (Integer)this.repairToDamage.get(), (Boolean)this.requireGround.get(), (Boolean)this.requireNetherWastes.get(), (Boolean)this.requireMending.get(), (Double)this.mendPitch.get(), (Integer)this.throwDelay.get(), (Integer)this.maxThrows.get(), (Integer)this.landingTimeout.get());
     }
 
     private boolean startMend() {
-        if (mendTask != null && mendTask.isRunning()) {
-            FOElytraLog.warn("上一次修复还没结束");
+        BounceProbe.mark("\u5f00\u59cb\u4fee\u9798\u7fc5");
+        if (this.mendTask != null && this.mendTask.isRunning()) {
+            FOElytraLog.warn("\u4e0a\u4e00\u6b21\u4fee\u590d\u8fd8\u6ca1\u7ed3\u675f", new Object[0]);
             return false;
         }
-        eat.stop();
-        mc.options.useKey.setPressed(false);
+        this.eat.stop();
         BaritoneHook.stop();
-        mendTask = new MendTask(mendOptions());
-        mendTask.start();
-        if (mendTask.status() != TaskStatus.RUNNING) {
-
-            FOElytraLog.warn("修鞘翅没能开始：%s", mendTask.failReason());
+        this.mendTask = new MendTask(this.mendOptions());
+        this.mendTask.start();
+        if (this.mendTask.status() != TaskStatus.RUNNING) {
+            FOElytraLog.warn("\u4fee\u9798\u7fc5\u6ca1\u80fd\u5f00\u59cb\uff1a%s", this.mendTask.failReason());
             return false;
         }
-        state = State.MEND;
+        this.state = State.MEND;
         return true;
     }
 
     private void mendTick() {
-        if (mendTask == null) {
-            state = State.PREPARE;
+        if (this.mendTask == null) {
+            this.state = State.PREPARE;
             return;
         }
-        mendTask.tick();
-        TaskStatus status = mendTask.status();
-
-        if (status == TaskStatus.RUNNING) return;
+        this.mendTask.tick();
+        TaskStatus status = this.mendTask.status();
+        if (status == TaskStatus.RUNNING) {
+            return;
+        }
         if (status == TaskStatus.IDLE) {
-            fail("修鞘翅任务被中止");
+            this.fail("\u4fee\u9798\u7fc5\u4efb\u52a1\u88ab\u4e2d\u6b62");
             return;
         }
-
         if (status == TaskStatus.DONE) {
-            mendRetries = 0;
-            FOElytraLog.info("鞘翅修复完成%s", manualTask ? "" : "，继续跑图");
+            this.mendRetries = 0;
+            FOElytraLog.info("\u9798\u7fc5\u4fee\u590d\u5b8c\u6210%s", this.manualTask ? "" : "\uff0c\u7ee7\u7eed\u8dd1\u56fe");
         } else {
-            mendRetries++;
-            FOElytraLog.warn("修鞘翅失败：%s（第 %d 次）", mendTask.failReason(), mendRetries);
-            if (mendRetries >= maxMendRetries.get()) {
-                autoMend.set(false);
-                FOElytraLog.err("连续 %d 次修复失败，已自动关闭「启用自动修鞘翅」", mendRetries);
+            ++this.mendRetries;
+            FOElytraLog.warn("\u4fee\u9798\u7fc5\u5931\u8d25\uff1a%s\uff08\u7b2c %d \u6b21\uff09", this.mendTask.failReason(), this.mendRetries);
+            if (this.mendRetries >= (Integer)this.maxMendRetries.get()) {
+                this.autoMend.set(false);
+                FOElytraLog.err("\u8fde\u7eed %d \u6b21\u4fee\u590d\u5931\u8d25\uff0c\u5df2\u81ea\u52a8\u5173\u95ed\u300c\u542f\u7528\u81ea\u52a8\u4fee\u9798\u7fc5\u300d", this.mendRetries);
             }
         }
-        manualTask = false;
-        state = State.PREPARE;
+        this.manualTask = false;
+        this.state = State.PREPARE;
     }
 
     private void finish(String message) {
         FOElytraLog.info("%s", message);
-        state = State.DONE;
-        releaseEverything();
-        if (logoutOnArrive.get()) {
-            disconnect(message);
+        if (!this.recoveryJustRan && this.state != State.RECOVER && this.supplyTask != null && this.supplyTask.recoverNeeded() && this.beginRecover("\u4efb\u52a1\u7ed3\u675f\uff1a" + message, RecoverAfter.FINISH)) {
+            this.pendingFinishMessage = message;
+            FOElytraLog.warn("\u4efb\u52a1\u7ed3\u675f\uff1a\u5148\u628a\u653e\u4e0b\u7684\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u6536\u56de\u6765\u518d\u6536\u5c3e", new Object[0]);
             return;
         }
-        if (disableOnFinish.get() && isActive()) toggle();
+        this.recoveryJustRan = false;
+        this.state = State.DONE;
+        this.releaseEverything();
+        if (((Boolean)this.logoutOnArrive.get()).booleanValue()) {
+            this.disconnect(message);
+            return;
+        }
+        if (((Boolean)this.disableOnFinish.get()).booleanValue() && this.isActive()) {
+            this.toggle();
+        }
     }
 
     private void fail(String reason) {
-        if (state == State.FAILED) return;
-        failReason = reason;
-        FOElytraLog.err("任务失败：%s", reason);
-        FOElytraLog.detail("失败诊断：原因 %s｜状态 %s｜补给阶段 %s｜位置 %s｜地面 %s｜滑翔 %s｜烟花 %d 发｜Baritone %s",
-            reason, state.toString(), supplyFailPhase ? "是" : "否",
-            mc.player == null ? "-" : String.format("%d %d %d",
-                mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ()),
-            mc.player != null && mc.player.isOnGround() ? "是" : "否",
-            mc.player != null && mc.player.isGliding() ? "是" : "否",
-            mc.player == null ? 0 : ItemHelper.countInHotbar(mc.player, Items.FIREWORK_ROCKET),
-            BaritoneHook.isFlying() ? "接管中" : "未接管");
-        BaritoneHook.stop();
-        state = State.FAILED;
-        releaseEverything();
-        boolean logout = logoutOnFailure.get() && (!supplyFailPhase || logoutOnSupplyFail.get())
-            && !suppressLogout;
-        supplyFailPhase = false;
-        suppressLogout = false;
-
-        try {
-            FOElytraLog.snapshot(reason, 200, 0);
-        } catch (Throwable t) {
-            FOElytraLog.detailError("fail snapshot", t);
-        }
-
-        if (logout) {
-            disconnect(reason);
+        if (this.state == State.FAILED) {
             return;
         }
-        if (disableOnFinish.get() && isActive()) toggle();
+        if (!this.recoveryJustRan && this.state != State.RECOVER && this.supplyTask != null && this.supplyTask.recoverNeeded() && this.beginRecover("\u4efb\u52a1\u5931\u8d25\uff1a" + reason, RecoverAfter.FAIL)) {
+            this.pendingFailReason = reason;
+            FOElytraLog.warn("\u4efb\u52a1\u5931\u8d25\uff08%s\uff09\uff1a\u5148\u628a\u653e\u4e0b\u7684\u6f5c\u5f71\u76d2/\u672b\u5f71\u7bb1\u6536\u56de\u6765\uff0c\u518d\u8d70\u5931\u8d25\u6536\u5c3e", reason);
+            return;
+        }
+        this.recoveryJustRan = false;
+        this.failReason = reason;
+        FOElytraLog.err("\u4efb\u52a1\u5931\u8d25\uff1a%s", reason);
+        FOElytraLog.detail("\u5931\u8d25\u8bca\u65ad\uff1a\u539f\u56e0 %s\uff5c\u72b6\u6001 %s\uff5c\u8865\u7ed9\u9636\u6bb5 %s\uff5c\u4f4d\u7f6e %s\uff5c\u5730\u9762 %s\uff5c\u6ed1\u7fd4 %s\uff5c\u70df\u82b1 %d \u53d1\uff5cBaritone %s", reason, this.state.name(), this.supplyFailPhase ? "\u662f" : "\u5426", this.mc.player == null ? "-" : String.format("%d %d %d", this.mc.player.getBlockX(), this.mc.player.getBlockY(), this.mc.player.getBlockZ()), this.mc.player != null && this.mc.player.isOnGround() ? "\u662f" : "\u5426", this.mc.player != null && this.mc.player.isGliding() ? "\u662f" : "\u5426", this.mc.player == null ? 0 : ItemHelper.countInHotbar((PlayerEntity)this.mc.player, Items.FIREWORK_ROCKET), BaritoneHook.isFlying() ? "\u63a5\u7ba1\u4e2d" : "\u672a\u63a5\u7ba1");
+        BaritoneHook.stop();
+        this.state = State.FAILED;
+        this.releaseEverything();
+        boolean logout = (Boolean)this.logoutOnFailure.get() != false && (!this.supplyFailPhase || (Boolean)this.logoutOnSupplyFail.get() != false) && !this.suppressLogout;
+        this.supplyFailPhase = false;
+        this.suppressLogout = false;
+        try {
+            FOElytraLog.snapshot(reason, 200, 0);
+        }
+        catch (Throwable t) {
+            FOElytraLog.detailError("fail snapshot", t);
+        }
+        if (logout) {
+            this.disconnect(reason);
+            return;
+        }
+        if (((Boolean)this.disableOnFinish.get()).booleanValue() && this.isActive()) {
+            this.toggle();
+        }
     }
 
     private void failSupply(String reason) {
-        supplyFailPhase = true;
-        fail(reason);
+        this.supplyFailPhase = true;
+        this.fail(reason);
     }
 
     private void failNoLogout(String reason) {
-        suppressLogout = true;
-        fail(reason);
-        suppressLogout = false;
+        this.suppressLogout = true;
+        try {
+            this.fail(reason);
+        }
+        finally {
+            if (this.state != State.RECOVER) {
+                this.suppressLogout = false;
+            }
+        }
     }
 
     private void releaseEverything() {
         PlayerAction.releaseAll();
-        resetStuckState();
-        resetTerrainState();
-
+        this.resetTerrainState();
         PlayerAction.restoreHeldKeys();
-        if (lava != null) lava.release(mc);
-        if (lavaPredictor != null) lavaPredictor.release(mc);
-        eat.stop();
-        abortChildTasks();
+        PlayerAction.clearStuckSneak();
+        if (this.lava != null) {
+            this.lava.release(this.mc);
+        }
+        if (this.lavaPredictor != null) {
+            this.lavaPredictor.release(this.mc);
+        }
+        this.eat.stop();
+        this.abortChildTasks();
     }
 
     private void abortChildTasks() {
         try {
-            if (supplyTask != null && supplyTask.isRunning()) supplyTask.abort("任务结束");
-            if (mendTask != null && mendTask.isRunning()) mendTask.abort("任务结束");
-        } catch (Throwable t) {
-            LOG.warn("abortChildTasks 失败", t);
+            if (this.supplyTask != null && this.supplyTask.isRunning()) {
+                this.supplyTask.abort("\u4efb\u52a1\u7ed3\u675f");
+            }
+            if (this.mendTask != null && this.mendTask.isRunning()) {
+                this.mendTask.abort("\u4efb\u52a1\u7ed3\u675f");
+            }
         }
-
-        if (InvHelper.hasContainerOpen()) InvHelper.closeScreen();
-        mc.options.forwardKey.setPressed(false);
-        eat.stop();
+        catch (Throwable t) {
+            LOG.warn("abortChildTasks \u5931\u8d25", t);
+        }
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
+        this.eat.stop();
     }
 
     public State travelState() {
-        return state;
+        return this.state;
     }
 
     public String failReason() {
-        return failReason;
+        return this.failReason;
     }
 
     public BlockPos currentTarget() {
-        return segmentTarget;
+        return this.segmentTarget;
     }
 
     public Needs currentNeeds() {
-        return supplyTask == null ? new Needs() : supplyTask.needs();
+        return this.supplyTask == null ? new Needs() : this.supplyTask.needs();
+    }
+
+    public static enum Mode {
+        Waypoints("\u822a\u70b9"),
+        SingleTarget("\u5355\u4e00\u76ee\u6807"),
+        Direction("\u65b9\u5411");
+
+
+        private final String label;
+
+        Mode(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    public static enum State {
+        IDLE("\u7a7a\u95f2"),
+        PREPARE("\u51c6\u5907"),
+        TAKEOFF("\u8d77\u98de"),
+        FLYING("\u98de\u884c\u4e2d"),
+        LANDING("\u964d\u843d"),
+        SUPPLY("\u8865\u7ed9"),
+        MEND("\u4fee\u590d"),
+        RECOVER("\u6062\u590d"),
+        DONE("\u5b8c\u6210"),
+        FAILED("\u5931\u8d25");
+
+
+        private final String label;
+
+        State(String label) { this.label = label; }
+
+        @Override
+        public String toString() { return label; }
+    }
+
+    private static enum TakeoffPhase {
+        INIT,
+        LAUNCH,
+        CLEAR_HEAD,
+        FLY_TO_OPEN,
+        ASCEND,
+        WAIT_ARRIVE;
+
+    }
+
+    private static enum RecoverAfter {
+        PREPARE,
+        FAIL,
+        FINISH,
+        IDLE;
+
+    }
+
+    private final class RecoverRunner {
+        private RecoverRunner() {
+        }
+
+        @EventHandler
+        public void onTick(TickEvent.Pre event) {
+            if (!AutoElytraFlight.this.recoverArmed) {
+                AutoElytraFlight.this.stopRecoverRunner();
+                return;
+            }
+            if (AutoElytraFlight.this.isActive()) {
+                AutoElytraFlight.this.stopRecoverRunner();
+                return;
+            }
+            if (((AutoElytraFlight)AutoElytraFlight.this).mc.player == null || ((AutoElytraFlight)AutoElytraFlight.this).mc.world == null) {
+                FOElytraLog.warn("\u4e16\u754c/\u73a9\u5bb6\u6ca1\u4e86\uff0c\u5f52\u4f4d\u63d0\u524d\u7ed3\u675f\uff08\u8fd8\u6ca1\u6536\u56de\u7684\u4e1c\u897f\u8bf7\u81ea\u5df1\u62ff\uff09", new Object[0]);
+                AutoElytraFlight.this.stopRecoverRunner();
+                return;
+            }
+            AutoElytraFlight.this.recoverTick();
+        }
     }
 }
+

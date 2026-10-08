@@ -43,6 +43,9 @@ dependencies {
     // Meteor (modImplementation 让 loom remap 到 yarn 命名空间)
     modImplementation("meteordevelopment:meteor-client:1.21.11-SNAPSHOT")
 
+    // Baritone API（icehack-2 鞘翅套件编译期依赖；modCompileOnly 让 loom remap 到 yarn 命名空间，运行时由 baritone mod 提供）
+    modCompileOnly(files("libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar"))
+
     // Seedfinding (世界种子/结构定位计算库，ElytraCollector 依赖)
     extraLibs("com.seedfinding:mc_biome:1.171.1") { isTransitive = false }
     extraLibs("com.seedfinding:mc_core:1.210.0") { isTransitive = false }
