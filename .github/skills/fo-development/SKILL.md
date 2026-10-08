@@ -20,7 +20,7 @@ license: CC0-1.0
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律中文；不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。新增/修改 UI 文本时必须自查是否中文。
 4. **命名规范（FO 大写 + 版本体系统一）**：插件名称统一大写 **FO**——构建产物文件名（`FO-V<版本>.jar`）、mod 显示名一律大写 FO；**构建产物名与 mod 版本号必须统一到版本体系**：产物 = `FO-<mod版本>.jar`，升版时同步修改 `fo/gradle/libs.versions.toml` 的 `mod-version`，不得脱节；mod id 按 Fabric 规范保持小写 `fo`，Java 包名 `com.fo.addon` 保持小写。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策时，必须先给出方案供用户讨论，由用户确定后再更改代码；未经用户拍板，不得直接动手实现。
-6. **交付**：把 `fo/build/libs/FO-<mod版本>.jar`（文件名 = `FO-<mod版本>.jar`，版本号随 `fo/gradle/libs.versions.toml` 的 `mod-version` 走，当前 V6.1）通过 `present_files` 交给用户。
+6. **交付**：把 `fo/build/libs/FO-<mod版本>.jar`（文件名 = `FO-<mod版本>.jar`，版本号随 `fo/gradle/libs.versions.toml` 的 `mod-version` 走，当前 V6.2）通过 `present_files` 交给用户。
 
 ## 工作流
 
@@ -29,7 +29,7 @@ license: CC0-1.0
 3. **补测试**：为行为变更写/更新断言（尤其是判定类逻辑，必须覆盖新行为）。
 4. **验证**：`cd fo && ./gradlew build` 全绿（BUILD SUCCESSFUL + 全部测试 0 failures / 0 errors）。Windows 上按 `docs/windows-build.md` 用本地 `gradle.bat` + `-Dorg.gradle.java.home=<JDK>`，不要用 `gradlew.bat`。
 5. **提交**：`git add` 相关文件 → commit（仓库根）。本机 `github.com` 的 git 传输会超时，推送改用 `api.github.com` 的 REST API（blob → tree → commit → 推进 `main`），见 `docs/scripts/gh-deliver.ps1`；**提交前先按 blob SHA-1 与远端 tree 比对，避免用旧副本覆盖别人的新提交**。
-6. **归档 jar**：把 `fo/build/libs/FO-<mod版本>.jar` 复制到 `releases/FO-V<版本号>-<commit短哈希>.jar`（版本号在当前 `mod-version` 上顺延，如 V6.0 → V6.1），同时在 `releases/README.md` 的版本清单加一行，并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。纯文档改动**不要**发版、不要建 Release（没有新 jar，只会产生内容重复的归档）。
+6. **归档 jar**：把 `fo/build/libs/FO-<mod版本>.jar` 复制到 `releases/FO-V<版本号>.jar`（版本号在当前 `mod-version` 上顺延，如 V6.0 → V6.1；**文件名不带 commit 短哈希**，与构建产物、GitHub Release 附件同名），同时在 `releases/README.md` 的版本清单加一行，并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。纯文档改动**不要**发版、不要建 Release（没有新 jar，只会产生内容重复的归档）。
 7. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
 
 ## 用户偏好（历史沉淀）
