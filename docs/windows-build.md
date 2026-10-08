@@ -245,7 +245,7 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
 
 ### Token
 
-需要一个能写 `fanjiale666666/FO` 的 token（细粒度给 **Contents: Read and write** 就够）。
+需要一个能写 `jialebot6666/FO` 的 token（细粒度给 **Contents: Read and write** 就够）。
 
 - 别把它写进任何**要提交的文件**里；放到工作区下一个被忽略的临时文件（如 `.ghtoken`），**用完删掉**。
 - 用完记得去 GitHub 设置里**吊销**。

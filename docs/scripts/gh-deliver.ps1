@@ -29,7 +29,7 @@ param(
     [Parameter(Mandatory = $true)][string]$CommitMessageFile,
     [Parameter(Mandatory = $true)][string]$NotesFile,
     [string]$ReadmeAnchor = '',
-    [string]$Owner = 'fanjiale666666',
+    [string]$Owner = 'jialebot6666',
     [string]$Repo  = 'FO'
 )
 

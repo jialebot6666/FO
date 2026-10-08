@@ -9,7 +9,7 @@ license: CC0-1.0
 ## 项目背景
 
 - 定位：生存辅助全自动 Meteor Client 插件（Fabric，MC 1.21.11），模块名统一带 `FO ` 前缀（用户环境装有大量其他中文 addon，防重名冲突），前端全汉化。
-- 代码根：`fo/`，包 `com.fo.addon`；远端仓库 `https://github.com/fanjiale666666/FO`（本地工作区路径按机器而定，不要写死）。
+- 代码根：`fo/`，包 `com.fo.addon`；远端仓库 `https://github.com/jialebot6666/FO`（本地工作区路径按机器而定，不要写死）。
 - 现有模块：共 10 个模块 + 1 个 HUD 元素，完整清单见仓库根 `AGENTS.md`（本文件不重复维护清单，避免两处脱节）。
 - 纯逻辑放 `fo/src/main/java/com/fo/addon/utils/`（不依赖 MC 运行时，可单元测试）；测试放 `fo/src/test/java/com/fo/addon/`。
 

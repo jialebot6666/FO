@@ -26,7 +26,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律使用中文，不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。
 4. **务实说话**：没从代码里实际看到的、没验证过的，不说。不根据猜测推断功能，不编结论。不确定就说"不知道"或"需要看代码确认"。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策，必须先给出方案由用户拍板，未经确认不得直接改代码（与 `.github/skills/fo-development/SKILL.md` 铁律 5 一致）。
-6. **每次发版在 GitHub 建正式 Release**：每个版本（Vx.y）交付时，除归档 `releases/FO-Vx.y-<短哈希>.jar` 外，必须在 GitHub（fanjiale666666/FO）创建正式 Release——tag 指向该版本 commit、标题 `FO Vx.y`、说明写入该版本更新介绍、并附带对应 jar 为 Release 附件，方便用户直接下载与回溯。
+6. **每次发版在 GitHub 建正式 Release**：每个版本（Vx.y）交付时，除归档 `releases/FO-Vx.y-<短哈希>.jar` 外，必须在 GitHub（jialebot6666/FO）创建正式 Release——tag 指向该版本 commit、标题 `FO Vx.y`、说明写入该版本更新介绍、并附带对应 jar 为 Release 附件，方便用户直接下载与回溯。
 
 ## 构建与测试
 

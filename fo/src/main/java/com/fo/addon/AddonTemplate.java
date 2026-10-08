@@ -57,6 +57,6 @@ public class AddonTemplate extends MeteorAddon {
 
     @Override
     public GithubRepo getRepo() {
-        return new GithubRepo("jialebot6666", "fo");
+        return new GithubRepo("jialebot6666", "FO");
     }
 }
