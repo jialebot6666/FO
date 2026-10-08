@@ -13,11 +13,8 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   5. FO 自动挖沙（`modules/AutoMineSand`）
   6. FO 自动挖矿（`modules/AutoMining`）
   7. FO杀戮光环（`modules/FOKillAura`）
-  8. FO 自动鞘翅飞行（`elytra/modules/AutoElytraFlight`）
-  9. FO 自动不祥宝库（`elytra/modules/AutoOminousVault`）
-  10. FO 实时平均速度（`elytra/modules/SpeedMeter`）
-- 另有 HUD 元素「FO 实时平均速度」（`elytra/hud/SpeedHud`，id `speed-meter`），与 SpeedMeter 共享统计数据
-- 鞘翅套件（`elytra/`）自 V6.0 起整体来自 icehack-2 移植，V5.x 旧套件已删除
+  8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，V6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动；黑盒库 `libs/fo-ancient-blackbox.jar`）
+- V6.2 已删除 V6.0 的 icehack-2 鞘翅套件（自动鞘翅飞行/自动不祥宝库/实时平均速度 三模块 + HUD），当前无 elytra 套件
 
 ## 硬性规范（每次改动必须执行）
 
