@@ -3,7 +3,7 @@
   "id": "fo",
   "version": "${version}",
   "name": "FO",
-  "description": "FO 生存辅助全自动插件：鞘翅全自动采集、自动种树、自动扔垃圾、自动挖沙、自动挖矿、自动LogPlus、FO杀戮光环。",
+  "description": "FO 生存辅助全自动插件：鞘翅全自动采集、自动种树、自动扔垃圾、自动挖沙、自动挖矿、自动LogPlus、FO杀戮光环、FO古城战利品搜索。",
   "authors": [
     "jialebot6666"
   ],

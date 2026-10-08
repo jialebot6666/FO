@@ -1,5 +1,6 @@
 package com.fo.addon;
 
+import com.fo.addon.ancient.modules.FOAncientCitySearch;
 import com.fo.addon.modules.AutoLog;
 import com.fo.addon.modules.AutoMineSand;
 import com.fo.addon.modules.AutoMining;
@@ -30,6 +31,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoMineSand());
         Modules.get().add(new AutoMining());
         Modules.get().add(new FOKillAura());
+        Modules.get().add(new FOAncientCitySearch());
     }
 
     @Override
