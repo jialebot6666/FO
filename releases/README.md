@@ -105,6 +105,7 @@ V2.4–V4.62 与 V6.0 的说明按各版本 commit 原文回追，只去掉了�
 | FO-V6.2.jar | V6.2 | 删除 V6.0 新增的 icehack-2 鞘翅套件（自动鞘翅飞行/自动开宝库/实时速度模块+HUD），回归 7 模块 |
 | FO-V6.3.jar | V6.3 | 新增 FO 古城战利品搜索（半自动）：移植 misaka 古城模块（附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点），黑盒 657 类（com/w + w 数据类）与 2 个 DLL 入包，核心逻辑源码级重写 com.fo.addon.ancient.*，默认种子 -7346913998703726680 |
 | FO-V6.4.jar | V6.4 | 修复古城搜索无结果：CubiomesJNI native 符号绑定原包 com.custom.addon.util（新增桥类+FO 转发层），距离判定对齐原版方块坐标，catch Throwable 防 Error 中断，DLL 加载失败明确报错 |
+| FO-V6.5.jar | V6.5 | 修复古城搜索中断：Meteor info() 内部 String.format，进度消息裸 %（%）抛 UnknownFormatConversionException（Conversion = ')'）——已转义 %%；新增「调试模式」开关：输出 DLL 加载/生成器/城市定位/箱子判定明细 + 完整异常堆栈到聊天 |
 
 > 备注：8430096（AutoTrash 白名单修复）的云端交付链接已失效，
 > 本地无 jar 副本；其源码仍完整保留在 Git 历史中（commit 8430096），

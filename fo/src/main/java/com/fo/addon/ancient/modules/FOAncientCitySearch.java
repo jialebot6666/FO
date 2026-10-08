@@ -47,6 +47,7 @@ public class FOAncientCitySearch extends Module {
     private final Setting<Integer> searchRadiusSetting;
     private final Setting<Boolean> showDistanceSetting;
     private final Setting<Boolean> autoSearchSetting;
+    private final Setting<Boolean> debugModeSetting;
 
     private final Setting<String> seedSetting;
     private final Setting<Boolean> applySeedSetting;
@@ -92,6 +93,12 @@ public class FOAncientCitySearch extends Module {
         autoSearchSetting = sgGeneral.add(new BoolSetting.Builder()
             .name("自动搜索")
             .description("启用模块时自动开始搜索")
+            .defaultValue(false)
+            .build());
+
+        debugModeSetting = sgGeneral.add(new BoolSetting.Builder()
+            .name("调试模式")
+            .description("开启后输出详细调试信息（DLL加载、城市定位、箱子判定明细、异常堆栈），便于排查问题")
             .defaultValue(false)
             .build());
 
@@ -177,7 +184,7 @@ public class FOAncientCitySearch extends Module {
                 scanForCities(finalSeed, playerPos);
             } catch (Throwable t) {
                 error("异步任务异常: " + t.getMessage());
-                t.printStackTrace();
+                debugStack(t);
             } finally {
                 setSearching(false);
             }
@@ -193,16 +200,19 @@ public class FOAncientCitySearch extends Module {
         CubiomesJNI jni = null;
         long generator = 0L;
         boolean jniReady = false;
+        debug("DLL 加载状态: " + CubiomesJNI.isLibraryLoaded());
         try {
             if (CubiomesJNI.isLibraryLoaded()) {
                 jni = new CubiomesJNI();
                 int versionId = gameVersionSetting.get() == GameVersionOption.FROM_26_1 ? 24 : 23;
                 generator = jni.initGenerator(versionId, seed);
                 jniReady = true;
+                debug("生成器初始化完成: versionId=" + versionId + " generator=" + generator);
             }
         } catch (Throwable t) {
             // native 链接失败（UnsatisfiedLinkError 等 Error 也要捕获，避免中断整个扫描）
-            t.printStackTrace();
+            debug("生成器初始化失败: " + t);
+            debugStack(t);
             jniReady = false;
         }
 
@@ -231,7 +241,8 @@ public class FOAncientCitySearch extends Module {
                 int pct = ++done * 100 / total;
                 if (pct - lastPct >= 10) {
                     lastPct = pct;
-                    info("进度: " + done + "/" + total + " (" + pct + "%)  已找到 " + found + " 个古城");
+                    // 注意：Meteor info() 内部 String.format，裸 % 必须转义为 %%（对齐原版 %%）否则抛 Conversion 异常
+                    info("进度: " + done + "/" + total + " (" + pct + "%%)  已找到 " + found + " 个古城");
                 }
                 try {
                     if (jniReady && jni != null) {
@@ -239,21 +250,28 @@ public class FOAncientCitySearch extends Module {
                         if (city != null) {
                             int blockX = (city[0] << 4) + 8;
                             int blockZ = (city[1] << 4) + 8;
-                            if (!jni.isViableAncientCity(generator, blockX, blockZ)) {
+                            boolean viable = jni.isViableAncientCity(generator, blockX, blockZ);
+                            debug("区域 " + rx + "," + rz + " 找到城市 -> 区块 " + city[0] + "," + city[1]
+                                + " 方块 " + blockX + "," + blockZ + " viable=" + viable);
+                            if (!viable) {
                                 continue;
                             }
                             // 距离判定对齐 misaka 原版：方块坐标差
                             double dist = Math.sqrt(Math.pow(blockX - playerPos.getX(), 2) + Math.pow(blockZ - playerPos.getZ(), 2));
                             if (dist > radius) {
+                                debug("城市超出搜索半径: 距离 " + dist + " > " + radius);
                                 continue;
                             }
                             found++;
-                            results.addAll(chestsOfOneCity(seed, blockX, blockZ, playerPos, McVersion.V1_19));
+                            List<FoundChest> chests = chestsOfOneCity(seed, blockX, blockZ, playerPos, McVersion.V1_19);
+                            debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
+                            results.addAll(chests);
                         }
                     }
                 } catch (Throwable t) {
                     // UnsatisfiedLinkError 等 Error 不能中断整个扫描
-                    t.printStackTrace();
+                    debug("区域 " + rx + "," + rz + " 处理异常: " + t);
+                    debugStack(t);
                 }
             }
         }
@@ -275,15 +293,20 @@ public class FOAncientCitySearch extends Module {
         AncientCityLootScanner scanner = new AncientCityLootScanner();
         WorldSeedFunctions wsf = new WorldSeedFunctions();
         scanner.generateAt(seed, cityX, cityZ, wsf);
+        debug("古城结构生成完成: " + cityX + "," + cityZ);
 
         if (gameVersionSetting.get() == GameVersionOption.FROM_26_1) {
-            processTriples(scanner.collectChestsRandomSequence(), results, playerPos);
+            List<?> randomSeq = scanner.collectChestsRandomSequence();
+            debug("random_sequence 箱子数: " + randomSeq.size());
+            processTriples(randomSeq, results, playerPos);
         }
         try {
-            processTriples(scanner.collectChestsLegacy(), results, playerPos);
+            List<?> legacy = scanner.collectChestsLegacy();
+            debug("legacy 箱子数: " + legacy.size());
+            processTriples(legacy, results, playerPos);
         } catch (Exception e) {
             warning("古城生成失败: " + e.getMessage());
-            e.printStackTrace();
+            debugStack(e);
         }
         return results;
     }
@@ -301,6 +324,8 @@ public class FOAncientCitySearch extends Module {
             boolean hasSwift = (target == LootTarget.SWIFT_SNEAK_3 || target == LootTarget.BOTH)
                 && hasSwiftSneakThree(lootTable, lootSeed);
             if (!hasGold && !hasSwift) {
+                debug("箱子 " + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+                    + " 判定: 附魔金=" + hasGold + " 迅捷3=" + hasSwift + "（无目标物品，跳过）");
                 continue;
             }
 
@@ -310,6 +335,7 @@ public class FOAncientCitySearch extends Module {
                     + Math.pow(pos.getZ() - playerPos.getZ(), 2));
             String label = hasGold && hasSwift ? "两者" : hasGold ? "附魔金" : "迅捷3";
             results.add(new FoundChest(new BlockPos(pos.getX(), pos.getY(), pos.getZ()), dist, label));
+            debug("箱子命中: " + pos.getX() + "," + pos.getY() + "," + pos.getZ() + " -> " + label);
         }
     }
 
@@ -429,5 +455,31 @@ public class FOAncientCitySearch extends Module {
 
     private void setSearching(boolean value) {
         searching = value;
+    }
+
+    /** 调试模式输出（未开启时静默）。 */
+    private void debug(String msg) {
+        if (debugModeSetting.get()) {
+            info("[调试] " + msg);
+        }
+    }
+
+    /** 调试模式输出完整异常堆栈到聊天。 */
+    private void debugStack(Throwable t) {
+        if (!debugModeSetting.get()) {
+            return;
+        }
+        info("[调试] 异常: " + t);
+        for (StackTraceElement el : t.getStackTrace()) {
+            info("[调试]   at " + el);
+        }
+        Throwable cause = t.getCause();
+        while (cause != null) {
+            info("[调试] 由以下原因引起: " + cause);
+            for (StackTraceElement el : cause.getStackTrace()) {
+                info("[调试]   at " + el);
+            }
+            cause = cause.getCause();
+        }
     }
 }
