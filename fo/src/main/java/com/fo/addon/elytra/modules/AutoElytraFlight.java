@@ -4300,7 +4300,7 @@ extends FOElytraModule {
         this.descentTick();
         if (this.landingTicks % 60 == 0) {
             double above = this.mc.player.getY() - this.landingY;
-            FOElytraLog.info("\u4e0b\u964d\u4e2d\uff08%d \u79d2\uff09\uff1a\u9ad8\u5ea6 %.1f\uff5c\u79bb\u5730\u9762 %.1f \u683c\uff5c\u76d8\u65cb\u534a\u5f84 %.1f\uff5c\u6ed1\u7fd4 %s", this.landingTicks / 20, this.mc.player.getY(), above, Math.max(4.0, above / 8.0), this.mc.player.isGliding() ? "\u662f" : "\u5426");
+            FOElytraLog.info("\u4e0b\u964d\u4e2d\uff08%d \u79d2\uff09\uff1a\u9ad8\u5ea6 %.1f\uff5c\u79bb\u5730\u9762 %.1f \u683c\uff5c\u6c34\u5e73\u8f6c\u5411\u964d\u843d\u70b9\uff5c\u6ed1\u7fd4 %s", this.landingTicks / 20, this.mc.player.getY(), above, this.mc.player.isGliding() ? "\u662f" : "\u5426");
         }
         if (this.waitTicks > 2400) {
             this.failSupply("\u964d\u843d\u8d85\u65f6\uff0c\u65e0\u6cd5\u8865\u7ed9");
@@ -4315,36 +4315,44 @@ extends FOElytraModule {
         if (!this.mc.player.isGliding()) {
             return;
         }
+        this.mc.player.setYaw(landingYawTo(this.landingTargetX, this.landingTargetZ, this.mc.player.getX(), this.mc.player.getZ()));
+        this.mc.player.setPitch(0.0f);
         double above = this.mc.player.getY() - this.landingY;
-        double radius = Math.max(4.0, above / 8.0);
-        this.landingAngle += 0.25;
-        double aimX = this.landingTargetX;
-        double aimZ = this.landingTargetZ;
-        if (above > 4.0) {
-            aimX += Math.cos(this.landingAngle) * radius;
-            aimZ += Math.sin(this.landingAngle) * radius;
-        }
-        double dx = aimX - this.mc.player.getX();
-        double dz = aimZ - this.mc.player.getZ();
         this.checkGlideReachable(above);
+    }
+
+    public static float landingYawTo(double tx, double tz, double px, double pz) {
+        return (float) Math.toDegrees(Math.atan2(-(tx - px), tz - pz));
+    }
+
+    public static boolean glideReachable(double flat, double above) {
+        if (above <= 4.0) {
+            return true;
+        }
+        return flat / Math.max(1.0, above) <= 10.0;
     }
 
     private void checkGlideReachable(double above) {
         if (this.landingTicks < 40) {
             return;
         }
-        if (above <= 4.0) {
-            return;
-        }
         double flat = Math.hypot(this.landingTargetX - this.mc.player.getX(), this.landingTargetZ - this.mc.player.getZ());
-        double needRatio = flat / Math.max(1.0, above);
-        if (needRatio <= 10.0) {
+        if (glideReachable(flat, above)) {
             return;
         }
         FOElytraLog.warn("\u6ed1\u7fd4\u9ad8\u5ea6\u4e0d\u8db3\u4ee5\u5230\u8fbe\u964d\u843d\u70b9\uff08\u5e73\u8ddd %.0f \u683c / \u9ad8\u5ea6\u5dee %.0f \u683c\uff0c\u8fd8\u5dee %d \u683c\u9ad8\u5ea6\uff09\u2192 \u5c31\u5730\u964d\u843d/\u4ea4\u7ed9 Baritone", flat, above, Math.max(0, (int)Math.round(flat / 10.0 - above)));
+        if (this.beginRecover("\u964d\u843d\u4e0d\u53ef\u8fbe", RecoverAfter.PREPARE)) {
+            return;
+        }
+        if (this.supplyTask != null && this.supplyTask.isRunning()) {
+            this.supplyTask.abort("\u964d\u843d\u4e0d\u53ef\u8fbe");
+        }
         BaritoneHook.stop();
         PlayerAction.releaseAll();
         PlayerAction.restoreHeldKeys();
+        if (InvHelper.hasContainerOpen()) {
+            InvHelper.closeScreen();
+        }
         this.landingY = Double.NaN;
         this.landingTicks = 0;
         this.supplyCooldown = Math.max(this.supplyCooldown, 600);
