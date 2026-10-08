@@ -175,9 +175,9 @@ public class FOAncientCitySearch extends Module {
         searchTask = CompletableFuture.runAsync(() -> {
             try {
                 scanForCities(finalSeed, playerPos);
-            } catch (Exception e) {
-                error("异步任务异常: " + e.getMessage());
-                e.printStackTrace();
+            } catch (Throwable t) {
+                error("异步任务异常: " + t.getMessage());
+                t.printStackTrace();
             } finally {
                 setSearching(false);
             }
@@ -200,8 +200,15 @@ public class FOAncientCitySearch extends Module {
                 generator = jni.initGenerator(versionId, seed);
                 jniReady = true;
             }
-        } catch (Exception e) {
-            // 忽略
+        } catch (Throwable t) {
+            // native 链接失败（UnsatisfiedLinkError 等 Error 也要捕获，避免中断整个扫描）
+            t.printStackTrace();
+            jniReady = false;
+        }
+
+        if (!jniReady) {
+            error("CubiomesJNI 原生库加载失败（DLL 缺失/不兼容/链接失败），无法定位古城。请确认使用 Windows 客户端且 DLL 完整。");
+            return;
         }
 
         // 区域半径：半径(区块) / 24 + 1（对齐 misaka 真实实现，修正旧源码 /25 的错误）
@@ -235,7 +242,8 @@ public class FOAncientCitySearch extends Module {
                             if (!jni.isViableAncientCity(generator, blockX, blockZ)) {
                                 continue;
                             }
-                            double dist = Math.sqrt(Math.pow(blockX - playerChunkX, 2) + Math.pow(blockZ - playerChunkZ, 2));
+                            // 距离判定对齐 misaka 原版：方块坐标差
+                            double dist = Math.sqrt(Math.pow(blockX - playerPos.getX(), 2) + Math.pow(blockZ - playerPos.getZ(), 2));
                             if (dist > radius) {
                                 continue;
                             }
@@ -243,8 +251,9 @@ public class FOAncientCitySearch extends Module {
                             results.addAll(chestsOfOneCity(seed, blockX, blockZ, playerPos, McVersion.V1_19));
                         }
                     }
-                } catch (Exception e) {
-                    e.printStackTrace();
+                } catch (Throwable t) {
+                    // UnsatisfiedLinkError 等 Error 不能中断整个扫描
+                    t.printStackTrace();
                 }
             }
         }
@@ -252,7 +261,7 @@ public class FOAncientCitySearch extends Module {
         if (jni != null && generator != 0L) {
             try {
                 jni.freeGenerator(generator);
-            } catch (Exception e) {
+            } catch (Throwable t) {
                 // 忽略
             }
         }
