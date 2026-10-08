@@ -101,6 +101,9 @@ V2.4–V4.62 与 V6.0 的说明按各版本 commit 原文回追，只去掉了�
 | FO-V5.1.jar | V5.1 | 修复「挖掘异常？取消挖掘」误报：等待计数按用途拆开 + 方块还在时绝不打断 Baritone 挖潜影盒（末影箱同形问题一并修） |
 | FO-V5.2.jar | V5.2 | 挖回潜影盒/末影箱改用 FO 自己的挖掘（默认关掉 Baritone 挖掘）+ 背包满自动丢垃圾腾位 + 槽位差捡盒判定 + 火球时不判挖掘超时 |
 | FO-V6.0.jar | V6.0 | 全面移植 icehack-2 鞘翅套件（删除 V5.x 旧套件）：移植 39 类（AutoElytraFlight/AutoOminousVault/SpeedMeter 三模块 + SpeedHud + core 状态机 BounceProbe/JunkDropper/TimelinessCounter/OrderedItemListSetting 等），删掉 TerrainProbe/SegFailWindow/FreeSlotLogic/InventoryPickupLogic/MineWaitLogic，依赖改 modCompileOnly baritone-api，15 个 UI 枚举加中文 label，重建 ElytraUiTextTest 守护测试（231 测试全绿） |
+| FO-V6.1.jar | V6.1 | 修复自动鞘翅飞行补给降落 bug（方案B转向 + abort 清理），存档命名统一 FO-V<版本>.jar 不带哈希 |
+| FO-V6.2.jar | V6.2 | 删除 V6.0 新增的 icehack-2 鞘翅套件（自动鞘翅飞行/自动开宝库/实时速度模块+HUD），回归 7 模块 |
+| FO-V6.3.jar | V6.3 | 新增 FO 古城战利品搜索（半自动）：移植 misaka 古城模块（附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点），黑盒 657 类（com/w + w 数据类）与 2 个 DLL 入包，核心逻辑源码级重写 com.fo.addon.ancient.*，默认种子 -7346913998703726680 |
 
 > 备注：8430096（AutoTrash 白名单修复）的云端交付链接已失效，
 > 本地无 jar 副本；其源码仍完整保留在 Git 历史中（commit 8430096），
