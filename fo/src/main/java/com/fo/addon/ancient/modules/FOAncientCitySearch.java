@@ -63,14 +63,14 @@ public class FOAncientCitySearch extends Module {
     private static final String STORE_FILE_NAME = "fo-ancient-chests.json";
 
     /**
-     * Xaero 路径点颜色索引。
+     * Xaero 路径点颜色。
      *
-     * <p>按原版 16 色顺序取值：6=金、9=蓝、13=浅紫。⚠️ 这几个索引没有在装了 Xaero 的客户端上实机核对过，
-     * 如果落点颜色不对，改这三个常量即可。
+     * <p>直接给 Xaero 的颜色枚举名（{@code WaypointColor}），不再用数字索引猜——
+     * 枚举常量已对着真实 Xaero jar 核对：{@code GOLD}=金、{@code BLUE}=蓝、{@code PURPLE}=浅紫。
      */
-    private static final int WAYPOINT_COLOR_GOLD = 6;
-    private static final int WAYPOINT_COLOR_BLUE = 9;
-    private static final int WAYPOINT_COLOR_PURPLE = 13;
+    private static final String WAYPOINT_COLOR_GOLD = "GOLD";
+    private static final String WAYPOINT_COLOR_BLUE = "BLUE";
+    private static final String WAYPOINT_COLOR_PURPLE = "PURPLE";
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSeed = settings.createGroup("种子设置");
@@ -93,6 +93,7 @@ public class FOAncientCitySearch extends Module {
     private final Setting<SettingColor> blueColorSetting;
     private final Setting<SettingColor> purpleColorSetting;
     private final Setting<Boolean> autoCleanSetting;
+    private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
 
     private final MinecraftClient mc;
     private Long manualSeed;
@@ -214,6 +215,13 @@ public class FOAncientCitySearch extends Module {
             .defaultValue(true)
             .build());
 
+        waypointChannelSetting = sgHighlight.add(new EnumSetting.Builder<XaeroWaypointBridge.Preference>()
+            .name("路径点写入方式")
+            .description("官方第三方接口：路径点挂在独立来源下，不写进你自己的路径点文件（需 Xaero 26.x）；"
+                + "玩家路径点集：等同于你自己按 B 加的路径点，可管理可传送，但会进你的路径点列表（Xaero 24.7.1+）")
+            .defaultValue(XaeroWaypointBridge.Preference.AUTO)
+            .build());
+
         searching = false;
         manualSeed = null;
     }
@@ -274,7 +282,7 @@ public class FOAncientCitySearch extends Module {
         return purpleColorSetting.get();
     }
 
-    private int waypointColorOf(String label) {
+    private String waypointColorOf(String label) {
         if (AncientChestStore.LABEL_GOLD.equals(label)) return WAYPOINT_COLOR_GOLD;
         if (AncientChestStore.LABEL_SWIFT.equals(label)) return WAYPOINT_COLOR_BLUE;
         return WAYPOINT_COLOR_PURPLE;
@@ -590,26 +598,7 @@ public class FOAncientCitySearch extends Module {
         }
 
         // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色
-        if (!XaeroWaypointBridge.isLibraryLoaded()) {
-            warning("Xaero地图模组未安装，无法添加路径点");
-        } else {
-            Object waypointSet = XaeroWaypointBridge.getCurrentWaypointSet();
-            if (waypointSet == null) {
-                warning("无法获取Xaero路径点集合");
-            } else {
-                int added = 0;
-                for (int i = 0; i < results.size(); i++) {
-                    FoundChest fc = results.get(i);
-                    String name = showDistanceSetting.get()
-                        ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
-                        : String.format("%s #%d", fc.label, i + 1);
-                    XaeroWaypointBridge.addWaypoint(fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(),
-                        name, fc.label, waypointColorOf(fc.label));
-                    added++;
-                }
-                info("已添加 " + added + " 个位置到Xaero路径点");
-            }
-        }
+        reportWaypoints(results);
 
         info("=".repeat(50));
         info("搜索完成！找到 " + results.size() + " 个箱子（新增记录 " + recorded + " 个）:");
@@ -628,6 +617,53 @@ public class FOAncientCitySearch extends Module {
         info("高亮：附魔金=金色 / 迅捷潜行3=蓝色 / 两者=紫色；走近 " + highlightRadiusSetting.get() + " 格内自动显示");
         info("已开或已被挖掉的箱子会自动删掉高亮与路径点");
         info("=".repeat(50));
+    }
+
+    /**
+     * 把命中位置写进 Xaero 路径点，并明确告知实际走通的通道。
+     *
+     * <p>这里刻意把「没装 Xaero」和「装了但版本对不上」分开报 —— 旧实现两者都报
+     * 「Xaero地图模组未安装」，在装了 Xaero 的客户端上纯属误导。
+     */
+    private void reportWaypoints(List<FoundChest> results) {
+        XaeroWaypointBridge.Preference pref = waypointChannelSetting.get();
+        XaeroWaypointBridge.Channel channel = XaeroWaypointBridge.pick(pref);
+
+        debug("Xaero 状态: " + XaeroWaypointBridge.statusText()
+            + " | 官方通道=" + XaeroWaypointBridge.officialSupported()
+            + " 路径点集通道=" + XaeroWaypointBridge.waypointSetSupported()
+            + " | 实测通道=" + channel);
+
+        if (channel == XaeroWaypointBridge.Channel.NONE) {
+            warning(XaeroWaypointBridge.statusText() + "，无法添加路径点（世界内高亮不受影响）");
+            if (pref != XaeroWaypointBridge.Preference.AUTO) {
+                warning("当前「路径点写入方式」被设为「" + pref + "」，可改回「自动」再试");
+            }
+            return;
+        }
+
+        int added = 0;
+        for (int i = 0; i < results.size(); i++) {
+            FoundChest fc = results.get(i);
+            String name = showDistanceSetting.get()
+                ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
+                : String.format("%s #%d", fc.label, i + 1);
+            if (XaeroWaypointBridge.addWaypoint(pref,
+                    fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), name, fc.label, waypointColorOf(fc.label))) {
+                added++;
+            }
+        }
+
+        if (added == 0) {
+            warning("Xaero 路径点写入失败（" + XaeroWaypointBridge.statusText()
+                + "）。若此刻不在游戏世界内（例如停在主界面），请先进入世界再重试。");
+            return;
+        }
+
+        String channelName = channel == XaeroWaypointBridge.Channel.OFFICIAL
+            ? "官方第三方接口（不占用你自己的路径点列表）"
+            : "玩家路径点集（会出现在你自己的路径点列表里）";
+        info("已写入 " + added + "/" + results.size() + " 个路径点到 Xaero，通道: " + channelName);
     }
 
     /** 应用种子开关回调：解析输入并写入手动种子。 */
