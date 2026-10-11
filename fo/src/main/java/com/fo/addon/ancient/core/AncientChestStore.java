@@ -19,6 +19,10 @@ import java.util.Map;
  */
 public final class AncientChestStore {
 
+    // 线程约定：所有会碰 byScope 的实例方法都加锁。
+    // V6.10 实机崩溃（渲染线程 ConcurrentModificationException）暴露了「后台线程改共享状态」
+    // 这类问题；模块现在改成只在客户端线程写入，这里再加一道锁，避免以后有人跨线程用时再踩。
+
     /** 附魔金苹果箱子。 */
     public static final String LABEL_GOLD = "附魔金";
     /** 迅捷潜行3 附魔书箱子。 */
@@ -35,20 +39,20 @@ public final class AncientChestStore {
     private final Map<String, List<Mark>> byScope = new LinkedHashMap<>();
 
     /** 某个作用域下的全部记录（拷贝）。 */
-    public List<Mark> marks(String scope) {
+    public synchronized List<Mark> marks(String scope) {
         return new ArrayList<>(byScope.getOrDefault(scope, List.of()));
     }
 
-    public int size(String scope) {
+    public synchronized int size(String scope) {
         return byScope.getOrDefault(scope, List.of()).size();
     }
 
-    public boolean isEmpty(String scope) {
+    public synchronized boolean isEmpty(String scope) {
         return size(scope) == 0;
     }
 
     /** 新增一条；同一 (x,z) 已存在时覆盖标签并返回 false（不重复添加）。 */
-    public boolean add(String scope, Mark mark) {
+    public synchronized boolean add(String scope, Mark mark) {
         List<Mark> list = byScope.computeIfAbsent(scope, k -> new ArrayList<>());
         for (int i = 0; i < list.size(); i++) {
             Mark old = list.get(i);
@@ -67,14 +71,14 @@ public final class AncientChestStore {
      *
      * @return 是否真的删掉了
      */
-    public boolean remove(String scope, int x, int z) {
+    public synchronized boolean remove(String scope, int x, int z) {
         List<Mark> list = byScope.get(scope);
         if (list == null) return false;
         return list.removeIf(m -> m.x() == x && m.z() == z);
     }
 
     /** 清空某个作用域。 */
-    public void clear(String scope) {
+    public synchronized void clear(String scope) {
         byScope.remove(scope);
     }
 
@@ -93,7 +97,7 @@ public final class AncientChestStore {
 
     // ==================== 序列化 ====================
 
-    public String toJson() {
+    public synchronized String toJson() {
         StringBuilder sb = new StringBuilder(256);
         sb.append("{\"version\":").append(FORMAT_VERSION).append(",\"scopes\":{");
         boolean firstScope = true;

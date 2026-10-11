@@ -19,8 +19,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -99,6 +101,21 @@ public class FOAncientCitySearch extends Module {
     private Long manualSeed;
     private boolean searching;
     private CompletableFuture<Void> searchTask;
+
+    /**
+     * 待写入的命中点：<b>搜索结果在后台线程算出，但落盘与 Xaero 路径点写入必须在客户端线程做</b>。
+     *
+     * <p>这不是洁癖 —— V6.10 实机崩溃就是踩在这里：搜索跑在 CompletableFuture 后台线程，
+     * 直接调 Xaero 的 {@code ThirdPartyWaypoints.add(...)}，而 Xaero 的渲染线程每帧都在遍历
+     * 同一张 HashMap，于是渲染线程抛 ConcurrentModificationException 整局崩掉。
+     * Xaero 的路径点容器不是线程安全的，也不该由我们去同步它的内部迭代。
+     * 同理，{@code AncientChestStore} 也是普通 LinkedHashMap，后台写 + 客户端线程清理会打架。
+     */
+    private final Deque<PendingMark> pendingMarks = new ArrayDeque<>();
+
+    /** 一个待应用的命中点（坐标 + 标签 + 预生成的路径点名字）。 */
+    private record PendingMark(int x, int y, int z, String label, String waypointName) {
+    }
 
     /** 已找到的目标箱子记录（按作用域分组）。 */
     private AncientChestStore chestStore = new AncientChestStore();
@@ -238,6 +255,8 @@ public class FOAncientCitySearch extends Module {
 
     @Override
     public void onDeactivate() {
+        // 丢弃还没落地的命中点：模块已关，再往 Xaero 写就属于意外副作用
+        pendingMarks.clear();
         if (searchTask != null && !searchTask.isDone()) {
             searchTask.cancel(true);
             setSearching(false);
@@ -253,6 +272,8 @@ public class FOAncientCitySearch extends Module {
             searchTask = null;
             startSearchSetting.set(false);
         }
+        // 后台线程算出的命中点在这里落地：客户端线程 = 渲染线程，写 Xaero 不会与渲染打架
+        flushPendingMarks();
         if (autoCleanSetting.get()) {
             cleanupStaleMarks();
         }
@@ -583,25 +604,19 @@ public class FOAncientCitySearch extends Module {
         }
         results.sort(Comparator.comparingDouble(fc -> fc.distance));
 
-        // 1) 记录落盘（跨重启保留），高亮框与路径点都由这份记录驱动
-        loadStore();
-        String scope = currentScope();
-        int recorded = 0;
-        if (scope != null) {
-            for (FoundChest fc : results) {
-                if (chestStore.add(scope, new AncientChestStore.Mark(
-                        fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.label))) {
-                    recorded++;
-                }
-            }
-            saveStore();
+        // 本方法跑在搜索线程上，只做两件安全的事：整理待写入队列 + 输出聊天。
+        // 落盘与 Xaero 写入都交给客户端线程（onTickPost），避免与渲染线程抢共享状态。
+        for (int i = 0; i < results.size(); i++) {
+            FoundChest fc = results.get(i);
+            String name = showDistanceSetting.get()
+                ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
+                : String.format("%s #%d", fc.label, i + 1);
+            pendingMarks.add(new PendingMark(
+                fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.label, name));
         }
 
-        // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色
-        reportWaypoints(results);
-
         info("=".repeat(50));
-        info("搜索完成！找到 " + results.size() + " 个箱子（新增记录 " + recorded + " 个）:");
+        info("搜索完成！找到 " + results.size() + " 个箱子:");
         info("=".repeat(50));
         for (int i = 0; i < results.size(); i++) {
             FoundChest fc = results.get(i);
@@ -620,12 +635,48 @@ public class FOAncientCitySearch extends Module {
     }
 
     /**
+     * 把队列里的命中点真正落地：写进本地记录 + 写进 Xaero 路径点。
+     *
+     * <p><b>只允许在客户端线程调用</b>（渲染也在这个线程上）—— 这是 V6.10 实机崩溃的修复点：
+     * 以前这一步在后台线程直接调 Xaero，渲染线程正在遍历同一张 HashMap，
+     * 于是抛 ConcurrentModificationException 把整局崩掉。
+     */
+    private void flushPendingMarks() {
+        if (pendingMarks.isEmpty()) {
+            return;
+        }
+        List<PendingMark> batch = new ArrayList<>(pendingMarks);
+        pendingMarks.clear();
+        debug("开始写入 " + batch.size() + " 个命中点（客户端线程）");
+
+        // 1) 本地记录落盘（跨重启保留），高亮框与路径点都由这份记录驱动
+        loadStore();
+        String scope = currentScope();
+        int recorded = 0;
+        if (scope != null) {
+            for (PendingMark m : batch) {
+                if (chestStore.add(scope, new AncientChestStore.Mark(m.x(), m.y(), m.z(), m.label()))) {
+                    recorded++;
+                }
+            }
+            saveStore();
+        }
+
+        // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色
+        writeWaypoints(batch);
+
+        if (scope != null && recorded > 0) {
+            info("已记录 " + recorded + " 个新箱子到本地（本地共 " + chestStore.size(scope) + " 个）");
+        }
+    }
+
+    /**
      * 把命中位置写进 Xaero 路径点，并明确告知实际走通的通道。
      *
-     * <p>这里刻意把「没装 Xaero」和「装了但版本对不上」分开报 —— 旧实现两者都报
+     * <p>刻意把「没装 Xaero」和「装了但版本对不上」分开报 —— 旧实现两者都报
      * 「Xaero地图模组未安装」，在装了 Xaero 的客户端上纯属误导。
      */
-    private void reportWaypoints(List<FoundChest> results) {
+    private void writeWaypoints(List<PendingMark> batch) {
         XaeroWaypointBridge.Preference pref = waypointChannelSetting.get();
         XaeroWaypointBridge.Channel channel = XaeroWaypointBridge.pick(pref);
 
@@ -643,13 +694,9 @@ public class FOAncientCitySearch extends Module {
         }
 
         int added = 0;
-        for (int i = 0; i < results.size(); i++) {
-            FoundChest fc = results.get(i);
-            String name = showDistanceSetting.get()
-                ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
-                : String.format("%s #%d", fc.label, i + 1);
-            if (XaeroWaypointBridge.addWaypoint(pref,
-                    fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), name, fc.label, waypointColorOf(fc.label))) {
+        for (PendingMark m : batch) {
+            if (XaeroWaypointBridge.addWaypoint(pref, m.x(), m.y(), m.z(),
+                    m.waypointName(), m.label(), waypointColorOf(m.label()))) {
                 added++;
             }
         }
@@ -663,7 +710,7 @@ public class FOAncientCitySearch extends Module {
         String channelName = channel == XaeroWaypointBridge.Channel.OFFICIAL
             ? "官方第三方接口（不占用你自己的路径点列表）"
             : "玩家路径点集（会出现在你自己的路径点列表里）";
-        info("已写入 " + added + "/" + results.size() + " 个路径点到 Xaero，通道: " + channelName);
+        info("已写入 " + added + "/" + batch.size() + " 个路径点到 Xaero，通道: " + channelName);
     }
 
     /** 应用种子开关回调：解析输入并写入手动种子。 */
