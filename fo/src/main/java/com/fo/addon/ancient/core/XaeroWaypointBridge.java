@@ -108,4 +108,59 @@ public class XaeroWaypointBridge {
             // 忽略
         }
     }
+
+    /**
+     * 删除 (x,z) 上的路径点（箱子被开掉/被挖掉时用）。
+     *
+     * <p>Xaero 不同版本的删除 API 不完全一致，这里按两条路依次尝试：
+     * 先试 {@code WaypointSet.remove(Waypoint)}，不行再拿到 waypoint 列表直接 remove。
+     *
+     * @return 是否真的删掉了
+     */
+    public static boolean removeWaypointAt(int x, int z) {
+        if (!loaded) {
+            return false;
+        }
+        try {
+            Object set = getCurrentWaypointSet();
+            if (set == null) {
+                return false;
+            }
+            Object waypoint = findByLocation(x, z);
+            if (waypoint == null) {
+                return false;
+            }
+
+            boolean removed = false;
+            try {
+                WAYPOINT_SET.getMethod("remove", WAYPOINT).invoke(set, waypoint);
+                removed = true;
+            } catch (NoSuchMethodException | IllegalAccessException e) {
+                Object list = WAYPOINT_SET.getMethod("getWaypoints").invoke(set);
+                if (list instanceof java.util.Collection<?> c) {
+                    @SuppressWarnings("unchecked")
+                    java.util.Collection<Object> raw = (java.util.Collection<Object>) c;
+                    removed = raw.remove(waypoint);
+                }
+            }
+
+            if (removed) {
+                refresh();
+            }
+            return removed;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void refresh() {
+        try {
+            Object support = SUPPORT_MODS.getField("xaeroMinimap").get(null);
+            if (support != null) {
+                support.getClass().getMethod("requestWaypointsRefresh").invoke(support);
+            }
+        } catch (Exception e) {
+            // 忽略
+        }
+    }
 }
