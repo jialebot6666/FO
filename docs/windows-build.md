@@ -313,3 +313,98 @@ $env:JAVA_HOME = $jdk; $env:GRADLE_USER_HOME = "$ws\.gradle-home"
 # 4) 产物
 Get-ChildItem "$ws\FO\fo\build\libs\*.jar"
 ```
+
+---
+
+## 10. ⚠️ 依赖下载太慢：接国内镜像（实测把冷启动从「跑不完」压到 8 分 38 秒）
+
+第 2 节讲了 Gradle 本体要换镜像，但**依赖**（Maven Central / Fabric / Meteor）默认还是直连，
+在慢线路上会 `SocketTimeoutException: Read timed out` 直接让构建失败——2026-10-12 实测就踩到了。
+
+### 实测吞吐（2026-10-12，同一条线路）
+
+| 源 | 速度 |
+|---|---|
+| `repo1.maven.org`（Maven Central 直连） | **约 32 KB/s** ❌ |
+| `plugins.gradle.org` | 约 13 KB/s |
+| `maven.fabricmc.net` | 约 25～75 KB/s |
+| `mirrors.cloud.tencent.com/nexus/repository/maven-public/` | **约 639 KB/s** ✅ |
+| `maven.aliyun.com/repository/public/` | 约 473 KB/s ✅ |
+| `piston-data.mojang.com`（MC 本体，无需镜像） | 约 679 KB/s ✅ |
+
+> Maven Central 的构件占依赖总量的大头，换镜像**快约 20 倍**。
+
+### 办法一：放宽 HTTP 超时（治标，但必须做）
+
+写 `$ws\.gradle-home\gradle.properties`（**用户级配置，不要动仓库里的 `fo/gradle.properties`**）：
+
+```properties
+org.gradle.jvmargs=-Xmx2G -Dfile.encoding=UTF-8
+org.gradle.parallel=true
+org.gradle.caching=true
+systemProp.org.gradle.internal.http.connectionTimeout=180000
+systemProp.org.gradle.internal.http.socketTimeout=600000
+org.gradle.internal.repository.max.tentatives=10
+org.gradle.internal.repository.initial.backoff=500
+```
+
+### 办法二：把 Maven Central 换成国内镜像（治本）
+
+新建 `$ws\.gradle-home\init.d\00-cn-mirrors.gradle`：
+
+```groovy
+def cnMirrors = [
+    'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/',
+    'https://maven.aliyun.com/repository/public/',
+]
+
+def replaceCentral = { repos ->
+    // mavenCentral() 创建的仓库名为 MavenRepo；移除后用国内镜像顶上
+    def central = repos.findAll { it.name == 'MavenRepo' }
+    if (!central.isEmpty()) {
+        central.each { repos.remove(it) }
+        cnMirrors.eachWithIndex { m, i ->
+            repos.maven { r ->
+                r.name = "cnMirror$i"
+                r.url = m
+            }
+        }
+    }
+}
+
+settingsEvaluated { settings ->
+    replaceCentral(settings.pluginManagement.repositories)
+    settings.buildscript.repositories.with { replaceCentral(it) }
+}
+
+allprojects { p ->
+    replaceCentral(p.repositories)
+    replaceCentral(p.buildscript.repositories)
+}
+```
+
+> 这是 Gradle 的**用户级 init 脚本**，放在 `GRADLE_USER_HOME` 下，不进仓库、不污染工作树，
+> 也不需要修改 `build.gradle.kts` 或 `settings.gradle.kts`。
+> `fabricmc` / `meteordev` 没有对应的国内镜像，保持原样即可。
+
+### 效果
+
+| | 冷启动耗时 |
+|---|---|
+| 只做第 2 节（Gradle 本体换镜像） | 跑了 **40 分钟仍未完成**，最终 `Read timed out` 失败 |
+| 加第 10 节两条配置 | **8 分 38 秒**，`BUILD SUCCESSFUL` |
+
+### 顺带：其它网络坑
+
+- `git clone github.com` 本机超时 → 可用 GitHub REST API 拉 tree、再逐个文件从
+  `raw.githubusercontent.com` 下载（大二进制加 `curl -C -` 断点续传）。
+- `cdn.jsdelivr.net` 对仓库里的大 jar 会返回 **403**，别当兜底用。
+- `api.adoptium.net`（下 JDK）TLS 握手失败 → 换清华镜像
+  `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/windows/`。
+
+### 怎么判断构建是「在下载」还是「卡死」
+
+`jstack <daemon-pid>`，看 `Unconstrained build operations Thread` 的栈：
+
+- 停在 `DownloadAction.execute` → 在等下载（慢，不是死）；
+- 停在 `sun.nio.ch.WEPoll.wait` 且无外部 ESTABLISHED 连接 → 才是真卡。

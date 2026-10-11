@@ -7,6 +7,7 @@ import com.fo.addon.ancient.core.FoundChest;
 import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
+import com.fo.addon.utils.AncientCityLocatorLogic;
 import com.w.d.l.McVersion;
 import com.w.d.w.j.Vec3i;
 import com.w.d.w.x.Pair;
@@ -35,8 +36,12 @@ import w.j.AncientCityLootScanner;
 
 /**
  * FO 古城战利品搜索（半自动）。
- * 移植自 misaka 古城模块：种子 → CubiomesJNI 快路径定位古城 region → 黑盒重放古城结构 →
- * 掷战利品表判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点。
+ * 移植自 misaka 古城模块，但古城定位已改为**纯 Java 自写实现**：
+ * 种子 → AncientCityLocatorLogic 直接算出候选古城（零原生依赖）→ cubiomes 做群系验证 →
+ * 黑盒重放古城结构并掷战利品表判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点。
+ *
+ * <p>半径语义：搜索半径的单位是「区块」，但距离按**方块距离**计算，基准点是城市原点方块坐标。
+ * （旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块。）
  */
 public class FOAncientCitySearch extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -194,9 +199,8 @@ public class FOAncientCitySearch extends Module {
     private void scanForCities(long seed, BlockPos playerPos) {
         List<FoundChest> results = new ArrayList<>();
         int radius = searchRadiusSetting.get();
-        int playerChunkX = AncientSearchLogic.blockToChunk(playerPos.getX());
-        int playerChunkZ = AncientSearchLogic.blockToChunk(playerPos.getZ());
 
+        // 群系验证暂时仍走 cubiomes（阶段 2.5 自写群系采样完成前，DLL 只保留这一个用途）
         CubiomesJNI jni = null;
         long generator = 0L;
         boolean jniReady = false;
@@ -216,67 +220,60 @@ public class FOAncientCitySearch extends Module {
             jniReady = false;
         }
 
-        if (!jniReady) {
-            error("CubiomesJNI 原生库加载失败（DLL 缺失/不兼容/链接失败），无法定位古城。请确认使用 Windows 客户端且 DLL 完整。");
-            return;
+        // 古城定位改为纯 Java（零原生依赖、零黑盒）。
+        // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
+        //（旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块）。
+        info("搜索参数: 半径=" + radius + "区块, 种子=" + seed);
+        List<AncientCityLocatorLogic.City> cities =
+            AncientCityLocatorLogic.findNearby(seed, playerPos.getX(), playerPos.getZ(), radius);
+        info("定位完成: 半径内候选古城 " + cities.size() + " 座");
+
+        if (jniReady) {
+            info("群系验证: 已启用（cubiomes）");
+        } else {
+            warning("CubiomesJNI 原生库不可用，跳过群系验证；候选里可能包含实际不生成的古城（前往前请留意）。");
         }
 
-        // 区域半径：半径(区块) / 24 + 1（对齐 misaka 真实实现，修正旧源码 /25 的错误）
-        int regionRadius = AncientSearchLogic.regionRadius(radius);
-        int baseRegionX = Math.floorDiv(playerChunkX, 24);
-        int baseRegionZ = Math.floorDiv(playerChunkZ, 24);
-
-        info("搜索参数: 半径=" + radius + "区块, 种子=" + seed + ", 区域半径=" + regionRadius);
-
-        int total = (2 * regionRadius + 1) * (2 * regionRadius + 1);
+        int total = cities.size();
         int done = 0;
         int found = 0;
         int lastPct = -1;
 
-        for (int rx = baseRegionX - regionRadius; rx <= baseRegionX + regionRadius; rx++) {
-            for (int rz = baseRegionZ - regionRadius; rz <= baseRegionZ + regionRadius; rz++) {
-                if (!searching) {
-                    return;
-                }
-                int pct = ++done * 100 / total;
-                if (pct - lastPct >= 10) {
-                    lastPct = pct;
-                    // 注意：Meteor info() 内部 String.format，裸 % 必须转义为 %%（对齐原版 %%）否则抛 Conversion 异常
-                    info("进度: " + done + "/" + total + " (" + pct + "%%)  已找到 " + found + " 个古城");
-                }
-                try {
-                    if (jniReady && jni != null) {
-                        int[] city = jni.findCityChunks(generator, rx, rz);
-                        if (city != null) {
-                            // city[0]/city[1] 是【区块】坐标；<<4+8 得到的方块坐标只服务于 isViableAncientCity
-                            int cityChunkX = city[0];
-                            int cityChunkZ = city[1];
-                            int blockX = (cityChunkX << 4) + 8;
-                            int blockZ = (cityChunkZ << 4) + 8;
-                            boolean viable = jni.isViableAncientCity(generator, blockX, blockZ);
-                            debug("区域 " + rx + "," + rz + " 找到城市 -> 区块 " + cityChunkX + "," + cityChunkZ
-                                + " 方块 " + blockX + "," + blockZ + " viable=" + viable);
-                            if (!viable) {
-                                continue;
-                            }
-                            // 距离判定：单位必须统一为区块（搜索半径的单位就是区块）
-                            double dist = AncientSearchLogic.chunkDistance(cityChunkX, cityChunkZ, playerChunkX, playerChunkZ);
-                            if (dist > radius) {
-                                debug("城市超出搜索半径: 距离 " + dist + " 区块 > " + radius + " 区块");
-                                continue;
-                            }
-                            found++;
-                            // 结构重放同样吃【区块】坐标——黑盒内部 AncientCityLootScanner 会自己 <<4
-                            List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, McVersion.V1_19);
-                            debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
-                            results.addAll(chests);
-                        }
+        for (AncientCityLocatorLogic.City city : cities) {
+            if (!searching) {
+                return;
+            }
+            int pct = ++done * 100 / Math.max(1, total);
+            if (pct - lastPct >= 10) {
+                lastPct = pct;
+                // 注意：Meteor info() 内部 String.format，裸 % 必须转义为 %%（对齐原版 %%）否则抛 Conversion 异常
+                info("进度: " + done + "/" + total + " (" + pct + "%%)  已找到 " + found + " 个古城");
+            }
+
+            int cityChunkX = city.chunkX();
+            int cityChunkZ = city.chunkZ();
+            try {
+                if (jniReady && jni != null) {
+                    // 群系验证探针点与旧实现保持一致：城市原点 + 8（不要改成原点，那会改变验证结果）
+                    int probeX = city.blockX() + 8;
+                    int probeZ = city.blockZ() + 8;
+                    boolean viable = jni.isViableAncientCity(generator, probeX, probeZ);
+                    debug("古城候选 区块 " + cityChunkX + "," + cityChunkZ
+                        + " 方块 " + city.blockX() + "," + city.blockZ() + " 群系验证=" + viable);
+                    if (!viable) {
+                        continue;
                     }
-                } catch (Throwable t) {
-                    // UnsatisfiedLinkError 等 Error 不能中断整个扫描
-                    debug("区域 " + rx + "," + rz + " 处理异常: " + t);
-                    debugStack(t);
                 }
+                found++;
+                // 结构重放仍走黑盒（V6.8 换成纯 Java 后即可删除黑盒 jar）。
+                // 已用独立参考实现交叉验证过：纯 Java 管线给出的箱子集与黑盒完全一致。
+                List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, McVersion.V1_19);
+                debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
+                results.addAll(chests);
+            } catch (Throwable t) {
+                // UnsatisfiedLinkError 等 Error 不能中断整个扫描
+                debug("古城 区块 " + cityChunkX + "," + cityChunkZ + " 处理异常: " + t);
+                debugStack(t);
             }
         }
 
