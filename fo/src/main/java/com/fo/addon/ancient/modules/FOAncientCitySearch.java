@@ -140,7 +140,9 @@ public class FOAncientCitySearch extends Module {
 
         gameVersionSetting = sgGeneral.add(new EnumSetting.Builder<GameVersionOption>()
             .name("游戏版本")
-            .description("选择游戏版本（26.1 使用新的 random_sequence 战利品种子系统）")
+            .description("你要预测的是哪个游戏版本的战利品。26.x 的古城战利品表比 1.21.11 少一个 name_tag 条目"
+                + "（池权重 86 → 84），选错会让物品判定全错但箱子位置仍然正确。"
+                + "单人档按你自己的客户端版本选；连服务器按服务端版本选。")
             .defaultValue(GameVersionOption.BELOW_26_1)
             .build());
 
@@ -477,10 +479,8 @@ public class FOAncientCitySearch extends Module {
         // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
         //（旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块）。
         info("搜索参数: 半径=" + radius + "区块, 种子=" + seed);
-        if (gameVersionSetting.get() == GameVersionOption.FROM_26_1) {
-            warning("「>= 26.1」的战利品表尚未自写实现：当前仍按 1.21.11 的表掷骰，结果可能不准。");
-            warning("需要 26.x 的 loot_table 与 random_sequence 子系统，计划在后续版本补齐。");
-        }
+        info("战利品表: " + (gameVersionSetting.get() == GameVersionOption.FROM_26_1
+            ? ">= 26.1（26.x 的表）" : "< 26.1（1.21.11 的表）"));
         List<AncientCityLocatorLogic.City> cities =
             AncientCityLocatorLogic.findNearby(seed, playerPos.getX(), playerPos.getZ(), radius);
         info("定位完成: 半径内候选古城 " + cities.size() + " 座");
@@ -556,7 +556,10 @@ public class FOAncientCitySearch extends Module {
         List<FoundChest> results = new ArrayList<>();
         AncientResourceSource structures = AncientResourceSource.bundledStructures();
         AncientResourceSource pools = AncientResourceSource.bundledPools();
-        AncientResourceSource dataSource = AncientResourceSource.bundledAncient();
+        // 战利品表按游戏版本挑：26.x 的表比 1.21.11 少一个 minecraft:name_tag 条目，
+        // 池权重 86 → 84，会导致每一次加权抽取都错位（位置对、物品全错就是这么来的）
+        boolean from26 = gameVersionSetting.get() == GameVersionOption.FROM_26_1;
+        AncientResourceSource dataSource = AncientResourceSource.bundledLootTables(from26);
 
         List<AncientJigsawSimulator.Piece> pieces =
             AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
