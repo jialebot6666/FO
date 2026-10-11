@@ -28,6 +28,15 @@ public interface AncientResourceSource {
     /** mod 内古城全部数据（结构 / 拼图池 / 战利品表 / 附魔 / 标签）的资源根。 */
     String ANCIENT_PREFIX = "fo/ancient/";
 
+    /**
+     * 「&gt;= 26.1」版本的覆写数据根（jar 内 {@code fo/ancient/v26/}）。
+     *
+     * <p>只放与 1.21.11 真的不同的那部分 —— 实测下来**只有 {@code loot_table/chests/ancient_city.json}
+     * 一张表不同**（26.x 少了 {@code minecraft:name_tag} 条目，池权重 86 → 84）；
+     * 冰窖表、43 个附魔、22 个附魔标签、32 个可达物品标签全部一致，所以继续共用 {@link #ANCIENT_PREFIX} 下的那份。
+     */
+    String ANCIENT_26_PREFIX = "fo/ancient/v26/";
+
     /** 数据源身份，用于缓存键隔离。 */
     String id();
 
@@ -63,6 +72,21 @@ public interface AncientResourceSource {
      */
     static AncientResourceSource bundledAncient() {
         return classpath(AncientResourceSource.class.getClassLoader(), ANCIENT_PREFIX);
+    }
+
+    /**
+     * 按游戏版本挑战利品表数据源。
+     *
+     * <p>{@code from26} 为真时用 {@link #ANCIENT_26_PREFIX}，否则用 {@link #ANCIENT_PREFIX}；
+     * 两者都用同一套相对路径（{@code loot_table/chests/xxx.json}），调用方不用改。
+     */
+    static AncientResourceSource bundledLootTables(boolean from26) {
+        return from26 ? bundledAncient26() : bundledAncient();
+    }
+
+    /** 「&gt;= 26.1」覆写数据源（jar 内 {@code fo/ancient/v26/}）。 */
+    static AncientResourceSource bundledAncient26() {
+        return classpath(AncientResourceSource.class.getClassLoader(), ANCIENT_26_PREFIX);
     }
 
     /** 读一个 UTF-8 文本资源；不存在返回 {@code null}。 */

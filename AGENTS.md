@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.11`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.12`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -22,7 +22,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     `AncientEnchantAlgorithm` / `AncientLootEvaluator`，战利品表与附魔数据（107 个文件）打包进资源。
     **已删除 `libs/fo-ancient-blackbox.jar`**（657 个混淆类）；两个 Windows DLL 抽到 `src/main/resources/natives/windows/`
     继续供群系验证用，jar 从 3.19 MiB 降到 1.98 MiB。
-    已知缺口：「>= 26.1」选项对应的 26.x 战利品表与 random_sequence 子系统尚未自写，选中时会明确提示。
+    ✅ V6.12 起：「>= 26.1」选项已真正生效，见下。
   - ✅ V6.9 已完成：**双高亮 + 本地持久化 + 自动清理**。世界内高亮（附魔金=金、迅捷潜行3=蓝、两者=紫，
     靠近才画、半径可调）+ Xaero 路径点颜色改正；命中记录写到游戏目录 `fo-ancient-chests.json`
     （`AncientChestStore`，按「服务器+维度」分作用域），跨重启保留；箱子被开/被挖则两处高亮一并删除。
@@ -36,6 +36,15 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     其渲染线程每帧遍历；从后台线程写会让渲染线程抛 `ConcurrentModificationException` 整局崩掉。
     规定「后台线程只算，一切共享状态（本地记录 + Xaero）只在客户端线程改」，
     模块用 `pendingMarks` 队列 + `TickEvent.Post` 出队实现；`AncientChestStore` 另加 `synchronized` 兜底。
+  - ✅ V6.12 已完成：**「&gt;= 26.1」的战利品表落地**。实测 4 份官方 jar（1.21.11/26.1.2/26.2/26.3）后确认：
+    26.x 的古城表只比 1.21.11 少一个 `minecraft:name_tag`（权重 86→84），单这一项就会让每次加权抽取错位
+    （实机表现：位置对、物品全错）；26.3 换了 JSON 键名但语义相同。
+    26.x 官方表逐字节放进 `resources/fo/ancient/v26/loot_table/chests/`，由
+    `AncientResourceSource.bundledLootTables(from26)` 按「游戏版本」设置选表。
+    ⚠️ 注意 `AncientLootEvaluator.roll` 的**三参重载固定走 MC_NATIVE**，做兼容性对照时必须用四参版显式传 mode，
+    否则会变成「生产模式 vs 兼容模式」的苹果比橘子（这次排查绕了很久就栽在这里）。
+    ⚠️ 另注：Gradle 的 `-D` **不会**传给 fork 出来的测试 JVM，探针要读参数请用环境变量；
+    且 `test` 任务默认走 build cache，改参数跑探针要加 `--no-build-cache`。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
@@ -68,7 +77,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 - ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
   解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
 - Baritone 是仓库内的本地 jar（`fo/libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
-- 产物：`fo/build/libs/FO-V6.11.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
+- 产物：`fo/build/libs/FO-V6.12.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 
 ## 命名规范（硬性）
