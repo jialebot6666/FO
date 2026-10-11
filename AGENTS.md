@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.6`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.7`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -13,7 +13,14 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   5. FO 自动挖沙（`modules/AutoMineSand`）
   6. FO 自动挖矿（`modules/AutoMining`）
   7. FO杀戮光环（`modules/FOKillAura`）
-  8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，V6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动；黑盒库 `libs/fo-ancient-blackbox.jar`）
+  8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，V6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
+- **古城模块的依赖收尾路线**（V6.7 起，目标「彻底零原生依赖」）：
+  - ✅ V6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
+    结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
+    半径语义：半径单位是区块，距离按**方块距离**、基准点为城市原点（旧实现是区块距离、基准点原点 + 8）。
+  - ⏳ V6.8 待做：**结构重放 + 箱子提取 + 战利品掷骰**改纯 Java，然后删掉 `libs/fo-ancient-blackbox.jar`
+  - ⏳ V6.9 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉 `libs/` 里的两个 Windows DLL
+  - 纯 Java 管线已有黄金回归测试 `AncientCityGoldenTest`（期望值来自独立参考实现 zychen027/AncientCityLootPredictor，**不依赖黑盒**，删黑盒后依然有效）
 - V6.2 已删除 V6.0 的 icehack-2 鞘翅套件（自动鞘翅飞行/自动不祥宝库/实时平均速度 三模块 + HUD），当前无 elytra 套件
 
 ## 硬性规范（每次改动必须执行）
@@ -37,8 +44,10 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 - ⚠️ 国内网络：`services.gradle.org` 会 connection reset，别用 `gradlew.bat`；Gradle 9.2.0 走腾讯镜像下载后用 `gradle.bat` 直接跑。
   `github.com` 的 git 传输在本机超时，clone 走 `https://gh-proxy.com/https://github.com/...`，
   提交与发版走 `api.github.com` REST API（见 `docs/scripts/gh-deliver.ps1`）。
+- ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
+  解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
 - Baritone 是仓库内的本地 jar（`fo/libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
-- 产物：`fo/build/libs/FO-V6.6.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
+- 产物：`fo/build/libs/FO-V6.7.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 
 ## 命名规范（硬性）
