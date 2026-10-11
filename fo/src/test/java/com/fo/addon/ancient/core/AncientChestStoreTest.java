@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -137,5 +138,126 @@ class AncientChestStoreTest {
         assertEquals(1, back.size(tricky));
         assertEquals(1, back.marks(tricky).get(0).x());
         assertNull(store.marks("服务器|minecraft:overworld").stream().findFirst().orElse(null));
+    }
+
+    /**
+     * 并发读写不丢记录、不写坏 —— 这是 V6.10 实机崩溃暴露出来的问题类型：
+     * 搜索在后台线程写、渲染/清理在客户端线程读同一个容器，普通 LinkedHashMap + ArrayList 会打架。
+     *
+     * <p>模块侧已经改成只在客户端线程写，这里再锁一道作为兜底；本测试就是这道锁的回归保护。
+     *
+     * <p>为什么断言「条数精确相等」而不是「不抛异常」：{@code marks()} 返回的是拷贝，
+     * 不会触发 fail-fast 迭代器，所以无锁版本往往既不抛异常也不报错 ——
+     * 它只是<b>悄悄丢记录</b>（多个线程同时往同一个 ArrayList 追加会互相覆盖）。
+     * 只有断言精确条数才抓得住这个 bug（已实测：去掉 synchronized 本测试会失败）。
+     */
+    @Test
+    void 多线程并发写入不丢记录() throws Exception {
+        AncientChestStore store = new AncientChestStore();
+        int writers = 4;
+        int perWriter = 2000;
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(writers + 1);
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+        for (int t = 0; t < writers; t++) {
+            final int id = t;
+            new Thread(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < perWriter; i++) {
+                        store.add(SCOPE_A, new AncientChestStore.Mark(id * perWriter + i, 10, id,
+                            AncientChestStore.LABEL_GOLD));
+                    }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                } finally {
+                    done.countDown();
+                }
+            }, "writer-" + t).start();
+        }
+
+        // 同时有人遍历（模拟渲染/清理线程）
+        new Thread(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 3000; i++) {
+                    store.marks(SCOPE_A);
+                    store.size(SCOPE_A);
+                    store.isEmpty(SCOPE_A);
+                }
+            } catch (Throwable e) {
+                failure.compareAndSet(null, e);
+            } finally {
+                done.countDown();
+            }
+        }, "reader").start();
+
+        start.countDown();
+        assertTrue(done.await(60, java.util.concurrent.TimeUnit.SECONDS), "并发任务没跑完，可能死锁");
+        assertNull(failure.get(), "并发读写抛异常: " + failure.get());
+
+        assertEquals(writers * perWriter, store.size(SCOPE_A),
+            "并发写入丢了记录 —— 说明写入没被正确串行化");
+        for (AncientChestStore.Mark m : store.marks(SCOPE_A)) {
+            assertNotNull(m, "读出了写坏的记录（null）");
+            assertEquals(10, m.y(), "读出了写坏的记录: y=" + m.y());
+        }
+    }
+
+    /** 并发删除同样要精确：删掉的条数必须刚好等于命中数。 */
+    @Test
+    void 多线程并发删除不误删也不漏删() throws Exception {
+        AncientChestStore store = new AncientChestStore();
+        int total = 4000;
+        // z 按 1000 条一组切分，让每个删除线程负责的那一段能精确对上
+        for (int i = 0; i < total; i++) {
+            store.add(SCOPE_A, new AncientChestStore.Mark(i, 10, i / 1000, AncientChestStore.LABEL_GOLD));
+        }
+        assertEquals(total, store.size(SCOPE_A));
+
+        int removerThreads = 4;
+        int perThread = 1000;
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(removerThreads + 1);
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+        for (int t = 0; t < removerThreads; t++) {
+            final int id = t;
+            new Thread(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < perThread; i++) {
+                        store.remove(SCOPE_A, id * perThread + i, id);
+                    }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                } finally {
+                    done.countDown();
+                }
+            }, "remover-" + t).start();
+        }
+
+        new Thread(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 2000; i++) {
+                    store.marks(SCOPE_A);
+                    store.size(SCOPE_A);
+                }
+            } catch (Throwable e) {
+                failure.compareAndSet(null, e);
+            } finally {
+                done.countDown();
+            }
+        }, "reader").start();
+
+        start.countDown();
+        assertTrue(done.await(60, java.util.concurrent.TimeUnit.SECONDS), "并发任务没跑完，可能死锁");
+        assertNull(failure.get(), "并发删除抛异常: " + failure.get());
+        assertEquals(total - removerThreads * perThread, store.size(SCOPE_A),
+            "并发删除的结果不对 —— 说明删除没被正确串行化");
     }
 }

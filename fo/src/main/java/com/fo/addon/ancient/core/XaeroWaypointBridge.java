@@ -26,6 +26,19 @@ import java.lang.reflect.Modifier;
  * <p>现在改为分层探测：先看 Xaero 在不在（{@code xaero.common.minimap.waypoints.Waypoint}
  * 从 23.x 到 26.x 一直存在），再看两条通道各自能不能用，并把
  * 「没装 Xaero」与「装了但版本对不上」区分开，不再把两者都混成一句「未安装」。
+ *
+ * <h2>⚠️ 线程约束（V6.11 血的教训）</h2>
+ *
+ * <b>本类的所有写操作只能在客户端线程（= 渲染线程）调用。</b>
+ *
+ * <p>Xaero 的路径点容器是普通 {@code HashMap}，它自己的渲染线程每帧都会遍历；如果从后台线程
+ * 调 {@link #addWaypoint}，渲染线程就会抛 {@code ConcurrentModificationException} 把整局游戏崩掉。
+ * V6.10 的实机崩溃正是如此：搜索跑在 {@code CompletableFuture} 后台线程，
+ * 一路直接调到了 Xaero 的 {@code ThirdPartyWaypoints.add(...)}。
+ *
+ * <p>这里刻意<b>不做内部加锁</b> —— 加锁也没用：Xaero 遍历时并不取我们的锁，
+ * 我们锁住的只是自己这一侧。唯一的解法是把写入放到渲染线程上做，
+ * 调用方（{@code FOAncientCitySearch}）用「队列 + TickEvent 出队」保证这一点。
  */
 public final class XaeroWaypointBridge {
 
