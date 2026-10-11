@@ -47,8 +47,11 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.block.enums.ChestType;
+import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.Heightmap;
 
 /**
@@ -133,7 +136,10 @@ public class FOAncientCitySearch extends Module {
 
     /** 上一 tick 准星指向的方块，用来判断「刚打开的是哪个箱子」。 */
     private BlockPos lastTargetedBlock;
+    /** {@link #lastTargetedBlock} 的记录时间（tick），用于过滤过期指向。 */
+    private long lastTargetedAtTick;
     private boolean wasContainerOpen;
+    private long tickCounter;
     private int cleanCooldown;
 
     /**
@@ -312,6 +318,7 @@ public class FOAncientCitySearch extends Module {
 
     @EventHandler
     private void onTickPost(TickEvent.Post event) {
+        tickCounter++;
         if (searchTask != null && searchTask.isDone()) {
             setSearching(false);
             searchTask = null;
@@ -573,15 +580,26 @@ public class FOAncientCitySearch extends Module {
 
         boolean changed = false;
 
-        // 1) 刚打开容器：用上一 tick 的准星指向判断开的是哪个箱子
+        // 1) 刚打开容器：用上一 tick 的准星指向判断开的是哪个箱子。
+        //    V6.16 实机 bug：玩家背包(E)也是 HandledScreen，走到箱子前按 E 开背包，
+        //    被旧判定误当成「开箱」，把准星指着那个箱子的标记删了（且删的是本地记录，
+        //    关掉背包也不会恢复）。修两处：显式排除玩家自己的背包界面；
+        //    并要求指向记录是 10 tick 内的，防止过期的旧指向被无关 GUI 触发。
         if (mc.crosshairTarget instanceof BlockHitResult hit) {
             lastTargetedBlock = hit.getBlockPos();
+            lastTargetedAtTick = tickCounter;
         }
-        boolean containerOpen = mc.currentScreen instanceof HandledScreen<?>;
-        if (containerOpen && !wasContainerOpen && lastTargetedBlock != null) {
+        boolean containerOpen = mc.currentScreen instanceof HandledScreen<?>
+            && !(mc.currentScreen instanceof InventoryScreen);
+        if (containerOpen && !wasContainerOpen && lastTargetedBlock != null
+            && tickCounter - lastTargetedAtTick <= 10) {
             if (chestStore.remove(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ())) {
                 XaeroWaypointBridge.removeWaypointAt(lastTargetedBlock.getX(), lastTargetedBlock.getZ());
                 debug("箱子已打开，删除高亮与路径点: " + lastTargetedBlock.toShortString());
+                changed = true;
+            }
+            // 双箱：两半是同一个战利品，另一半一并删
+            if (removePartnerMark(scope, lastTargetedBlock)) {
                 changed = true;
             }
         }
@@ -627,6 +645,43 @@ public class FOAncientCitySearch extends Module {
         if (changed) {
             saveStore();
         }
+    }
+
+    /**
+     * 双箱：开一半时另一半也是同一个战利品，一并删。
+     *
+     * <p>搭档方向照抄原版 {@code ChestBlock} 的判定（字节码核对）：
+     * {@code CHEST_TYPE == LEFT ? facing.rotateYClockwise() : facing.rotateYCounterclockwise()}。
+     * 只按这一个方向找搭档，不会误伤相邻摆放的同朝向单箱/另一组双箱。
+     */
+    private boolean removePartnerMark(String scope, BlockPos pos) {
+        BlockState state = mc.world.getBlockState(pos);
+        if (!(state.getBlock() instanceof ChestBlock)) {
+            return false;
+        }
+        Direction facing = state.get(ChestBlock.FACING);
+        ChestType type = state.get(ChestBlock.CHEST_TYPE);
+        if (type == ChestType.SINGLE) {
+            return false;
+        }
+        Direction partnerDir = type == ChestType.LEFT
+            ? facing.rotateYClockwise()
+            : facing.rotateYCounterclockwise();
+        BlockPos partner = pos.offset(partnerDir);
+        if (!isChunkLoaded(partner)) {
+            return false;
+        }
+        BlockState partnerState = mc.world.getBlockState(partner);
+        if (!(partnerState.getBlock() instanceof ChestBlock)
+            || partnerState.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE) {
+            return false;
+        }
+        if (chestStore.remove(scope, partner.getX(), partner.getZ())) {
+            XaeroWaypointBridge.removeWaypointAt(partner.getX(), partner.getZ());
+            debug("双箱另一半已随开删除高亮与路径点: " + partner.toShortString());
+            return true;
+        }
+        return false;
     }
 
     private boolean isChunkLoaded(BlockPos pos) {
