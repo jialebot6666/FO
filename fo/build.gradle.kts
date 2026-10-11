@@ -46,8 +46,9 @@ dependencies {
     // Baritone API（icehack-2 鞘翅套件编译期依赖；modCompileOnly 让 loom remap 到 yarn 命名空间，运行时由 baritone mod 提供）
     modCompileOnly(files("libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar"))
 
-    // FO 古城黑盒库（misaka 古城模块的 MC 世界生成/战利品数据类，纯 Java 字节码，原包名 com.w / w）
-    extraLibs(files("libs/fo-ancient-blackbox.jar"))
+    // V6.8 起古城模块已全程自写（纯 Java），不再打包 libs/fo-ancient-blackbox.jar。
+    // 该黑盒里的 657 个类已被 ancient/ 下的自写实现替代；只剩两个 Windows DLL 还在用
+    // （群系验证，V6.9 自写群系采样后一并删除），已抽到 src/main/resources/natives/windows/。
 
     // Seedfinding (世界种子/结构定位计算库，ElytraCollector 依赖)
     extraLibs("com.seedfinding:mc_biome:1.171.1") { isTransitive = false }
