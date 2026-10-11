@@ -189,8 +189,8 @@ class AncientLootEvaluatorV26Test {
     /** 两张表必须真的不一样：26.x 少 name_tag，条目 28 → 27、权重 86 → 84。 */
     @Test
     void 两个版本的古城表确实不同() {
-        String legacy = text("loot_table/chests/ancient_city.json", false);
-        String v26 = text("loot_table/chests/ancient_city.json", true);
+        String legacy = text("loot_table/chests/ancient_city.json", GameVersionOption.BELOW_26_1);
+        String v26 = text("loot_table/chests/ancient_city.json", GameVersionOption.FROM_26_1);
 
         assertTrue(legacy.contains("minecraft:name_tag"), "1.21.11 的表应当有 name_tag");
         assertFalse(v26.contains("minecraft:name_tag"), "26.x 的表不该有 name_tag");
@@ -203,16 +203,16 @@ class AncientLootEvaluatorV26Test {
     /** 冰窖表两版一致，别为了「对称」把它也复制一份。 */
     @Test
     void 冰窖表两版本字节一致() {
-        assertEquals(text("loot_table/chests/ancient_city_ice_box.json", false),
-            text("loot_table/chests/ancient_city_ice_box.json", true));
+        assertEquals(text("loot_table/chests/ancient_city_ice_box.json", GameVersionOption.BELOW_26_1),
+            text("loot_table/chests/ancient_city_ice_box.json", GameVersionOption.FROM_26_1));
     }
 
     // ==================== 工具 ====================
 
-    private static String text(String path, boolean from26) {
+    private static String text(String path, GameVersionOption version) {
         try {
-            String s = AncientResourceSource.bundledLootTables(from26).readText(path);
-            assertTrue(s != null && !s.isEmpty(), "缺少资源: " + path + " (from26=" + from26 + ")");
+            String s = AncientResourceSource.bundledLootTables(version).readText(path);
+            assertTrue(s != null && !s.isEmpty(), "缺少资源: " + path + " (" + version + ")");
             return s;
         } catch (java.io.IOException e) {
             throw new java.io.UncheckedIOException(e);
@@ -244,7 +244,7 @@ class AncientLootEvaluatorV26Test {
     private static List<String> chestsOf(int chunkX, int chunkZ) {
         AncientResourceSource structures = AncientResourceSource.bundledStructures();
         AncientResourceSource pools = AncientResourceSource.bundledPools();
-        AncientResourceSource dataSrc = AncientResourceSource.bundledLootTables(true);
+        AncientResourceSource dataSrc = AncientResourceSource.bundledLootTables(GameVersionOption.FROM_26_1);
         AncientEnchantData data = AncientEnchantData.load(AncientResourceSource.bundledAncient());
 
         List<Piece> pieces = AncientJigsawSimulator.simulate(SEED, chunkX, chunkZ, structures, pools);

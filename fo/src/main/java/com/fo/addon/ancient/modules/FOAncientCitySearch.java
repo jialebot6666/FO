@@ -112,6 +112,10 @@ public class FOAncientCitySearch extends Module {
      * 同理，{@code AncientChestStore} 也是普通 LinkedHashMap，后台写 + 客户端线程清理会打架。
      */
     private final Deque<PendingMark> pendingMarks = new ArrayDeque<>();
+    /** 最近一次搜索用的种子；渲染时用它过滤本地记录，防止别的种子的残留记录产生假高亮。 */
+    private volatile Long activeSeed;
+    /** 本轮搜索的结果首次落地前，先【整体替换】该作用域的旧记录（旧记录可能来自别的种子）。 */
+    private boolean storeReplacePending;
 
     /** 一个待应用的命中点（坐标 + 标签 + 预生成的路径点名字）。 */
     private record PendingMark(int x, int y, int z, String label, String waypointName) {
@@ -140,9 +144,10 @@ public class FOAncientCitySearch extends Module {
 
         gameVersionSetting = sgGeneral.add(new EnumSetting.Builder<GameVersionOption>()
             .name("游戏版本")
-            .description("你要预测的是哪个游戏版本的战利品。26.x 的古城战利品表比 1.21.11 少一个 name_tag 条目"
-                + "（池权重 86 → 84），选错会让物品判定全错但箱子位置仍然正确。"
-                + "单人档按你自己的客户端版本选；连服务器按服务端版本选。")
+            .description("你要预测的是哪个游戏版本的战利品。古城表在版本间有三处差异："
+                + "≤1.20.6 用旧版附魔语法；1.21.6 起第 8 条由 saddle（不耗随机数）变成 leather（耗一次）；"
+                + "≥26.1 少一个 name_tag 条目。选错会让物品判定出错，但箱子位置仍然正确。"
+                + "单人档按自己的客户端版本选；连服务器按服务端原生版本选，不确定就逐个试。")
             .defaultValue(GameVersionOption.BELOW_26_1)
             .build());
 
@@ -289,6 +294,12 @@ public class FOAncientCitySearch extends Module {
         if (scope == null) return;
         if (chestStore.isEmpty(scope)) return;
 
+        // 记录按种子过滤：本地存的那批属于某一次搜索的世界；如果当前世界是别的种子
+        // （例如单人切了存档、或换了种子重新搜但还没落地），就不画，避免「别的箱子也高亮」。
+        Long storedSeed = chestStore.scopeSeed(scope);
+        Long currentSeed = currentSeedGuess();
+        if (storedSeed != null && currentSeed != null && !storedSeed.equals(currentSeed)) return;
+
         BlockPos p = mc.player.getBlockPos();
         List<AncientChestStore.Mark> near = AncientChestStore.within(
             chestStore.marks(scope), p.getX(), p.getY(), p.getZ(), highlightRadiusSetting.get());
@@ -355,8 +366,30 @@ public class FOAncientCitySearch extends Module {
         if (scope == null) return;
         int n = chestStore.size(scope);
         if (n > 0) {
-            info("本地已保存 " + n + " 个古城目标箱子，走近会自动高亮（设置里可关）");
+            Long seed = chestStore.scopeSeed(scope);
+            info("本地已保存 " + n + " 个古城目标箱子"
+                + (seed != null ? "（种子 " + seed + "）" : "") + "，走近会自动高亮（设置里可关）；"
+                + "重新搜索会整体替换这批记录");
         }
+    }
+
+    /**
+     * 当前世界的种子（能拿到才返回）：单人/内置服直接问服务端；
+     * 联机时退回「已应用的种子设置」。拿不到返回 {@code null}（此时渲染不做种子过滤，
+     * 保持「重启后高亮还在」的持久化行为）。
+     */
+    private Long currentSeedGuess() {
+        try {
+            if (mc.getServer() != null) {
+                return mc.getServer().getOverworld().getSeed();
+            }
+            if (applySeedSetting.get()) {
+                return AncientSearchLogic.parseSeedInput(seedSetting.get().trim());
+            }
+        } catch (RuntimeException e) {
+            // 种子串解析失败等情况就当作不知道
+        }
+        return null;
     }
 
     /**
@@ -434,6 +467,9 @@ public class FOAncientCitySearch extends Module {
             error("无法获取世界种子，请手动设置种子");
             return;
         }
+        activeSeed = seed;
+        storeReplacePending = true;
+        pendingMarks.clear();
         setSearching(true);
         BlockPos playerPos = mc.player.getBlockPos();
         info("开始搜索古城中的" + searchTypeSetting.get() + "... 半径: "
@@ -479,8 +515,7 @@ public class FOAncientCitySearch extends Module {
         // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
         //（旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块）。
         info("搜索参数: 半径=" + radius + "区块, 种子=" + seed);
-        info("战利品表: " + (gameVersionSetting.get() == GameVersionOption.FROM_26_1
-            ? ">= 26.1（26.x 的表）" : "< 26.1（1.21.11 的表）"));
+        info("战利品表版本: " + gameVersionSetting.get());
         List<AncientCityLocatorLogic.City> cities =
             AncientCityLocatorLogic.findNearby(seed, playerPos.getX(), playerPos.getZ(), radius);
         info("定位完成: 半径内候选古城 " + cities.size() + " 座");
@@ -556,10 +591,11 @@ public class FOAncientCitySearch extends Module {
         List<FoundChest> results = new ArrayList<>();
         AncientResourceSource structures = AncientResourceSource.bundledStructures();
         AncientResourceSource pools = AncientResourceSource.bundledPools();
-        // 战利品表按游戏版本挑：26.x 的表比 1.21.11 少一个 minecraft:name_tag 条目，
-        // 池权重 86 → 84，会导致每一次加权抽取都错位（位置对、物品全错就是这么来的）
-        boolean from26 = gameVersionSetting.get() == GameVersionOption.FROM_26_1;
-        AncientResourceSource dataSource = AncientResourceSource.bundledLootTables(from26);
+        // 战利品表按游戏版本挑。表在版本间有三处差异：
+        //   ≤1.20.6 附魔旧语法 / 1.21.6 起第 8 条由 saddle 常量变 leather uniform / ≥26.1 少 name_tag。
+        // 选错会让每一次加权抽取错位 —— 实机表现正是「位置对、物品全错」。
+        AncientResourceSource dataSource =
+            AncientResourceSource.bundledLootTables(gameVersionSetting.get());
 
         List<AncientJigsawSimulator.Piece> pieces =
             AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
@@ -652,11 +688,21 @@ public class FOAncientCitySearch extends Module {
         pendingMarks.clear();
         debug("开始写入 " + batch.size() + " 个命中点（客户端线程）");
 
-        // 1) 本地记录落盘（跨重启保留），高亮框与路径点都由这份记录驱动
+        // 1) 本地记录落盘（跨重启保留），高亮框与路径点都由这份记录驱动。
+        //    每轮搜索【整体替换】该作用域的旧记录，并把种子一并记下：
+        //    旧记录可能来自别的种子（或旧版本的错误判定），合并留着的话，
+        //    只要那个位置恰好有真实箱子就会产生假高亮 —— V6.12 实机「别的箱子也高亮」的根源。
         loadStore();
         String scope = currentScope();
         int recorded = 0;
         if (scope != null) {
+            if (storeReplacePending) {
+                storeReplacePending = false;
+                chestStore.clear(scope);
+            }
+            if (activeSeed != null) {
+                chestStore.setScopeSeed(scope, activeSeed);
+            }
             for (PendingMark m : batch) {
                 if (chestStore.add(scope, new AncientChestStore.Mark(m.x(), m.y(), m.z(), m.label()))) {
                     recorded++;
