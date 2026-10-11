@@ -29,6 +29,14 @@ public final class AncientJson {
         return v;
     }
 
+    /** 带边界检查的字符读取；不平衡的 JSON 在这里得到清晰异常，而不是裸的 StringIndexOutOfBounds。 */
+    private char next() {
+        if (i >= s.length()) {
+            throw new IllegalArgumentException("JSON 格式错误：意外到达输入末尾（括号可能不配对）");
+        }
+        return s.charAt(i++);
+    }
+
     private void skipWs() {
         while (i < s.length()) {
             char c = s.charAt(i);
@@ -39,6 +47,9 @@ public final class AncientJson {
 
     private Object parseValue() {
         skipWs();
+        if (i >= s.length()) {
+            throw new IllegalArgumentException("JSON 格式错误：意外到达输入末尾（括号可能不配对）");
+        }
         char c = s.charAt(i);
         switch (c) {
             case '{': return parseObject();
@@ -64,7 +75,7 @@ public final class AncientJson {
             Object val = parseValue();
             map.put(key, val);
             skipWs();
-            char c = s.charAt(i++);
+            char c = next();
             if (c == '}') break;
             // 否则是 ','
         }
@@ -79,7 +90,7 @@ public final class AncientJson {
         while (true) {
             list.add(parseValue());
             skipWs();
-            char c = s.charAt(i++);
+            char c = next();
             if (c == ']') break;
             // 否则是 ','
         }

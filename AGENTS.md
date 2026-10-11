@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.18`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.19`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -74,6 +74,12 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     保留等级达标 / 全部丢弃 / 全部保留）+ 等级阈值（1~5，默认 3），等级读
     `ItemEnchantmentsComponent` 取堆内最高级。判定纯逻辑在 `TrashLogic.decideBook`（可单测）。
     附魔台合并的多附魔书按最高级保留（宁留勿误删）。
+  - ✅ V6.19 已完成：**「已开名单」持久化**（存储 v3）。开过的箱子记入 per-scope `opened` 坐标集合
+    （永久保留；换种子时随作用域整份清空），三个检测点（开箱判定 / 恢复记录 lootTable 检测 /
+    周期清理 lootTable 检测）都写入；新搜索落地时跳过名单坐标。⚠️ 语义要点：`clear(scope)` 全清
+    （换种子），`clearMarks(scope)` 只清标记（整批替换/重建时用，保已开名单与种子）——别混用。
+    ⚠️ 行为变化：误开的箱子不能再靠重搜恢复（用户确认接受）。
+    顺手加固 `AncientJson`：不平衡 JSON 由裸越界改为带信息异常。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
@@ -106,7 +112,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 - ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
   解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
 - Baritone 是仓库内的本地 jar（`fo/libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
-- 产物：`fo/build/libs/FO-V6.18.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
+- 产物：`fo/build/libs/FO-V6.19.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 
 ## 命名规范（硬性）
