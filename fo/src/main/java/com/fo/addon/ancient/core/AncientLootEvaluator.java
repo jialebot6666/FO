@@ -166,6 +166,9 @@ public final class AncientLootEvaluator {
                                                AncientRandom rng, AncientEnchantData data,
                                                AncientEnchantData.SourceMode mode) {
         int cost = numberProviderInt(func.get("levels"), rng);
+        // ≥1.21 用 options（如 #minecraft:on_random_loot）；≤1.20.6 用 treasure:true，
+        // 语义 = 候选池为全部附魔（applicable 过滤由附魔台算法按物品完成）。
+        // options 缺失时 resolveLevelsSource 恰好返回全部附魔，正好对应旧语法。
         List<String> source = data.resolveLevelsSource(func.get("options"), mode);
         apply(stack, AncientEnchantAlgorithm.select(rng, stack.id, cost, source, data));
     }
@@ -174,7 +177,11 @@ public final class AncientLootEvaluator {
     private static void applyEnchantRandomly(MutableStack stack, Map<String, Object> func,
                                              AncientRandom rng, AncientEnchantData data,
                                              AncientEnchantData.SourceMode mode) {
-        List<String> source = data.resolveRandomSource(func.get("options"), mode);
+        // ≥1.21 用 options（id 或 #标签）；≤1.20.6 用旧语法的 "enchantments": [...] 列表。
+        // 两者都没有时（旧语法里也允许省略）候选池 = 全部附魔。
+        Object sourceOption = func.get("options");
+        if (sourceOption == null) sourceOption = func.get("enchantments");
+        List<String> source = data.resolveRandomSource(sourceOption, mode);
         boolean isBook = "minecraft:book".equals(stack.id);
 
         List<String> valid = new ArrayList<>();

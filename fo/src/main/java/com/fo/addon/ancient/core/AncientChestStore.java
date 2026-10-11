@@ -12,10 +12,12 @@ import java.util.Map;
  * 其余战利品不需要位置。记录按「作用域」分组（单人世界 / 各服务器 + 维度），
  * 避免在 A 服搜到的箱子跑到 B 服去高亮。
  *
- * <p>存储格式（手写最小 JSON，读写都不依赖第三方库）：
+ * <p>存储格式（手写最小 JSON，读写都不依赖第三方库）。<b>v2 起每个作用域带 {@code seed}</b>：
+ * 记录只属于某一次搜索的世界，渲染时按种子过滤，防止换种子/换世界后的残留记录产生假高亮。
  * <pre>
- * {"version":1,"scopes":{"&lt;scope&gt;":[{"x":1,"y":2,"z":3,"label":"附魔金"}]}}
+ * {"version":2,"scopes":{"&lt;scope&gt;":{"seed":123,"marks":[{"x":1,"y":2,"z":3,"label":"附魔金"}]}}}
  * </pre>
+ * 读取时兼容 v1 旧格式（{@code scopes} 的值直接是数组、无 seed）。
  */
 public final class AncientChestStore {
 
@@ -30,13 +32,15 @@ public final class AncientChestStore {
     /** 两者都有。 */
     public static final String LABEL_BOTH = "两者";
 
-    private static final int FORMAT_VERSION = 1;
+    private static final int FORMAT_VERSION = 2;
 
     /** 一个目标箱子。{@code label} 取 {@link #LABEL_GOLD} / {@link #LABEL_SWIFT} / {@link #LABEL_BOTH}。 */
     public record Mark(int x, int y, int z, String label) {
     }
 
     private final Map<String, List<Mark>> byScope = new LinkedHashMap<>();
+    /** 作用域 -> 该批记录所属的世界种子（v2 起随文件持久化；旧文件没有则视为未知）。 */
+    private final Map<String, Long> scopeSeeds = new LinkedHashMap<>();
 
     /** 某个作用域下的全部记录（拷贝）。 */
     public synchronized List<Mark> marks(String scope) {
@@ -77,9 +81,20 @@ public final class AncientChestStore {
         return list.removeIf(m -> m.x() == x && m.z() == z);
     }
 
-    /** 清空某个作用域。 */
+    /** 清空某个作用域（连同它的种子一起）。 */
     public synchronized void clear(String scope) {
         byScope.remove(scope);
+        scopeSeeds.remove(scope);
+    }
+
+    /** 记录该作用域这批结果所属的世界种子（随文件持久化）。 */
+    public synchronized void setScopeSeed(String scope, long seed) {
+        scopeSeeds.put(scope, seed);
+    }
+
+    /** 该作用域记录所属的世界种子；旧格式文件或未记录时返回 {@code null}。 */
+    public synchronized Long scopeSeed(String scope) {
+        return scopeSeeds.get(scope);
     }
 
     /** 按 3D 距离筛出半径内的记录（不含未命中项，保持原顺序）。 */
@@ -105,7 +120,10 @@ public final class AncientChestStore {
             if (e.getValue().isEmpty()) continue;
             if (!firstScope) sb.append(',');
             firstScope = false;
-            sb.append('"').append(escape(e.getKey())).append("\":[");
+            sb.append('"').append(escape(e.getKey())).append("\":{\"seed\":");
+            Long seed = scopeSeeds.get(e.getKey());
+            sb.append(seed == null ? "null" : seed);
+            sb.append(",\"marks\":[");
             for (int i = 0; i < e.getValue().size(); i++) {
                 Mark m = e.getValue().get(i);
                 if (i > 0) sb.append(',');
@@ -114,7 +132,7 @@ public final class AncientChestStore {
                   .append(",\"z\":").append(m.z())
                   .append(",\"label\":\"").append(escape(m.label())).append("\"}");
             }
-            sb.append(']');
+            sb.append("]}");
         }
         sb.append("}}");
         return sb.toString();
@@ -137,16 +155,30 @@ public final class AncientChestStore {
 
         for (Map.Entry<?, ?> e : scopes.entrySet()) {
             String scope = String.valueOf(e.getKey());
-            if (!(e.getValue() instanceof List<?> list)) continue;
-            for (Object item : list) {
-                if (!(item instanceof Map<?, ?> raw)) continue;
-                Map<String, Object> m = (Map<String, Object>) raw;
-                String label = m.get("label") instanceof String s ? s : LABEL_GOLD;
-                store.add(scope, new Mark(
-                    intOf(m.get("x")), intOf(m.get("y")), intOf(m.get("z")), label));
+            if (e.getValue() instanceof List<?> list) {
+                // v1 旧格式：值直接是 mark 数组（无 seed）
+                readMarks(store, scope, list);
+            } else if (e.getValue() instanceof Map<?, ?> rawScope) {
+                Map<String, Object> obj = (Map<String, Object>) rawScope;
+                if (obj.get("seed") instanceof Number n) {
+                    store.setScopeSeed(scope, n.longValue());
+                }
+                if (obj.get("marks") instanceof List<?> list) {
+                    readMarks(store, scope, list);
+                }
             }
         }
         return store;
+    }
+
+    private static void readMarks(AncientChestStore store, String scope, List<?> list) {
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) continue;
+            Map<String, Object> m = (Map<String, Object>) raw;
+            String label = m.get("label") instanceof String s ? s : LABEL_GOLD;
+            store.add(scope, new Mark(
+                intOf(m.get("x")), intOf(m.get("y")), intOf(m.get("z")), label));
+        }
     }
 
     private static int intOf(Object o) {

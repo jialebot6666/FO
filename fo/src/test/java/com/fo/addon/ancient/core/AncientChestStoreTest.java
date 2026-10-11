@@ -140,6 +140,43 @@ class AncientChestStoreTest {
         assertNull(store.marks("服务器|minecraft:overworld").stream().findFirst().orElse(null));
     }
 
+    @Test
+    void 种子随文件往返且clear会一并清掉() {
+        AncientChestStore store = new AncientChestStore();
+        store.setScopeSeed(SCOPE_A, -7346913998703726680L);
+        store.add(SCOPE_A, new AncientChestStore.Mark(1, 2, 3, AncientChestStore.LABEL_GOLD));
+
+        AncientChestStore back = AncientChestStore.fromJson(store.toJson());
+        assertEquals(-7346913998703726680L, back.scopeSeed(SCOPE_A), "种子应随文件持久化");
+        assertEquals(1, back.size(SCOPE_A));
+
+        back.clear(SCOPE_A);
+        assertNull(back.scopeSeed(SCOPE_A), "clear 应连种子一起清掉");
+    }
+
+    @Test
+    void 兼容v1旧格式无种子的文件() {
+        String v1 = "{\"version\":1,\"scopes\":{\"a|b|minecraft:overworld\":["
+            + "{\"x\":1,\"y\":2,\"z\":3,\"label\":\"附魔金\"}]}}";
+        AncientChestStore back = AncientChestStore.fromJson(v1);
+        assertEquals(1, back.size("a|b|minecraft:overworld"));
+        assertNull(back.scopeSeed("a|b|minecraft:overworld"), "旧格式没有种子，应返回 null 而不是报错");
+    }
+
+    @Test
+    void 换种子的新记录会替换旧记录的种子() {
+        AncientChestStore store = new AncientChestStore();
+        store.setScopeSeed(SCOPE_A, 111L);
+        store.add(SCOPE_A, new AncientChestStore.Mark(1, 2, 3, AncientChestStore.LABEL_GOLD));
+        store.clear(SCOPE_A);
+        store.setScopeSeed(SCOPE_A, 222L);
+        store.add(SCOPE_A, new AncientChestStore.Mark(4, 5, 6, AncientChestStore.LABEL_SWIFT));
+
+        assertEquals(222L, store.scopeSeed(SCOPE_A));
+        assertEquals(1, store.size(SCOPE_A));
+        assertEquals(4, store.marks(SCOPE_A).get(0).x());
+    }
+
     /**
      * 并发读写不丢记录、不写坏 —— 这是 V6.10 实机崩溃暴露出来的问题类型：
      * 搜索在后台线程写、渲染/清理在客户端线程读同一个容器，普通 LinkedHashMap + ArrayList 会打架。

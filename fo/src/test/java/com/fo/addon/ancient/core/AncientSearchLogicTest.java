@@ -38,8 +38,10 @@ class AncientSearchLogicTest {
         assertEquals("附魔金苹果", LootTarget.ENCHANTED_GOLDEN_APPLE.toString());
         assertEquals("迅捷潜行3", LootTarget.SWIFT_SNEAK_3.toString());
         assertEquals("两者都搜索", LootTarget.BOTH.toString());
-        assertEquals("< 26.1", GameVersionOption.BELOW_26_1.toString());
-        assertEquals(">= 26.1", GameVersionOption.FROM_26_1.toString());
+        assertEquals("≤ 1.20.6", GameVersionOption.UP_TO_1_20_6.toString());
+        assertEquals("1.21 ~ 1.21.5", GameVersionOption.V1_21_TO_1_21_5.toString());
+        assertEquals("1.21.6 ~ 1.21.11", GameVersionOption.BELOW_26_1.toString());
+        assertEquals("≥ 26.1", GameVersionOption.FROM_26_1.toString());
     }
 
     @Test
