@@ -1,6 +1,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.utils.BookRuleIndex;
 import com.fo.addon.utils.TrashDefaults;
 import com.fo.addon.utils.TrashLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -10,7 +11,9 @@ import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.ItemListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.misc.Names;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import meteordevelopment.meteorclient.utils.player.SlotUtils;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
@@ -21,10 +24,14 @@ import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.slot.SlotActionType;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * AutoTrash — 自动扔垃圾（V1，自研）。
@@ -34,9 +41,14 @@ import java.util.List;
  * 白名单：仅保留列表中的物品，其余全部丢弃（列表为空时保护性暂停，防止误清空背包）。
  *
  * <p>V4.38：丢弃改为 misaka 式批量——每个「丢弃间隔」扫一遍背包，把所有命中的堆一次性全扔
- * （此前每轮只扔一种，视觉上一个一个蹦）；新增「附魔书过滤」设置组（参考 xiaohe66-meteor-lotus
- * 自动分类按附魔等级分价值的思路自研）：附魔书可按等级阈值保留（如古城只留迅捷潜行3）、全部丢弃、
- * 全部保留或跟随名单。
+ * （此前每轮只扔一种，视觉上一个一个蹦）。
+ *
+ * <p>V6.20：附魔书过滤重做（用户确认方案后实施）——删除旧的「附魔书模式 + 全局等级阈值」
+ * （一个阈值管所有附魔书，无法按附魔分规则，用户反馈鸡肋），改为「附魔书规则」文本列表：
+ * 游戏内直接打中文，每行一条「附魔名 + 可选最低等级」（如「迅捷潜行3」「经验修补」），
+ * 经 {@link BookRuleIndex} 精确/模糊匹配到附魔。打通黑白名单：命中任一规则的书视同
+ * 「在名单里」，统一走黑白名单判定；规则为空时附魔书完全跟随物品名单；
+ * 整本全留/全丢可把「附魔书」物品加进/排除出物品列表。
  */
 public class AutoTrash extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -69,21 +81,21 @@ public class AutoTrash extends Module {
         .build());
 
     private final SettingGroup sgBook = settings.createGroup("附魔书过滤");
-    private final Setting<TrashLogic.BookMode> bookMode = sgBook.add(new EnumSetting.Builder<TrashLogic.BookMode>()
-        .name("附魔书模式")
-        .description("跟随名单=附魔书按普通物品走黑白名单；保留等级达标=附魔等级≥阈值的书保留、低于阈值的当垃圾；"
-            + "全部丢弃/全部保留字面含义。古城的迅捷潜行书为 1~3 级，想只留满级书就选「保留等级达标的书」+ 阈值 3.")
-        .defaultValue(TrashLogic.BookMode.FOLLOW_LIST)
+    private final Setting<List<String>> bookRules = sgBook.add(new StringListSetting.Builder()
+        .name("附魔书规则")
+        .description("每行一条：附魔中文名 + 可选最低等级。如「迅捷潜行3」= 迅捷潜行≥3 算命中，"
+            + "「经验修补」= 任意等级都算命中（不写数字=任意等级）。支持模糊：填「潜行」匹配迅捷潜行，"
+            + "填「保护」匹配全部保护系附魔。命中任一规则的书视同在名单里（白名单=保留，黑名单=丢弃）；"
+            + "规则为空时附魔书完全跟随物品名单。想全部保留/全部丢弃附魔书：把「附魔书」物品加入物品列表即可。")
+        .defaultValue(List.of())
         .build());
-    private final Setting<Integer> bookLevel = sgBook.add(new IntSetting.Builder()
-        .name("附魔等级阈值")
-        .description("「保留等级达标的书」模式下：附魔书里的最高附魔等级 ≥ 该值才保留.")
-        .defaultValue(3)
-        .min(1)
-        .max(5)
-        .sliderMin(1)
-        .sliderMax(5)
-        .build());
+
+    /** 规则设置最后一次的列表引用——变了就重建解析缓存。 */
+    private List<String> rulesSource = List.of();
+    /** 解析后的规则（命中目录的部分）。 */
+    private List<TrashLogic.BookRule> resolvedRules = List.of();
+    /** 附魔目录缓存（ID + 中文名），构建一次。 */
+    private List<BookRuleIndex.CatalogEntry> catalogCache;
 
     private final Setting<Boolean> excludeHotbar = sgGeneral.add(new BoolSetting.Builder()
         .name("排除快捷栏")
@@ -221,8 +233,9 @@ public class AutoTrash extends Module {
     public void onActivate() {
         tickTimer = 0;
         warnedEmptyList = false;
-        // 启动时打印当前模式与列表数量，方便确认设置是否生效
-        info("已启动 (模式: " + mode.get() + ", 列表物品数: " + items.get().size() + ").");
+        rebuildRules();
+        info("已启动 (模式: " + mode.get() + ", 列表物品数: " + items.get().size()
+            + ", 附魔书规则: " + resolvedRules.size() + " 条).");
     }
 
     @EventHandler
@@ -235,15 +248,18 @@ public class AutoTrash extends Module {
 
         List<Item> list = items.get();
         boolean listConfigured = !list.isEmpty();
-        TrashLogic.BookMode bookModeValue = bookMode.get();
 
-        if (!listConfigured && bookModeValue == TrashLogic.BookMode.FOLLOW_LIST) {
-            // 保护：列表为空时不丢任何物品（尤其白名单模式，防止清空背包）。
+        // 规则设置变更时重建解析缓存（引用比较，代价 O(1)）
+        if (bookRules.get() != rulesSource) rebuildRules();
+        boolean rulesConfigured = !resolvedRules.isEmpty();
+
+        if (!listConfigured && !rulesConfigured) {
+            // 保护：物品列表与附魔书规则都为空时不丢任何物品（尤其白名单模式，防止清空背包）。
             // 不强制关闭模块——之前 toggle() 自动关会让用户误以为"设置被重置成黑名单"。
             // 提示只发一次（V4.38 前这里每 tick 刷聊天栏）。
             if (mode.get() == TrashLogic.Mode.WHITELIST && !warnedEmptyList) {
                 warnedEmptyList = true;
-                info("白名单模式但物品列表为空，未丢弃任何物品 (请在物品列表中添加要保留的物品).");
+                info("白名单模式但物品列表与附魔书规则均为空，未丢弃任何物品 (请配置物品列表或附魔书规则).");
             }
             return;
         }
@@ -265,17 +281,15 @@ public class AutoTrash extends Module {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
 
-            // 附魔书特判优先（V4.38）：非附魔书/跟随名单模式返回 null，回落普通名单逻辑
-            Boolean bookDrop = TrashLogic.decideBook(
-                bookModeValue,
-                stack.getItem() == Items.ENCHANTED_BOOK,
-                maxEnchantLevel(stack),
-                bookLevel.get());
             boolean drop;
-            if (bookDrop != null) {
-                drop = bookDrop;
+            if (stack.isOf(Items.ENCHANTED_BOOK) && rulesConfigured) {
+                // V6.20：附魔书规则优先——命中任一规则（书里任一附魔达标）或物品列表含附魔书物品，视同在名单，
+                // 统一走黑白名单判定；未命中的书在白名单=丢、黑名单=留
+                boolean inList = TrashLogic.bookMatches(resolvedRules, bookEnchantIds(stack))
+                    || list.contains(Items.ENCHANTED_BOOK);
+                drop = TrashLogic.shouldDrop(mode.get(), true, inList);
             } else if (!listConfigured) {
-                continue; // 名单为空的保护（附魔书特判未命中时）
+                continue; // 无规则可匹配（非附魔书/规则为空）且物品列表为空的保护
             } else {
                 drop = TrashLogic.shouldDrop(mode.get(), listConfigured, list.contains(stack.getItem()));
             }
@@ -294,14 +308,48 @@ public class AutoTrash extends Module {
         }
     }
 
-    /** 该堆物品里的最高附魔等级（非附魔书/无附魔返回 0）。 */
-    private int maxEnchantLevel(ItemStack stack) {
-        ItemEnchantmentsComponent enchantments = EnchantmentHelper.getEnchantments(stack);
-        int max = 0;
-        for (Object2IntMap.Entry<RegistryEntry<Enchantment>> entry : enchantments.getEnchantmentEntries()) {
-            max = Math.max(max, entry.getIntValue());
+    /** 重建附魔书规则解析缓存（激活/设置变更时调用），无效行聊天栏提示一次。 */
+    private void rebuildRules() {
+        List<String> src = bookRules.get();
+        rulesSource = List.copyOf(src);
+
+        List<TrashLogic.BookRule> resolved = new ArrayList<>();
+        List<String> invalid = new ArrayList<>();
+        for (String line : src) {
+            if (line == null || line.isBlank()) continue;
+            BookRuleIndex.resolve(line, enchantCatalog()).ifPresentOrElse(resolved::add,
+                () -> invalid.add(line.trim()));
         }
-        return max;
+        resolvedRules = List.copyOf(resolved);
+
+        if (!invalid.isEmpty()) {
+            info("附魔书规则有 " + invalid.size() + " 条无法识别（未匹配到任何附魔）: "
+                + String.join("、", invalid));
+        }
+    }
+
+    /** 附魔目录（ID + 中文名），构建一次后缓存。中文名走 Meteor Names（跟随游戏语言）。 */
+    private List<BookRuleIndex.CatalogEntry> enchantCatalog() {
+        if (catalogCache == null) {
+            List<BookRuleIndex.CatalogEntry> entries = new ArrayList<>();
+            // 1.21.x 附魔是数据驱动注册表：走 RegistryManager（同 AutoMining/ElytraCollector 现行写法）
+            var reg = mc.world.getRegistryManager().getOrThrow(net.minecraft.registry.RegistryKeys.ENCHANTMENT);
+            for (RegistryKey<Enchantment> key : reg.getKeys()) {
+                entries.add(new BookRuleIndex.CatalogEntry(key.getValue().toString(), Names.get(key)));
+            }
+            catalogCache = List.copyOf(entries);
+        }
+        return catalogCache;
+    }
+
+    /** 该附魔书堆内的附魔：附魔 ID（minecraft:xxx）→ 等级。 */
+    private Map<String, Integer> bookEnchantIds(ItemStack stack) {
+        ItemEnchantmentsComponent enchantments = EnchantmentHelper.getEnchantments(stack);
+        Map<String, Integer> out = new HashMap<>();
+        for (Object2IntMap.Entry<RegistryEntry<Enchantment>> entry : enchantments.getEnchantmentEntries()) {
+            entry.getKey().getKey().ifPresent(key -> out.put(key.getValue().toString(), entry.getIntValue()));
+        }
+        return out;
     }
 
     private void dropItem(int slot) {
