@@ -297,4 +297,64 @@ class AncientChestStoreTest {
         assertEquals(total - removerThreads * perThread, store.size(SCOPE_A),
             "并发删除的结果不对 —— 说明删除没被正确串行化");
     }
+
+    // ==================== v3 已开名单 ====================
+
+    @Test
+    void v3已开名单随文件往返() {
+        AncientChestStore store = new AncientChestStore();
+        store.add(SCOPE_A, new AncientChestStore.Mark(1, 2, 3, AncientChestStore.LABEL_GOLD));
+        store.markOpened(SCOPE_A, 100, 200);
+        assertTrue(store.isOpen(SCOPE_A, 100, 200));
+        assertFalse(store.isOpen(SCOPE_A, 300, 400));
+
+        AncientChestStore back = AncientChestStore.fromJson(store.toJson());
+        assertTrue(back.isOpen(SCOPE_A, 100, 200), "已开名单应随文件持久化");
+        assertFalse(back.isOpen(SCOPE_A, 300, 400));
+        assertEquals(1, back.size(SCOPE_A));
+    }
+
+    @Test
+    void clearMarks保留已开名单与种子_clear全清() {
+        AncientChestStore store = new AncientChestStore();
+        store.setScopeSeed(SCOPE_A, 123L);
+        store.add(SCOPE_A, new AncientChestStore.Mark(1, 2, 3, AncientChestStore.LABEL_GOLD));
+        store.markOpened(SCOPE_A, 100, 200);
+
+        store.clearMarks(SCOPE_A);
+        assertEquals(0, store.size(SCOPE_A));
+        assertEquals(123L, store.scopeSeed(SCOPE_A), "clearMarks 应保留种子");
+        assertTrue(store.isOpen(SCOPE_A, 100, 200), "clearMarks 应保留已开名单");
+
+        store.clear(SCOPE_A);
+        assertFalse(store.isOpen(SCOPE_A, 100, 200), "clear 应连已开名单一起清");
+        assertNull(store.scopeSeed(SCOPE_A));
+    }
+
+    @Test
+    void v2旧文件没有已开名单_读入为空() {
+        String v2 = "{\"version\":2,\"scopes\":{\"a|b|minecraft:overworld\":{"
+            + "\"seed\":5,\"marks\":[{\"x\":1,\"y\":2,\"z\":3,\"label\":\"附魔金\"}]}}}";
+        AncientChestStore back = AncientChestStore.fromJson(v2);
+        assertEquals(1, back.size("a|b|minecraft:overworld"));
+        assertFalse(back.isOpen("a|b|minecraft:overworld", 1, 3));
+    }
+
+    @Test
+    void 只有已开名单没有标记的作用域也会落盘() {
+        AncientChestStore store = new AncientChestStore();
+        store.markOpened(SCOPE_A, 100, 200);
+        AncientChestStore back = AncientChestStore.fromJson(store.toJson());
+        assertTrue(back.isOpen(SCOPE_A, 100, 200), "marks 为空时 opened 也应落盘");
+        assertEquals(0, back.size(SCOPE_A));
+    }
+
+    @Test
+    void 不平衡的JSON不会越界而是退化为空记录() {
+        // V6.19 排查时发现：少一个闭合大括号会让 AncientJson 裸抛 StringIndexOutOfBounds，
+        // fromJson 虽有 catch 兜底，但异常信息毫无指向性。加固后应是带信息的异常且退化安全。
+        String broken = "{\"version\":3,\"scopes\":{\"a\":{\"seed\":1,\"marks\":[{\"x\":1,\"y\":2,\"z\":3,\"label\":\"L\"}]}}";
+        AncientChestStore back = AncientChestStore.fromJson(broken);
+        assertEquals(0, back.size("a"));
+    }
 }

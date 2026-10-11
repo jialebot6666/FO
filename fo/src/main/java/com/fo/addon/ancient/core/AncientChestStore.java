@@ -2,8 +2,10 @@ package com.fo.addon.ancient.core;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 已找到的古城目标箱子记录（纯逻辑，可单测）。
@@ -12,16 +14,23 @@ import java.util.Map;
  * 其余战利品不需要位置。记录按「作用域」分组（单人世界 / 各服务器 + 维度），
  * 避免在 A 服搜到的箱子跑到 B 服去高亮。
  *
- * <p>存储格式（手写最小 JSON，读写都不依赖第三方库）。<b>v2 起每个作用域带 {@code seed}</b>：
- * 记录只属于某一次搜索的世界，渲染时按种子过滤，防止换种子/换世界后的残留记录产生假高亮。
+ * <p>存储格式（手写最小 JSON，读写都不依赖第三方库）。
+ * <b>v2 起每个作用域带 {@code seed}</b>：记录只属于某一次搜索的世界，渲染时按种子过滤，
+ * 防止换种子/换世界后的残留记录产生假高亮。
+ * <b>v3 起每个作用域带 {@code opened}（已开名单）</b>：开过的箱子坐标记下来，
+ * 之后所有搜索都跳过它们——重开模块、重新搜索都不会把开过的箱子再加回来
+ * （V6.16 实机问题：重扫会把开过的箱子重新标上）。开过的箱子被挖掉后记录保留（永久），
+ * 因为这对功能反而有利：搜索命中被挖位置时直接跳过，不给空气位置标点。
  * <pre>
- * {"version":2,"scopes":{"&lt;scope&gt;":{"seed":123,"marks":[{"x":1,"y":2,"z":3,"label":"附魔金"}]}}}
+ * {"version":3,"scopes":{"&lt;scope&gt;":{"seed":123,
+ *   "marks":[{"x":1,"y":2,"z":3,"label":"附魔金"}],
+ *   "opened":["100,200","-5,-9"]}}}
  * </pre>
- * 读取时兼容 v1 旧格式（{@code scopes} 的值直接是数组、无 seed）。
+ * 读取时兼容 v1 旧格式（{@code scopes} 的值直接是数组、无 seed）与 v2（无 opened）。
  */
 public final class AncientChestStore {
 
-    // 线程约定：所有会碰 byScope 的实例方法都加锁。
+    // 线程约定：所有会碰内部 Map 的实例方法都加锁。
     // V6.10 实机崩溃（渲染线程 ConcurrentModificationException）暴露了「后台线程改共享状态」
     // 这类问题；模块现在改成只在客户端线程写入，这里再加一道锁，避免以后有人跨线程用时再踩。
 
@@ -32,7 +41,7 @@ public final class AncientChestStore {
     /** 两者都有。 */
     public static final String LABEL_BOTH = "两者";
 
-    private static final int FORMAT_VERSION = 2;
+    private static final int FORMAT_VERSION = 3;
 
     /** 一个目标箱子。{@code label} 取 {@link #LABEL_GOLD} / {@link #LABEL_SWIFT} / {@link #LABEL_BOTH}。 */
     public record Mark(int x, int y, int z, String label) {
@@ -41,6 +50,12 @@ public final class AncientChestStore {
     private final Map<String, List<Mark>> byScope = new LinkedHashMap<>();
     /** 作用域 -> 该批记录所属的世界种子（v2 起随文件持久化；旧文件没有则视为未知）。 */
     private final Map<String, Long> scopeSeeds = new LinkedHashMap<>();
+    /** 作用域 -> 已开箱子的坐标集合（v3 起；key = (x<<32)|z，只增不减，换种子时随作用域清空）。 */
+    private final Map<String, Set<Long>> openedByScope = new LinkedHashMap<>();
+
+    private static long key(int x, int z) {
+        return ((long) x << 32) | (z & 0xFFFFFFFFL);
+    }
 
     /** 某个作用域下的全部记录（拷贝）。 */
     public synchronized List<Mark> marks(String scope) {
@@ -81,10 +96,33 @@ public final class AncientChestStore {
         return list.removeIf(m -> m.x() == x && m.z() == z);
     }
 
-    /** 清空某个作用域（连同它的种子一起）。 */
+    /** 把 (x,z) 记入「已开名单」：之后所有搜索都会跳过它。 */
+    public synchronized void markOpened(String scope, int x, int z) {
+        openedByScope.computeIfAbsent(scope, k -> new LinkedHashSet<>()).add(key(x, z));
+    }
+
+    /** (x,z) 是否在「已开名单」里。 */
+    public synchronized boolean isOpen(String scope, int x, int z) {
+        Set<Long> set = openedByScope.get(scope);
+        return set != null && set.contains(key(x, z));
+    }
+
+    /** 某作用域的「已开名单」大小。 */
+    public synchronized int openedCount(String scope) {
+        Set<Long> set = openedByScope.get(scope);
+        return set == null ? 0 : set.size();
+    }
+
+    /** 清空某个作用域的<b>标记</b>（保留种子与已开名单）——新一轮搜索整批替换时用。 */
+    public synchronized void clearMarks(String scope) {
+        byScope.remove(scope);
+    }
+
+    /** 清空某个作用域的全部状态（标记 + 已开名单 + 种子）——换种子/换世界时用。 */
     public synchronized void clear(String scope) {
         byScope.remove(scope);
         scopeSeeds.remove(scope);
+        openedByScope.remove(scope);
     }
 
     /** 记录该作用域这批结果所属的世界种子（随文件持久化）。 */
@@ -115,22 +153,39 @@ public final class AncientChestStore {
     public synchronized String toJson() {
         StringBuilder sb = new StringBuilder(256);
         sb.append("{\"version\":").append(FORMAT_VERSION).append(",\"scopes\":{");
+        // 作用域可能只有已开名单而没有标记（全部开完后 marks 被替换清空），两类键取并集
+        Set<String> scopeNames = new LinkedHashSet<>();
+        scopeNames.addAll(byScope.keySet());
+        scopeNames.addAll(openedByScope.keySet());
         boolean firstScope = true;
-        for (Map.Entry<String, List<Mark>> e : byScope.entrySet()) {
-            if (e.getValue().isEmpty()) continue;
+        for (String scope : scopeNames) {
+            List<Mark> marks = byScope.get(scope);
+            Set<Long> opened = openedByScope.get(scope);
+            if ((marks == null || marks.isEmpty()) && (opened == null || opened.isEmpty())) continue;
             if (!firstScope) sb.append(',');
             firstScope = false;
-            sb.append('"').append(escape(e.getKey())).append("\":{\"seed\":");
-            Long seed = scopeSeeds.get(e.getKey());
+            sb.append('"').append(escape(scope)).append("\":{\"seed\":");
+            Long seed = scopeSeeds.get(scope);
             sb.append(seed == null ? "null" : seed);
             sb.append(",\"marks\":[");
-            for (int i = 0; i < e.getValue().size(); i++) {
-                Mark m = e.getValue().get(i);
-                if (i > 0) sb.append(',');
-                sb.append("{\"x\":").append(m.x())
-                  .append(",\"y\":").append(m.y())
-                  .append(",\"z\":").append(m.z())
-                  .append(",\"label\":\"").append(escape(m.label())).append("\"}");
+            if (marks != null) {
+                for (int i = 0; i < marks.size(); i++) {
+                    Mark m = marks.get(i);
+                    if (i > 0) sb.append(',');
+                    sb.append("{\"x\":").append(m.x())
+                      .append(",\"y\":").append(m.y())
+                      .append(",\"z\":").append(m.z())
+                      .append(",\"label\":\"").append(escape(m.label())).append("\"}");
+                }
+            }
+            sb.append("],\"opened\":[");
+            if (opened != null) {
+                boolean first = true;
+                for (long k : opened) {
+                    if (!first) sb.append(',');
+                    first = false;
+                    sb.append('"').append((int) (k >> 32)).append(',').append((int) k).append('"');
+                }
             }
             sb.append("]}");
         }
@@ -165,6 +220,21 @@ public final class AncientChestStore {
                 }
                 if (obj.get("marks") instanceof List<?> list) {
                     readMarks(store, scope, list);
+                }
+                if (obj.get("opened") instanceof List<?> openedList) {
+                    for (Object item : openedList) {
+                        if (item instanceof String s) {
+                            String[] parts = s.split(",");
+                            if (parts.length == 2) {
+                                try {
+                                    store.markOpened(scope, Integer.parseInt(parts[0].trim()),
+                                        Integer.parseInt(parts[1].trim()));
+                                } catch (NumberFormatException ignored) {
+                                    // 坏条目跳过
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

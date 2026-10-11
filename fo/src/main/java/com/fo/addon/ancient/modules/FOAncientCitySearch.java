@@ -472,7 +472,7 @@ public class FOAncientCitySearch extends Module {
         Long currentSeed = currentSeedGuess();
         if (storedSeed != null && currentSeed != null && !storedSeed.equals(currentSeed)) {
             int n = chestStore.size(scope);
-            chestStore.clear(scope);
+            chestStore.clear(scope);   // 换种子 = 换世界：标记、已开名单、种子全部清空
             saveStore();
             info("本地记录（" + n + " 个）属于另一个种子（" + storedSeed + "），已清空；请重新搜索");
             return;
@@ -515,6 +515,7 @@ public class FOAncientCitySearch extends Module {
                 if (d == AncientOpenedChestPolicy.Decision.UNOPENED) {
                     alive.add(m);
                 } else if (d == AncientOpenedChestPolicy.Decision.OPENED) {
+                    chestStore.markOpened(scope, m.x(), m.z());
                     removedOpened++;
                 } else {
                     alive.add(m);   // 判定不了（服务端不下发该字段），保留
@@ -525,7 +526,7 @@ public class FOAncientCitySearch extends Module {
         }
 
         if (removedMined + removedOpened > 0) {
-            chestStore.clear(scope);
+            chestStore.clearMarks(scope);
             if (storedSeed != null) {
                 chestStore.setScopeSeed(scope, storedSeed);
             }
@@ -593,6 +594,11 @@ public class FOAncientCitySearch extends Module {
             && !(mc.currentScreen instanceof InventoryScreen);
         if (containerOpen && !wasContainerOpen && lastTargetedBlock != null
             && tickCounter - lastTargetedAtTick <= 10) {
+            // 先记入「已开名单」（V6.19）：之后所有搜索都跳过这个坐标，
+            // 重开模块/重新搜索不会再把开过的箱子加回来
+            if (mc.world.getBlockState(lastTargetedBlock).getBlock() instanceof ChestBlock) {
+                chestStore.markOpened(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ());
+            }
             if (chestStore.remove(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ())) {
                 XaeroWaypointBridge.removeWaypointAt(lastTargetedBlock.getX(), lastTargetedBlock.getZ());
                 debug("箱子已打开，删除高亮与路径点: " + lastTargetedBlock.toShortString());
@@ -624,11 +630,13 @@ public class FOAncientCitySearch extends Module {
                             AncientOpenedChestPolicy.decide(lootSyncConfirmed, present);
                         if (present) {
                             lootSyncConfirmed = true;
-                        } else if (d == AncientOpenedChestPolicy.Decision.OPENED
-                            && chestStore.remove(scope, m.x(), m.z())) {
-                            XaeroWaypointBridge.removeWaypointAt(m.x(), m.z());
-                            debug("箱子已开过（战利品已生成），删除高亮与路径点: " + pos.toShortString());
-                            changed = true;
+                        } else if (d == AncientOpenedChestPolicy.Decision.OPENED) {
+                            chestStore.markOpened(scope, m.x(), m.z());
+                            if (chestStore.remove(scope, m.x(), m.z())) {
+                                XaeroWaypointBridge.removeWaypointAt(m.x(), m.z());
+                                debug("箱子已开过（战利品已生成），删除高亮与路径点: " + pos.toShortString());
+                                changed = true;
+                            }
                         }
                     }
                     continue;
@@ -676,6 +684,7 @@ public class FOAncientCitySearch extends Module {
             || partnerState.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE) {
             return false;
         }
+        chestStore.markOpened(scope, partner.getX(), partner.getZ());
         if (chestStore.remove(scope, partner.getX(), partner.getZ())) {
             XaeroWaypointBridge.removeWaypointAt(partner.getX(), partner.getZ());
             debug("双箱另一半已随开删除高亮与路径点: " + partner.toShortString());
@@ -937,30 +946,42 @@ public class FOAncientCitySearch extends Module {
         loadStore();
         String scope = currentScope();
         int recorded = 0;
+        int skippedOpened = 0;
+        List<PendingMark> toWrite = new ArrayList<>();
         if (scope != null) {
             if (storeReplacePending) {
                 storeReplacePending = false;
-                // 本轮结果要【整体替换】旧记录：先把上一批写入的路径点撤掉再清记录，
-                // 否则换种子重搜后旧路径点会一直残留（高亮有种子过滤，路径点此前没有）
+                // 本轮结果要【整体替换】旧记录：先把上一批写入的路径点撤掉再清记录。
+                // 「已开名单」刻意保留（clearMarks 而非 clear）——开过的箱子正是靠它
+                // 在新一轮搜索里被跳过（V6.19）
                 clearWaypointsOf(chestStore.marks(scope));
-                chestStore.clear(scope);
+                chestStore.clearMarks(scope);
             }
             if (activeSeed != null) {
                 chestStore.setScopeSeed(scope, activeSeed);
             }
             for (PendingMark m : batch) {
+                // 「已开名单」里的坐标跳过：不写标记、不恢复高亮、不加路径点（V6.19）
+                if (chestStore.isOpen(scope, m.x(), m.z())) {
+                    skippedOpened++;
+                    continue;
+                }
                 if (chestStore.add(scope, new AncientChestStore.Mark(m.x(), m.y(), m.z(), m.label()))) {
                     recorded++;
+                    toWrite.add(m);
                 }
             }
             saveStore();
         }
 
-        // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色
-        writeWaypoints(batch);
+        // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色（只写未被跳过的）
+        if (!toWrite.isEmpty()) {
+            writeWaypoints(toWrite);
+        }
 
         if (scope != null && recorded > 0) {
-            info("已记录 " + recorded + " 个新箱子到本地（本地共 " + chestStore.size(scope) + " 个）");
+            info("已记录 " + recorded + " 个新箱子到本地（本地共 " + chestStore.size(scope) + " 个）"
+                + (skippedOpened > 0 ? "；已跳过 " + skippedOpened + " 个开过的箱子" : ""));
         }
     }
 
