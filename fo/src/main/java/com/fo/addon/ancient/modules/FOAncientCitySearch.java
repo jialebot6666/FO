@@ -157,7 +157,7 @@ public class FOAncientCitySearch extends Module {
         searchTypeSetting = sgGeneral.add(new EnumSetting.Builder<LootTarget>()
             .name("搜索类型")
             .description("选择要搜索的物品类型")
-            .defaultValue(LootTarget.ENCHANTED_GOLDEN_APPLE)
+            .defaultValue(LootTarget.BOTH)
             .build());
 
         gameVersionSetting = sgGeneral.add(new EnumSetting.Builder<GameVersionOption>()
@@ -166,7 +166,7 @@ public class FOAncientCitySearch extends Module {
                 + "≤1.20.6 用旧版附魔语法；1.21.6 起第 8 条由 saddle（不耗随机数）变成 leather（耗一次）；"
                 + "≥26.1 少一个 name_tag 条目。选错会让物品判定出错，但箱子位置仍然正确。"
                 + "单人档按自己的客户端版本选；连服务器按服务端原生版本选，不确定就逐个试。")
-            .defaultValue(GameVersionOption.BELOW_26_1)
+            .defaultValue(GameVersionOption.FROM_26_1)
             .build());
 
         searchRadiusSetting = sgGeneral.add(new IntSetting.Builder()
@@ -228,7 +228,7 @@ public class FOAncientCitySearch extends Module {
         highlightRadiusSetting = sgHighlight.add(new IntSetting.Builder()
             .name("高亮半径")
             .description("玩家多少格以内的命中箱子才画高亮框（方块）")
-            .defaultValue(64)
+            .defaultValue(256)
             .min(8).max(256)
             .sliderMin(8).sliderMax(256)
             .build());
