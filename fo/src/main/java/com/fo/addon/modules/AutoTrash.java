@@ -11,12 +11,17 @@ import meteordevelopment.meteorclient.settings.ItemListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import meteordevelopment.meteorclient.utils.player.SlotUtils;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.slot.SlotActionType;
 
 import java.util.List;
@@ -27,6 +32,11 @@ import java.util.List;
  * <p>参考 meteor-miku (GPL) 自动扔垃圾的设计思路自研实现，并增强为黑白名单模式：
  * 黑名单：列表中的物品自动丢弃；
  * 白名单：仅保留列表中的物品，其余全部丢弃（列表为空时保护性暂停，防止误清空背包）。
+ *
+ * <p>V4.38：丢弃改为 misaka 式批量——每个「丢弃间隔」扫一遍背包，把所有命中的堆一次性全扔
+ * （此前每轮只扔一种，视觉上一个一个蹦）；新增「附魔书过滤」设置组（参考 xiaohe66-meteor-lotus
+ * 自动分类按附魔等级分价值的思路自研）：附魔书可按等级阈值保留（如古城只留迅捷潜行3）、全部丢弃、
+ * 全部保留或跟随名单。
  */
 public class AutoTrash extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -44,18 +54,35 @@ public class AutoTrash extends Module {
         .build());
 
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
-        .name("丢弃延迟")
-        .description("每次丢弃之间的间隔（游戏刻）.")
-        .defaultValue(1)
-        .min(1)
-        .sliderMin(1)
-        .sliderMax(20)
+        .name("丢弃间隔")
+        .description("扫描间隔（tick）：每隔 N tick 扫一遍背包，把所有命中的堆一次性全扔（misaka 式批量）。0 = 每 tick 扫.")
+        .defaultValue(20)
+        .min(0)
+        .sliderMin(0)
+        .sliderMax(60)
         .build());
 
     private final Setting<Boolean> dropAll = sgGeneral.add(new BoolSetting.Builder()
         .name("丢弃整组")
         .description("丢弃整组物品；关闭时每次只丢一个.")
         .defaultValue(true)
+        .build());
+
+    private final SettingGroup sgBook = settings.createGroup("附魔书过滤");
+    private final Setting<TrashLogic.BookMode> bookMode = sgBook.add(new EnumSetting.Builder<TrashLogic.BookMode>()
+        .name("附魔书模式")
+        .description("跟随名单=附魔书按普通物品走黑白名单；保留等级达标=附魔等级≥阈值的书保留、低于阈值的当垃圾；"
+            + "全部丢弃/全部保留字面含义。古城的迅捷潜行书为 1~3 级，想只留满级书就选「保留等级达标的书」+ 阈值 3.")
+        .defaultValue(TrashLogic.BookMode.FOLLOW_LIST)
+        .build());
+    private final Setting<Integer> bookLevel = sgBook.add(new IntSetting.Builder()
+        .name("附魔等级阈值")
+        .description("「保留等级达标的书」模式下：附魔书里的最高附魔等级 ≥ 该值才保留.")
+        .defaultValue(3)
+        .min(1)
+        .max(5)
+        .sliderMin(1)
+        .sliderMax(5)
         .build());
 
     private final Setting<Boolean> excludeHotbar = sgGeneral.add(new BoolSetting.Builder()
@@ -71,6 +98,8 @@ public class AutoTrash extends Module {
         .build());
 
     private int tickTimer = 0;
+    /** 空名单保护提示只发一次，防止每 tick 刷聊天栏。 */
+    private boolean warnedEmptyList;
 
     /** V4.22: 联动来源标记——仅当由"FO 自动挖沙"联动开启时，才在挖沙停止时联动关闭；
      *  用户手动开的（标记为空）一律不关，避免误伤手动操作。 */
@@ -191,6 +220,7 @@ public class AutoTrash extends Module {
     @Override
     public void onActivate() {
         tickTimer = 0;
+        warnedEmptyList = false;
         // 启动时打印当前模式与列表数量，方便确认设置是否生效
         info("已启动 (模式: " + mode.get() + ", 列表物品数: " + items.get().size() + ").");
     }
@@ -199,13 +229,20 @@ public class AutoTrash extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
+        // 防误丢：只在无界面时扫背包 —— 槽位映射（SlotUtils.indexToId）按玩家背包设计，
+        // 开着箱子等界面时 currentScreenHandler 不同，槽位会错位，可能把界面里的东西丢错。
+        if (mc.currentScreen != null) return;
+
         List<Item> list = items.get();
         boolean listConfigured = !list.isEmpty();
-        if (!listConfigured) {
+        TrashLogic.BookMode bookModeValue = bookMode.get();
+
+        if (!listConfigured && bookModeValue == TrashLogic.BookMode.FOLLOW_LIST) {
             // 保护：列表为空时不丢任何物品（尤其白名单模式，防止清空背包）。
-            // 注意：不强制关闭模块——之前 toggle() 自动关会让用户误以为"设置被重置成黑名单"，
-            // 且模块开不起来。改为仅提示一次。
-            if (mode.get() == TrashLogic.Mode.WHITELIST) {
+            // 不强制关闭模块——之前 toggle() 自动关会让用户误以为"设置被重置成黑名单"。
+            // 提示只发一次（V4.38 前这里每 tick 刷聊天栏）。
+            if (mode.get() == TrashLogic.Mode.WHITELIST && !warnedEmptyList) {
+                warnedEmptyList = true;
                 info("白名单模式但物品列表为空，未丢弃任何物品 (请在物品列表中添加要保留的物品).");
             }
             return;
@@ -216,7 +253,8 @@ public class AutoTrash extends Module {
             return;
         }
 
-        boolean dropped = false;
+        // misaka 式批量：一轮扫描把所有命中的堆一次全扔（V4.38 前每轮只扔一种，眼花缭乱）
+        int droppedCount = 0;
         int start = excludeHotbar.get() ? 9 : 0;
         int end = mc.player.getInventory().size();
 
@@ -227,20 +265,43 @@ public class AutoTrash extends Module {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
 
-            boolean inList = list.contains(stack.getItem());
-            if (TrashLogic.shouldDrop(mode.get(), listConfigured, inList)) {
+            // 附魔书特判优先（V4.38）：非附魔书/跟随名单模式返回 null，回落普通名单逻辑
+            Boolean bookDrop = TrashLogic.decideBook(
+                bookModeValue,
+                stack.getItem() == Items.ENCHANTED_BOOK,
+                maxEnchantLevel(stack),
+                bookLevel.get());
+            boolean drop;
+            if (bookDrop != null) {
+                drop = bookDrop;
+            } else if (!listConfigured) {
+                continue; // 名单为空的保护（附魔书特判未命中时）
+            } else {
+                drop = TrashLogic.shouldDrop(mode.get(), listConfigured, list.contains(stack.getItem()));
+            }
+
+            if (drop) {
                 dropItem(i);
-                dropped = true;
-                break; // 一次 tick 只丢一种物品
+                droppedCount++;
             }
         }
 
-        if (dropped) {
+        if (droppedCount > 0) {
             tickTimer = delay.get();
         } else if (toggleOffOnClear.get()) {
             info("背包中已无垃圾物品，自动关闭.");
             toggle();
         }
+    }
+
+    /** 该堆物品里的最高附魔等级（非附魔书/无附魔返回 0）。 */
+    private int maxEnchantLevel(ItemStack stack) {
+        ItemEnchantmentsComponent enchantments = EnchantmentHelper.getEnchantments(stack);
+        int max = 0;
+        for (Object2IntMap.Entry<RegistryEntry<Enchantment>> entry : enchantments.getEnchantmentEntries()) {
+            max = Math.max(max, entry.getIntValue());
+        }
+        return max;
     }
 
     private void dropItem(int slot) {
