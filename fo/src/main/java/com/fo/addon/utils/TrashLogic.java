@@ -1,9 +1,19 @@
 package com.fo.addon.utils;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
- * AutoTrash 黑白名单纯决策逻辑（不依赖 Minecraft 运行时，可单元测试）。
+ * AutoTrash 黑白名单 + 附魔书规则纯决策逻辑（不依赖 Minecraft 运行时，可单元测试）。
  *
  * <p>参考 meteor-miku (GPL) 自动扔垃圾的设计思路自研，并增强黑白名单模式。
+ *
+ * <p>V6.20：附魔书过滤重做（用户确认方案后实施）——删除旧的「附魔书模式 + 全局等级阈值」，
+ * 改为「附魔书规则」文本列表（游戏内直接打中文），每条规则 = 附魔中文名 + 可选最低等级，
+ * 且打通黑白名单：命中任一规则的书视同「在名单里」，统一走 shouldDrop 的黑白名单判定。
  */
 public final class TrashLogic {
 
@@ -26,59 +36,75 @@ public final class TrashLogic {
         }
     }
 
-    /** 附魔书过滤模式。 */
-    public enum BookMode {
-        /** 跟随名单：附魔书按普通物品走黑白名单逻辑 */
-        FOLLOW_LIST("跟随名单"),
-        /** 保等级：附魔等级 ≥ 阈值的书保留，低于阈值的当垃圾丢弃 */
-        KEEP_LEVEL("保留等级达标的书"),
-        /** 全部丢弃：附魔书一律当垃圾 */
-        DROP_ALL("全部丢弃"),
-        /** 全部保留：附魔书一律不丢 */
-        KEEP_ALL("全部保留");
-
-        private final String display;
-
-        BookMode(String display) {
-            this.display = display;
-        }
-
-        @Override
-        public String toString() {
-            return display;
-        }
-    }
-
     private TrashLogic() {}
-
-    /**
-     * 附魔书判定（参考 xiaohe66-meteor-lotus 自动分类「按附魔等级分价值」的思路自研）。
-     *
-     * @param mode            附魔书过滤模式
-     * @param isEnchantedBook 该堆是否为附魔书
-     * @param maxEnchantLevel 该堆附魔书里的最高附魔等级（非附魔书/无附魔传 0）
-     * @param threshold       等级阈值（KEEP_LEVEL 模式用）
-     * @return true=丢弃，false=保留，null=无附魔书特判，回落到普通名单逻辑
-     */
-    public static Boolean decideBook(BookMode mode, boolean isEnchantedBook, int maxEnchantLevel, int threshold) {
-        if (!isEnchantedBook || mode == BookMode.FOLLOW_LIST) return null;
-        return switch (mode) {
-            case DROP_ALL -> true;
-            case KEEP_ALL -> false;
-            case KEEP_LEVEL -> maxEnchantLevel < threshold;
-            default -> null;
-        };
-    }
 
     /**
      * 判断某物品是否应当被丢弃。
      *
      * @param mode          名单模式
      * @param listConfigured 物品列表是否非空（安全保护：列表为空时一律不丢，防止白名单误清空背包）
-     * @param itemInList    物品是否在名单中
+     * @param itemInList    物品是否在名单中（附魔书命中规则也视同在名单）
      */
     public static boolean shouldDrop(Mode mode, boolean listConfigured, boolean itemInList) {
         if (!listConfigured) return false;
         return mode == Mode.BLACKLIST ? itemInList : !itemInList;
+    }
+
+    // ==================== 附魔书规则（V6.20） ====================
+
+    /** 一行规则的解析结果：名称部分 + 最低等级（0 = 任意等级）。 */
+    public record RuleLine(boolean valid, String namePart, int minLevel) {
+        public static final RuleLine INVALID = new RuleLine(false, "", 0);
+    }
+
+    /** 结尾数字 = 最低等级，如「迅捷潜行3」「锋利 5」；不写数字 = 任意等级。 */
+    private static final Pattern TRAILING_LEVEL = Pattern.compile("^(.*?)(\\d+)\\s*$");
+
+    /**
+     * 解析一行规则文本。
+     * 「迅捷潜行3」→ (迅捷潜行, 3)；「经验修补」→ (经验修补, 0=任意)；空行/纯数字 → 无效。
+     */
+    public static RuleLine parseRuleLine(String line) {
+        if (line == null) return RuleLine.INVALID;
+        String s = line.trim();
+        if (s.isEmpty()) return RuleLine.INVALID;
+
+        Matcher m = TRAILING_LEVEL.matcher(s);
+        if (m.matches()) {
+            String name = m.group(1).trim();
+            int level;
+            try {
+                level = Integer.parseInt(m.group(2));
+            } catch (NumberFormatException e) {
+                return RuleLine.INVALID;
+            }
+            if (name.isEmpty() || level < 0) return RuleLine.INVALID;
+            return new RuleLine(true, name, level);
+        }
+        return new RuleLine(true, s, 0);
+    }
+
+    /**
+     * 已解析到具体附魔的规则：附魔 ID 集合（minecraft:xxx）+ 最低等级（0 = 任意等级）。
+     * 一个名称可能模糊匹配到多个附魔（如「保护」命中全部保护系），都装进同一个集合。
+     */
+    public record BookRule(Set<String> enchantIds, int minLevel) {}
+
+    /**
+     * 附魔书是否命中任一规则（任一附魔达标即命中，宽松策略，用户确认）。
+     *
+     * @param rules        已解析规则
+     * @param bookEnchants 书内附魔：附魔 ID（minecraft:xxx）→ 等级
+     */
+    public static boolean bookMatches(List<BookRule> rules, Map<String, Integer> bookEnchants) {
+        if (rules == null || rules.isEmpty() || bookEnchants == null || bookEnchants.isEmpty()) return false;
+        for (BookRule rule : rules) {
+            if (rule == null || rule.enchantIds() == null || rule.enchantIds().isEmpty()) continue;
+            for (Map.Entry<String, Integer> e : bookEnchants.entrySet()) {
+                if (!rule.enchantIds().contains(e.getKey())) continue;
+                if (e.getValue() >= rule.minLevel()) return true; // minLevel 0 = 任意等级必达
+            }
+        }
+        return false;
     }
 }

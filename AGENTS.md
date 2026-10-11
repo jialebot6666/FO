@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.19`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.20`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -80,6 +80,17 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     （换种子），`clearMarks(scope)` 只清标记（整批替换/重建时用，保已开名单与种子）——别混用。
     ⚠️ 行为变化：误开的箱子不能再靠重搜恢复（用户确认接受）。
     顺手加固 `AncientJson`：不平衡 JSON 由裸越界改为带信息异常。
+  - ✅ V6.20 已完成：**自动扔垃圾附魔书过滤重做**（旧「附魔书模式 + 全局等级阈值」删除，用户反馈鸡肋）。
+    改为「附魔书规则」文本列表（StringListSetting，游戏内直接打中文）：每行一条
+    「附魔中文名 + 可选最低等级」（如「迅捷潜行3」「经验修补」，不写数字=任意等级），
+    `utils/BookRuleIndex` 负责解析与目录匹配（中文名走 Meteor Names；英文 ID 精确唯一命中，
+    中文名按「包含」收集——「潜行」→ 迅捷潜行，「保护」→ 全部保护系，「杀手」→ 亡灵杀手/节肢杀手，
+    一个词可一匹配多附魔）。
+    **打通黑白名单**：命中任一规则（书内任一附魔达标即中，宽松策略）的书视同「在名单里」，
+    统一走 `TrashLogic.shouldDrop`；规则为空时附魔书完全跟随物品名单；
+    整本全留/全丢 = 把「附魔书」物品加进/排除出物品列表（物品列表含 ENCHANTED_BOOK 即命中全部书）。
+    纯逻辑：行解析 `TrashLogic.parseRuleLine` + 命中 `TrashLogic.bookMatches` + 目录匹配
+    `BookRuleIndex.resolve` 均可单测；无法识别的行启动时聊天栏提示一次。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
