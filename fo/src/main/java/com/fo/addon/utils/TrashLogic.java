@@ -3,17 +3,15 @@ package com.fo.addon.utils;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * AutoTrash 黑白名单 + 附魔书规则纯决策逻辑（不依赖 Minecraft 运行时，可单元测试）。
  *
  * <p>参考 meteor-miku (GPL) 自动扔垃圾的设计思路自研，并增强黑白名单模式。
  *
- * <p>V6.20：附魔书过滤重做（用户确认方案后实施）——删除旧的「附魔书模式 + 全局等级阈值」，
- * 改为「附魔书规则」文本列表（游戏内直接打中文），每条规则 = 附魔中文名 + 可选最低等级，
- * 且打通黑白名单：命中任一规则的书视同「在名单里」，统一走 shouldDrop 的黑白名单判定。
+ * <p>V6.20：打通黑白名单——命中规则的附魔书视同「在名单里」，统一走 shouldDrop。
+ * V6.21：附魔书规则由「文本列表」改为「每个附魔一条等级设置」（{@link EnchantList} 数据表），
+ * 文本解析逻辑删除。
  */
 public final class TrashLogic {
 
@@ -50,50 +48,18 @@ public final class TrashLogic {
         return mode == Mode.BLACKLIST ? itemInList : !itemInList;
     }
 
-    // ==================== 附魔书规则（V6.20） ====================
-
-    /** 一行规则的解析结果：名称部分 + 最低等级（0 = 任意等级）。 */
-    public record RuleLine(boolean valid, String namePart, int minLevel) {
-        public static final RuleLine INVALID = new RuleLine(false, "", 0);
-    }
-
-    /** 结尾数字 = 最低等级，如「迅捷潜行3」「锋利 5」；不写数字 = 任意等级。 */
-    private static final Pattern TRAILING_LEVEL = Pattern.compile("^(.*?)(\\d+)\\s*$");
+    // ==================== 附魔书规则（V6.20 引入，V6.21 起由 EnchantList 驱动） ====================
 
     /**
-     * 解析一行规则文本。
-     * 「迅捷潜行3」→ (迅捷潜行, 3)；「经验修补」→ (经验修补, 0=任意)；空行/纯数字 → 无效。
-     */
-    public static RuleLine parseRuleLine(String line) {
-        if (line == null) return RuleLine.INVALID;
-        String s = line.trim();
-        if (s.isEmpty()) return RuleLine.INVALID;
-
-        Matcher m = TRAILING_LEVEL.matcher(s);
-        if (m.matches()) {
-            String name = m.group(1).trim();
-            int level;
-            try {
-                level = Integer.parseInt(m.group(2));
-            } catch (NumberFormatException e) {
-                return RuleLine.INVALID;
-            }
-            if (name.isEmpty() || level < 0) return RuleLine.INVALID;
-            return new RuleLine(true, name, level);
-        }
-        return new RuleLine(true, s, 0);
-    }
-
-    /**
-     * 已解析到具体附魔的规则：附魔 ID 集合（minecraft:xxx）+ 最低等级（0 = 任意等级）。
-     * 一个名称可能模糊匹配到多个附魔（如「保护」命中全部保护系），都装进同一个集合。
+     * 已启用的附魔规则：附魔 ID（minecraft:xxx）+ 最低等级（1 = 任意等级）。
+     * 通常由模块侧从 EnchantList + 各附魔等级设置构建。
      */
     public record BookRule(Set<String> enchantIds, int minLevel) {}
 
     /**
      * 附魔书是否命中任一规则（任一附魔达标即命中，宽松策略，用户确认）。
      *
-     * @param rules        已解析规则
+     * @param rules        已启用规则
      * @param bookEnchants 书内附魔：附魔 ID（minecraft:xxx）→ 等级
      */
     public static boolean bookMatches(List<BookRule> rules, Map<String, Integer> bookEnchants) {
@@ -102,7 +68,7 @@ public final class TrashLogic {
             if (rule == null || rule.enchantIds() == null || rule.enchantIds().isEmpty()) continue;
             for (Map.Entry<String, Integer> e : bookEnchants.entrySet()) {
                 if (!rule.enchantIds().contains(e.getKey())) continue;
-                if (e.getValue() >= rule.minLevel()) return true; // minLevel 0 = 任意等级必达
+                if (e.getValue() >= rule.minLevel()) return true;
             }
         }
         return false;
