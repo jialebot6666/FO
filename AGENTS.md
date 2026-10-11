@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.20`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.21`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -91,6 +91,16 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     整本全留/全丢 = 把「附魔书」物品加进/排除出物品列表（物品列表含 ENCHANTED_BOOK 即命中全部书）。
     纯逻辑：行解析 `TrashLogic.parseRuleLine` + 命中 `TrashLogic.bookMatches` + 目录匹配
     `BookRuleIndex.resolve` 均可单测；无法识别的行启动时聊天栏提示一次。
+  - ✅ V6.21 已完成：**附魔书规则改为每附魔一条设置**（V6.20 的文本规则要打字，用户不认可；
+    方案经用户确认后实施）。删除文本规则（`BookRuleIndex` 已删、`parseRuleLine` 已删），
+    改为 `EnchantList` 数据表驱动的 **43 个原版附魔、每附魔一条 IntSetting**（组「附魔书过滤」，
+    中文名、滑条 0~该附魔真实最高等级；0=不启用 / 1=任意等级命中 / 2~max=≥该等级命中）。
+    **数据来源已逐条核实**（铁律 4）：清单与最高等级来自官方客户端 jar 的
+    `data/minecraft/enchantment/*.json`（1.21.11 与 26.1.2 逐条一致，含 26.x 新附魔 lunge/突进）；
+    中文名来自 26.1.2 官方 `assets/minecraft/lang/zh_cn.json`（客户端 jar 不带语言文件，
+    语言文件走资产索引单独下载，需外取）。判定逻辑不变：书内任一附魔达标即命中 →
+    视同「在名单里」走黑白名单；全部 0 = 跟随物品名单。注意：`EnchantListTest` 用官方 43 个
+    ID 清单做锚点断言，未来 MC 新增附魔需同步更新 `EnchantList` 与该测试。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
