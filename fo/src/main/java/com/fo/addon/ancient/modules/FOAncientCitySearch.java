@@ -2,6 +2,7 @@ package com.fo.addon.ancient.modules;
 
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.ancient.core.AncientChestExtractor;
+import com.fo.addon.ancient.core.AncientChestStore;
 import com.fo.addon.ancient.core.AncientEnchantData;
 import com.fo.addon.ancient.core.AncientJigsawSimulator;
 import com.fo.addon.ancient.core.AncientLootEvaluator;
@@ -14,20 +15,33 @@ import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
 import com.fo.addon.utils.AncientCityLocatorLogic;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 
 /**
@@ -35,14 +49,32 @@ import net.minecraft.util.math.BlockPos;
  * 整条链已是**纯 Java 自写实现**（零黑盒）：
  * 种子 → AncientCityLocatorLogic 直接算出候选古城 → cubiomes 只负责群系验证 →
  * AncientJigsawSimulator 重放拼图 → AncientChestExtractor 取箱子坐标与 LootTableSeed →
- * AncientLootEvaluator 自研掷骰判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点。
+ * AncientLootEvaluator 自研掷骰判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点 + 世界内高亮。
+ *
+ * <p>只标记这两样物品的箱子（其余战利品不需要位置）：附魔金=金色、迅捷潜行3=蓝色、两者=紫色。
+ * 命中记录写在本地文件里，跨重启保留；箱子被开掉或被挖掉时，世界高亮与路径点一并删除。
  *
  * <p>半径语义：搜索半径的单位是「区块」，但距离按**方块距离**计算，基准点是城市原点方块坐标。
  * （旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块。）
  */
 public class FOAncientCitySearch extends Module {
+
+    /** 命中记录落盘位置（游戏目录下，每个玩家各存自己的一份）。 */
+    private static final String STORE_FILE_NAME = "fo-ancient-chests.json";
+
+    /**
+     * Xaero 路径点颜色索引。
+     *
+     * <p>按原版 16 色顺序取值：6=金、9=蓝、13=浅紫。⚠️ 这几个索引没有在装了 Xaero 的客户端上实机核对过，
+     * 如果落点颜色不对，改这三个常量即可。
+     */
+    private static final int WAYPOINT_COLOR_GOLD = 6;
+    private static final int WAYPOINT_COLOR_BLUE = 9;
+    private static final int WAYPOINT_COLOR_PURPLE = 13;
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSeed = settings.createGroup("种子设置");
+    private final SettingGroup sgHighlight = settings.createGroup("高亮");
 
     private final Setting<LootTarget> searchTypeSetting;
     private final Setting<GameVersionOption> gameVersionSetting;
@@ -55,10 +87,26 @@ public class FOAncientCitySearch extends Module {
     private final Setting<Boolean> applySeedSetting;
     private final Setting<Boolean> startSearchSetting;
 
+    private final Setting<Boolean> highlightSetting;
+    private final Setting<Integer> highlightRadiusSetting;
+    private final Setting<SettingColor> goldColorSetting;
+    private final Setting<SettingColor> blueColorSetting;
+    private final Setting<SettingColor> purpleColorSetting;
+    private final Setting<Boolean> autoCleanSetting;
+
     private final MinecraftClient mc;
     private Long manualSeed;
     private boolean searching;
     private CompletableFuture<Void> searchTask;
+
+    /** 已找到的目标箱子记录（按作用域分组）。 */
+    private AncientChestStore chestStore = new AncientChestStore();
+    private boolean storeLoaded;
+
+    /** 上一 tick 准星指向的方块，用来判断「刚打开的是哪个箱子」。 */
+    private BlockPos lastTargetedBlock;
+    private boolean wasContainerOpen;
+    private int cleanCooldown;
 
     public FOAncientCitySearch() {
         super(AddonTemplate.CATEGORY, "FO 古城战利品搜索",
@@ -128,16 +176,56 @@ public class FOAncientCitySearch extends Module {
             })
             .build());
 
+        highlightSetting = sgHighlight.add(new BoolSetting.Builder()
+            .name("高亮箱子")
+            .description("走近古城时把命中的箱子画上高亮框（附魔金=金色 / 迅捷潜行3=蓝色 / 两者=紫色）")
+            .defaultValue(true)
+            .build());
+
+        highlightRadiusSetting = sgHighlight.add(new IntSetting.Builder()
+            .name("高亮半径")
+            .description("玩家多少格以内的命中箱子才画高亮框（方块）")
+            .defaultValue(64)
+            .min(8).max(256)
+            .sliderMin(8).sliderMax(256)
+            .build());
+
+        goldColorSetting = sgHighlight.add(new ColorSetting.Builder()
+            .name("附魔金苹果颜色")
+            .description("只有附魔金苹果的箱子所用高亮颜色")
+            .defaultValue(new SettingColor(255, 200, 0, 77))
+            .build());
+
+        blueColorSetting = sgHighlight.add(new ColorSetting.Builder()
+            .name("迅捷潜行3颜色")
+            .description("只有迅捷潜行3 附魔书的箱子所用高亮颜色")
+            .defaultValue(new SettingColor(60, 130, 255, 77))
+            .build());
+
+        purpleColorSetting = sgHighlight.add(new ColorSetting.Builder()
+            .name("两者都有颜色")
+            .description("同时有附魔金苹果和迅捷潜行3 的箱子所用高亮颜色")
+            .defaultValue(new SettingColor(170, 60, 255, 77))
+            .build());
+
+        autoCleanSetting = sgHighlight.add(new BoolSetting.Builder()
+            .name("自动清理已开箱子")
+            .description("箱子被打开或被挖掉后，自动删掉它的高亮框和 Xaero 路径点")
+            .defaultValue(true)
+            .build());
+
         searching = false;
         manualSeed = null;
     }
 
     @Override
     public void onActivate() {
+        loadStore();
         if (autoSearchSetting.get()) {
             startSearch();
         }
         info("古城附魔金搜索模块已启用");
+        reportStoredMarks();
     }
 
     @Override
@@ -156,6 +244,145 @@ public class FOAncientCitySearch extends Module {
             setSearching(false);
             searchTask = null;
             startSearchSetting.set(false);
+        }
+        if (autoCleanSetting.get()) {
+            cleanupStaleMarks();
+        }
+    }
+
+    /** 世界内高亮：只画玩家附近的命中箱子，颜色按命中类型区分。 */
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!highlightSetting.get() || mc.player == null || mc.world == null) return;
+        String scope = currentScope();
+        if (scope == null) return;
+        if (chestStore.isEmpty(scope)) return;
+
+        BlockPos p = mc.player.getBlockPos();
+        List<AncientChestStore.Mark> near = AncientChestStore.within(
+            chestStore.marks(scope), p.getX(), p.getY(), p.getZ(), highlightRadiusSetting.get());
+        for (AncientChestStore.Mark m : near) {
+            SettingColor color = colorOf(m.label());
+            event.renderer.box(new BlockPos(m.x(), m.y(), m.z()), color, color, ShapeMode.Both, 0);
+        }
+    }
+
+    /** 命中类型 → 高亮/路径点颜色。 */
+    private SettingColor colorOf(String label) {
+        if (AncientChestStore.LABEL_GOLD.equals(label)) return goldColorSetting.get();
+        if (AncientChestStore.LABEL_SWIFT.equals(label)) return blueColorSetting.get();
+        return purpleColorSetting.get();
+    }
+
+    private int waypointColorOf(String label) {
+        if (AncientChestStore.LABEL_GOLD.equals(label)) return WAYPOINT_COLOR_GOLD;
+        if (AncientChestStore.LABEL_SWIFT.equals(label)) return WAYPOINT_COLOR_BLUE;
+        return WAYPOINT_COLOR_PURPLE;
+    }
+
+    // ==================== 命中记录的落盘与清理 ====================
+
+    /** 当前作用域：服务器地址（单人则「单人」）+ 维度，避免不同服务器/维度的记录互相串。 */
+    private String currentScope() {
+        if (mc.world == null) return null;
+        String server = mc.getCurrentServerEntry() != null
+            ? mc.getCurrentServerEntry().address : "单人";
+        return server + "|" + mc.world.getRegistryKey().getValue();
+    }
+
+    private static Path storePath() {
+        return FabricLoader.getInstance().getGameDir().resolve(STORE_FILE_NAME);
+    }
+
+    private void loadStore() {
+        if (storeLoaded) return;
+        storeLoaded = true;
+        Path path = storePath();
+        try {
+            chestStore = Files.exists(path)
+                ? AncientChestStore.fromJson(Files.readString(path, StandardCharsets.UTF_8))
+                : new AncientChestStore();
+        } catch (IOException | RuntimeException e) {
+            chestStore = new AncientChestStore();
+            warning("读取古城箱子记录失败，已从空记录开始: " + e.getMessage());
+        }
+    }
+
+    private void saveStore() {
+        Path path = storePath();
+        try {
+            Files.writeString(path, chestStore.toJson(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            warning("保存古城箱子记录失败: " + e.getMessage());
+        }
+    }
+
+    /** 启动时报一下本地已有的记录，让玩家知道高亮还在。 */
+    private void reportStoredMarks() {
+        loadStore();
+        String scope = currentScope();
+        if (scope == null) return;
+        int n = chestStore.size(scope);
+        if (n > 0) {
+            info("本地已保存 " + n + " 个古城目标箱子，走近会自动高亮（设置里可关）");
+        }
+    }
+
+    /**
+     * 清理「已经没了」的箱子：箱子被打开，或者被挖掉/换成了别的方块。
+     * 两种情况都把世界高亮与 Xaero 路径点一并删除。
+     */
+    private void cleanupStaleMarks() {
+        if (mc.player == null || mc.world == null) return;
+        String scope = currentScope();
+        if (scope == null || chestStore.isEmpty(scope)) return;
+
+        boolean changed = false;
+
+        // 1) 刚打开容器：用上一 tick 的准星指向判断开的是哪个箱子
+        if (mc.crosshairTarget instanceof BlockHitResult hit) {
+            lastTargetedBlock = hit.getBlockPos();
+        }
+        boolean containerOpen = mc.currentScreen instanceof HandledScreen<?>;
+        if (containerOpen && !wasContainerOpen && lastTargetedBlock != null) {
+            if (chestStore.remove(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ())) {
+                XaeroWaypointBridge.removeWaypointAt(lastTargetedBlock.getX(), lastTargetedBlock.getZ());
+                debug("箱子已打开，删除高亮与路径点: " + lastTargetedBlock.toShortString());
+                changed = true;
+            }
+        }
+        wasContainerOpen = containerOpen;
+
+        // 2) 周期性检查箱子是否还在（限流，别每 tick 扫）
+        if (--cleanCooldown <= 0) {
+            cleanCooldown = 20;
+            BlockPos p = mc.player.getBlockPos();
+            int radius = Math.min(highlightRadiusSetting.get(), 128);
+            for (AncientChestStore.Mark m : AncientChestStore.within(
+                    chestStore.marks(scope), p.getX(), p.getY(), p.getZ(), radius)) {
+                BlockPos pos = new BlockPos(m.x(), m.y(), m.z());
+                if (!isChunkLoaded(pos)) continue;   // 未加载的区块读出来是空气，不能当成被挖了
+                BlockState state = mc.world.getBlockState(pos);
+                if (state.getBlock() instanceof ChestBlock) continue;
+                if (chestStore.remove(scope, m.x(), m.z())) {
+                    XaeroWaypointBridge.removeWaypointAt(m.x(), m.z());
+                    debug("箱子不在了（被挖/被替换），删除高亮与路径点: " + pos.toShortString());
+                    changed = true;
+                }
+            }
+        }
+
+        // 只有真的删掉了东西才写盘，避免每秒一次无谓的磁盘 IO
+        if (changed) {
+            saveStore();
+        }
+    }
+
+    private boolean isChunkLoaded(BlockPos pos) {
+        try {
+            return mc.world.getChunkManager().isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4);
+        } catch (RuntimeException e) {
+            return false;
         }
     }
 
@@ -333,7 +560,8 @@ public class FOAncientCitySearch extends Module {
                 Math.pow(chest.x() - playerPos.getX(), 2)
                     + Math.pow(chest.y() - playerPos.getY(), 2)
                     + Math.pow(chest.z() - playerPos.getZ(), 2));
-            String label = hasGold && hasSwift ? "两者" : hasGold ? "附魔金" : "迅捷3";
+            String label = hasGold && hasSwift ? AncientChestStore.LABEL_BOTH
+                : hasGold ? AncientChestStore.LABEL_GOLD : AncientChestStore.LABEL_SWIFT;
             results.add(new FoundChest(new BlockPos(chest.x(), chest.y(), chest.z()), dist, label));
             debug("箱子命中: " + chest.x() + "," + chest.y() + "," + chest.z() + " -> " + label);
         }
@@ -347,6 +575,21 @@ public class FOAncientCitySearch extends Module {
         }
         results.sort(Comparator.comparingDouble(fc -> fc.distance));
 
+        // 1) 记录落盘（跨重启保留），高亮框与路径点都由这份记录驱动
+        loadStore();
+        String scope = currentScope();
+        int recorded = 0;
+        if (scope != null) {
+            for (FoundChest fc : results) {
+                if (chestStore.add(scope, new AncientChestStore.Mark(
+                        fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.label))) {
+                    recorded++;
+                }
+            }
+            saveStore();
+        }
+
+        // 2) Xaero 路径点：附魔金=金色、迅捷潜行3=蓝色、两者=紫色
         if (!XaeroWaypointBridge.isLibraryLoaded()) {
             warning("Xaero地图模组未安装，无法添加路径点");
         } else {
@@ -357,22 +600,11 @@ public class FOAncientCitySearch extends Module {
                 int added = 0;
                 for (int i = 0; i < results.size(); i++) {
                     FoundChest fc = results.get(i);
-                    String group;
-                    int color;
-                    if ("附魔金".equals(fc.label)) {
-                        group = "金";
-                        color = 14;
-                    } else if ("迅捷3".equals(fc.label)) {
-                        group = "书";
-                        color = 3;
-                    } else {
-                        group = "星";
-                        color = 7; // 紫色独立组（源实现与"金"同为 14）
-                    }
                     String name = showDistanceSetting.get()
                         ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
                         : String.format("%s #%d", fc.label, i + 1);
-                    XaeroWaypointBridge.addWaypoint(fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), name, group, color);
+                    XaeroWaypointBridge.addWaypoint(fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(),
+                        name, fc.label, waypointColorOf(fc.label));
                     added++;
                 }
                 info("已添加 " + added + " 个位置到Xaero路径点");
@@ -380,7 +612,7 @@ public class FOAncientCitySearch extends Module {
         }
 
         info("=".repeat(50));
-        info("搜索完成！找到 " + results.size() + " 个箱子:");
+        info("搜索完成！找到 " + results.size() + " 个箱子（新增记录 " + recorded + " 个）:");
         info("=".repeat(50));
         for (int i = 0; i < results.size(); i++) {
             FoundChest fc = results.get(i);
@@ -393,7 +625,8 @@ public class FOAncientCitySearch extends Module {
             }
         }
         info("=".repeat(50));
-        info("提示: 路径点已添加到Xaero地图");
+        info("高亮：附魔金=金色 / 迅捷潜行3=蓝色 / 两者=紫色；走近 " + highlightRadiusSetting.get() + " 格内自动显示");
+        info("已开或已被挖掉的箱子会自动删掉高亮与路径点");
         info("=".repeat(50));
     }
 
