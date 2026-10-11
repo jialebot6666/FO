@@ -7,6 +7,7 @@ import com.fo.addon.ancient.core.AncientEnchantData;
 import com.fo.addon.ancient.core.AncientJigsawSimulator;
 import com.fo.addon.ancient.core.AncientLootEvaluator;
 import com.fo.addon.ancient.core.AncientLootTable;
+import com.fo.addon.ancient.core.AncientOpenedChestPolicy;
 import com.fo.addon.ancient.core.AncientResourceSource;
 import com.fo.addon.ancient.core.AncientSearchLogic;
 import com.fo.addon.ancient.core.CubiomesJNI;
@@ -23,7 +24,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -41,10 +44,12 @@ import meteordevelopment.orbit.EventHandler;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.Heightmap;
 
 /**
  * FO 古城战利品搜索（半自动）。
@@ -95,6 +100,7 @@ public class FOAncientCitySearch extends Module {
     private final Setting<SettingColor> blueColorSetting;
     private final Setting<SettingColor> purpleColorSetting;
     private final Setting<Boolean> autoCleanSetting;
+    private final Setting<Boolean> beamSetting;
     private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
 
     private final MinecraftClient mc;
@@ -129,6 +135,18 @@ public class FOAncientCitySearch extends Module {
     private BlockPos lastTargetedBlock;
     private boolean wasContainerOpen;
     private int cleanCooldown;
+
+    /**
+     * 「柱子地表 Y」缓存：key = (x<<32)|z。每根柱子只扫一次地表，维度切换时整体失效。
+     */
+    private final Map<Long, Integer> groundCache = new HashMap<>();
+    private Object groundCacheWorld;
+
+    /**
+     * 服务端是否会同步箱子的 LootTable 字段给客户端（自适应学习，见 {@link AncientOpenedChestPolicy}）。
+     * 只有确认同步后，才允许凭「lootTable == null」判定箱子被开过。
+     */
+    private boolean lootSyncConfirmed;
 
     public FOAncientCitySearch() {
         super(AddonTemplate.CATEGORY, "FO 古城战利品搜索",
@@ -239,11 +257,19 @@ public class FOAncientCitySearch extends Module {
             .defaultValue(true)
             .build());
 
+        beamSetting = sgHighlight.add(new BoolSetting.Builder()
+            .name("目标柱子")
+            .description("给命中箱子画一根通到地表的同色细柱（Baritone 风格、穿墙可见），"
+                + "方便从地表找到挖掘点；可见半径与「高亮半径」共用")
+            .defaultValue(true)
+            .build());
+
         waypointChannelSetting = sgHighlight.add(new EnumSetting.Builder<XaeroWaypointBridge.Preference>()
             .name("路径点写入方式")
-            .description("官方第三方接口：路径点挂在独立来源下，不写进你自己的路径点文件（需 Xaero 26.x）；"
-                + "玩家路径点集：等同于你自己按 B 加的路径点，可管理可传送，但会进你的路径点列表（Xaero 24.7.1+）")
-            .defaultValue(XaeroWaypointBridge.Preference.AUTO)
+            .description("玩家路径点集（默认）：等同于你自己按 B 加的路径点，可管理可传送，会进你的路径点列表（Xaero 24.7.1+）。"
+                + "官方第三方接口：路径点挂在独立来源下，不写进你自己的路径点文件（需 Xaero 26.x）。"
+                + "不想让这些点显示在小地图上，可在 Xaero 小地图设置里单独关闭小地图的路径点显示，世界地图不受影响")
+            .defaultValue(XaeroWaypointBridge.Preference.WAYPOINT_SET)
             .build());
 
         searching = false;
@@ -269,6 +295,18 @@ public class FOAncientCitySearch extends Module {
             setSearching(false);
             info("搜索已取消");
         }
+        // 关闭模块：把本模块写入的 Xaero 路径点全部收掉（按记录坐标逐个删，
+        // 不会碰你手动加的点）。本地记录保留，重新开启模块时会验证并重写路径点。
+        if (mc.world != null) {
+            String scope = currentScope();
+            if (scope != null && !chestStore.isEmpty(scope)) {
+                int removed = clearWaypointsOf(chestStore.marks(scope));
+                if (removed > 0) {
+                    info("已移除 " + removed + " 个 Xaero 路径点（本地记录保留，重新开启模块可恢复）");
+                }
+            }
+        }
+        groundCache.clear();
         info("古城附魔金搜索模块已禁用");
     }
 
@@ -306,6 +344,52 @@ public class FOAncientCitySearch extends Module {
         for (AncientChestStore.Mark m : near) {
             SettingColor color = colorOf(m.label());
             event.renderer.box(new BlockPos(m.x(), m.y(), m.z()), color, color, ShapeMode.Both, 0);
+            if (beamSetting.get()) {
+                drawBeam(event, m.x(), m.y(), m.z(), color);
+            }
+        }
+    }
+
+    /**
+     * Baritone 风格的目标柱：从箱子顶画到地表，颜色与高亮一致。
+     *
+     * <p>穿墙可见是刻意的 —— {@code event.renderer} 走 Meteor 的 {@code NO_DEPTH_TEST}
+     * 管线（另一个 {@code depthRenderer} 才受地形遮挡）。古城箱子在 y≈-51 的地下，
+     * 柱子要从地表就能看到才有「找挖掘点」的意义。地表 Y 每个箱子只扫一次（缓存）。
+     */
+    private void drawBeam(Render3DEvent event, int x, int y, int z, SettingColor color) {
+        Object dim = mc.world != null ? mc.world.getRegistryKey() : null;
+        if (dim != groundCacheWorld) {
+            groundCache.clear();
+            groundCacheWorld = dim;
+        }
+        long key = ((long) x << 32) | (z & 0xFFFFFFFFL);
+        Integer ground = groundCache.get(key);
+        if (ground == null) {
+            ground = findSurfaceY(x, z);
+            if (ground == null) {
+                return; // 区块未加载等，本帧不画柱子（高亮框照画）
+            }
+            groundCache.put(key, ground);
+        }
+        if (ground <= y + 1) {
+            return; // 地表不高于箱顶（城市露出地面等），柱子没有意义
+        }
+        double half = 0.0625; // 全宽 1/8 格，Baritone 风格细柱
+        event.renderer.box(x + 0.5 - half, y + 1, z + 0.5 - half,
+            x + 0.5 + half, ground, z + 0.5 + half, color, color, ShapeMode.Both, 0);
+    }
+
+    /** 箱子正上方的地表 Y（首个非空气方块之上）。区块未加载或异常时返回 null。 */
+    private Integer findSurfaceY(int x, int z) {
+        BlockPos pos = new BlockPos(x, mc.world.getBottomY(), z);
+        if (!isChunkLoaded(pos)) {
+            return null;
+        }
+        try {
+            return mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, x, z);
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
@@ -359,18 +443,104 @@ public class FOAncientCitySearch extends Module {
         }
     }
 
-    /** 启动时报一下本地已有的记录，让玩家知道高亮还在。 */
+    /**
+     * 开启模块时的恢复流程：本地记录 → 验证 → 重新写路径点。
+     *
+     * <ol>
+     *   <li>记录带的种子与当前世界对不上 → 整批清空（属于另一个世界）；</li>
+     *   <li>逐个验证：不是箱子（被挖/被替换）→ 删；确认被开过（战利品已生成）→ 删；</li>
+     *   <li>幸存的记录重新写进 Xaero 路径点（关闭模块时它们被收掉了）。</li>
+     * </ol>
+     *
+     * <p>「开过」的判定是 best-effort：只有确认服务端会把 LootTable 字段同步给客户端
+     * （至少见过一个非空的）之后，才允许凭 null 判「已开」；判定不了就保留标记。
+     * 模块开着时开的箱子当时就会被删掉，不依赖这一步。
+     */
     private void reportStoredMarks() {
         loadStore();
         String scope = currentScope();
         if (scope == null) return;
-        int n = chestStore.size(scope);
-        if (n > 0) {
-            Long seed = chestStore.scopeSeed(scope);
-            info("本地已保存 " + n + " 个古城目标箱子"
-                + (seed != null ? "（种子 " + seed + "）" : "") + "，走近会自动高亮（设置里可关）；"
-                + "重新搜索会整体替换这批记录");
+
+        Long storedSeed = chestStore.scopeSeed(scope);
+        Long currentSeed = currentSeedGuess();
+        if (storedSeed != null && currentSeed != null && !storedSeed.equals(currentSeed)) {
+            int n = chestStore.size(scope);
+            chestStore.clear(scope);
+            saveStore();
+            info("本地记录（" + n + " 个）属于另一个种子（" + storedSeed + "），已清空；请重新搜索");
+            return;
         }
+
+        List<AncientChestStore.Mark> marks = chestStore.marks(scope);
+        if (marks.isEmpty()) return;
+
+        // 第一遍：探测服务端是否会同步 LootTable 字段（见到一个非空的就实锤）
+        boolean syncsLoot = lootSyncConfirmed;
+        for (AncientChestStore.Mark m : marks) {
+            BlockPos pos = new BlockPos(m.x(), m.y(), m.z());
+            if (!isChunkLoaded(pos)) continue;
+            if (!(mc.world.getBlockState(pos).getBlock() instanceof ChestBlock)) continue;
+            if (mc.world.getBlockEntity(pos) instanceof LootableContainerBlockEntity lootable
+                && lootable.getLootTable() != null) {
+                syncsLoot = true;
+                break;
+            }
+        }
+        lootSyncConfirmed = syncsLoot;
+
+        // 第二遍：逐个验证
+        List<AncientChestStore.Mark> alive = new ArrayList<>();
+        int removedMined = 0;
+        int removedOpened = 0;
+        for (AncientChestStore.Mark m : marks) {
+            BlockPos pos = new BlockPos(m.x(), m.y(), m.z());
+            if (!isChunkLoaded(pos)) {
+                alive.add(m);   // 区块没加载，无从验证，先保留
+                continue;
+            }
+            if (!(mc.world.getBlockState(pos).getBlock() instanceof ChestBlock)) {
+                removedMined++; // 被挖/被替换
+                continue;
+            }
+            if (mc.world.getBlockEntity(pos) instanceof LootableContainerBlockEntity lootable) {
+                AncientOpenedChestPolicy.Decision d =
+                    AncientOpenedChestPolicy.decide(syncsLoot, lootable.getLootTable() != null);
+                if (d == AncientOpenedChestPolicy.Decision.UNOPENED) {
+                    alive.add(m);
+                } else if (d == AncientOpenedChestPolicy.Decision.OPENED) {
+                    removedOpened++;
+                } else {
+                    alive.add(m);   // 判定不了（服务端不下发该字段），保留
+                }
+            } else {
+                alive.add(m);   // 拿不到块实体（少见），保留
+            }
+        }
+
+        if (removedMined + removedOpened > 0) {
+            chestStore.clear(scope);
+            if (storedSeed != null) {
+                chestStore.setScopeSeed(scope, storedSeed);
+            }
+            for (AncientChestStore.Mark m : alive) {
+                chestStore.add(scope, m);
+            }
+            saveStore();
+        }
+
+        if (alive.isEmpty()) {
+            info("本地记录已全部失效（被挖 " + removedMined + " 个，已开 " + removedOpened + " 个），请重新搜索");
+            return;
+        }
+
+        info("本地已保存 " + alive.size() + " 个古城目标箱子，走近会自动高亮；正在把路径点写回 Xaero"
+            + "（已跳过被挖 " + removedMined + " 个、已开 " + removedOpened + " 个）...");
+        List<PendingMark> batch = new ArrayList<>();
+        for (int i = 0; i < alive.size(); i++) {
+            AncientChestStore.Mark m = alive.get(i);
+            batch.add(new PendingMark(m.x(), m.y(), m.z(), m.label(), m.label() + " #" + (i + 1)));
+        }
+        writeWaypoints(batch);
     }
 
     /**
@@ -427,7 +597,24 @@ public class FOAncientCitySearch extends Module {
                 BlockPos pos = new BlockPos(m.x(), m.y(), m.z());
                 if (!isChunkLoaded(pos)) continue;   // 未加载的区块读出来是空气，不能当成被挖了
                 BlockState state = mc.world.getBlockState(pos);
-                if (state.getBlock() instanceof ChestBlock) continue;
+                if (state.getBlock() instanceof ChestBlock) {
+                    // 顺手自适应学习「服务端是否下发 LootTable」；确认下发后，
+                    // 「null = 已开过」能抓到关着模块时被开掉的箱子（区块重载后字段已被服务端清空）
+                    if (mc.world.getBlockEntity(pos) instanceof LootableContainerBlockEntity lootable) {
+                        boolean present = lootable.getLootTable() != null;
+                        AncientOpenedChestPolicy.Decision d =
+                            AncientOpenedChestPolicy.decide(lootSyncConfirmed, present);
+                        if (present) {
+                            lootSyncConfirmed = true;
+                        } else if (d == AncientOpenedChestPolicy.Decision.OPENED
+                            && chestStore.remove(scope, m.x(), m.z())) {
+                            XaeroWaypointBridge.removeWaypointAt(m.x(), m.z());
+                            debug("箱子已开过（战利品已生成），删除高亮与路径点: " + pos.toShortString());
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
                 if (chestStore.remove(scope, m.x(), m.z())) {
                     XaeroWaypointBridge.removeWaypointAt(m.x(), m.z());
                     debug("箱子不在了（被挖/被替换），删除高亮与路径点: " + pos.toShortString());
@@ -698,6 +885,9 @@ public class FOAncientCitySearch extends Module {
         if (scope != null) {
             if (storeReplacePending) {
                 storeReplacePending = false;
+                // 本轮结果要【整体替换】旧记录：先把上一批写入的路径点撤掉再清记录，
+                // 否则换种子重搜后旧路径点会一直残留（高亮有种子过滤，路径点此前没有）
+                clearWaypointsOf(chestStore.marks(scope));
                 chestStore.clear(scope);
             }
             if (activeSeed != null) {
@@ -760,6 +950,17 @@ public class FOAncientCitySearch extends Module {
             ? "官方第三方接口（不占用你自己的路径点列表）"
             : "玩家路径点集（会出现在你自己的路径点列表里）";
         info("已写入 " + added + "/" + batch.size() + " 个路径点到 Xaero，通道: " + channelName);
+    }
+
+    /** 把本模块写入的路径点撤掉（按记录坐标逐个删；桥内部两条通道都会尝试）。 */
+    private int clearWaypointsOf(List<AncientChestStore.Mark> marks) {
+        int removed = 0;
+        for (AncientChestStore.Mark m : marks) {
+            if (XaeroWaypointBridge.removeWaypointAt(m.x(), m.z())) {
+                removed++;
+            }
+        }
+        return removed;
     }
 
     /** 应用种子开关回调：解析输入并写入手动种子。 */
