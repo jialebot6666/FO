@@ -25,6 +25,9 @@ public interface AncientResourceSource {
     /** mod 内拼图池数据的资源根。 */
     String TEMPLATE_POOL_PREFIX = "fo/ancient/template_pool/";
 
+    /** mod 内古城全部数据（结构 / 拼图池 / 战利品表 / 附魔 / 标签）的资源根。 */
+    String ANCIENT_PREFIX = "fo/ancient/";
+
     /** 数据源身份，用于缓存键隔离。 */
     String id();
 
@@ -49,6 +52,25 @@ public interface AncientResourceSource {
     /** mod 内置的拼图池数据源（jar 内 {@code fo/ancient/template_pool/}）。 */
     static AncientResourceSource bundledPools() {
         return classpath(AncientResourceSource.class.getClassLoader(), TEMPLATE_POOL_PREFIX);
+    }
+
+    /**
+     * mod 内置的古城全量数据源（jar 内 {@code fo/ancient/}）。
+     *
+     * <p>相对路径形如 {@code loot_table/chests/ancient_city.json}、
+     * {@code enchantment/swift_sneak.json}、{@code tags/enchantment/on_random_loot.json}、
+     * {@code tags/item/hoes.json}、{@code index.json}。
+     */
+    static AncientResourceSource bundledAncient() {
+        return classpath(AncientResourceSource.class.getClassLoader(), ANCIENT_PREFIX);
+    }
+
+    /** 读一个 UTF-8 文本资源；不存在返回 {@code null}。 */
+    default String readText(String relativePath) throws IOException {
+        try (InputStream in = open(relativePath)) {
+            if (in == null) return null;
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
     }
 
     /** 目录实现。 */

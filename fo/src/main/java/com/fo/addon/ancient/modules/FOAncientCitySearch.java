@@ -1,6 +1,12 @@
 package com.fo.addon.ancient.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.ancient.core.AncientChestExtractor;
+import com.fo.addon.ancient.core.AncientEnchantData;
+import com.fo.addon.ancient.core.AncientJigsawSimulator;
+import com.fo.addon.ancient.core.AncientLootEvaluator;
+import com.fo.addon.ancient.core.AncientLootTable;
+import com.fo.addon.ancient.core.AncientResourceSource;
 import com.fo.addon.ancient.core.AncientSearchLogic;
 import com.fo.addon.ancient.core.CubiomesJNI;
 import com.fo.addon.ancient.core.FoundChest;
@@ -8,15 +14,6 @@ import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
 import com.fo.addon.utils.AncientCityLocatorLogic;
-import com.w.d.l.McVersion;
-import com.w.d.w.j.Vec3i;
-import com.w.d.w.x.Pair;
-import com.w.d.w.x.Triple;
-import com.w.d.x.WorldSeedFunctions;
-import com.w.j.w.LootTable;
-import com.w.j.w.VersionedRandom;
-import com.w.j.w.l.LootItem;
-import com.w.j.w.l.LootStack;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -32,13 +29,13 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
-import w.j.AncientCityLootScanner;
 
 /**
  * FO 古城战利品搜索（半自动）。
- * 移植自 misaka 古城模块，但古城定位已改为**纯 Java 自写实现**：
- * 种子 → AncientCityLocatorLogic 直接算出候选古城（零原生依赖）→ cubiomes 做群系验证 →
- * 黑盒重放古城结构并掷战利品表判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点。
+ * 整条链已是**纯 Java 自写实现**（零黑盒）：
+ * 种子 → AncientCityLocatorLogic 直接算出候选古城 → cubiomes 只负责群系验证 →
+ * AncientJigsawSimulator 重放拼图 → AncientChestExtractor 取箱子坐标与 LootTableSeed →
+ * AncientLootEvaluator 自研掷骰判定 附魔金苹果 / 迅捷潜行3 → 结果输出聊天 + Xaero 路径点。
  *
  * <p>半径语义：搜索半径的单位是「区块」，但距离按**方块距离**计算，基准点是城市原点方块坐标。
  * （旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块。）
@@ -224,6 +221,10 @@ public class FOAncientCitySearch extends Module {
         // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
         //（旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块）。
         info("搜索参数: 半径=" + radius + "区块, 种子=" + seed);
+        if (gameVersionSetting.get() == GameVersionOption.FROM_26_1) {
+            warning("「>= 26.1」的战利品表尚未自写实现：当前仍按 1.21.11 的表掷骰，结果可能不准。");
+            warning("需要 26.x 的 loot_table 与 random_sequence 子系统，计划在后续版本补齐。");
+        }
         List<AncientCityLocatorLogic.City> cities =
             AncientCityLocatorLogic.findNearby(seed, playerPos.getX(), playerPos.getZ(), radius);
         info("定位完成: 半径内候选古城 " + cities.size() + " 座");
@@ -267,7 +268,7 @@ public class FOAncientCitySearch extends Module {
                 found++;
                 // 结构重放仍走黑盒（V6.8 换成纯 Java 后即可删除黑盒 jar）。
                 // 已用独立参考实现交叉验证过：纯 Java 管线给出的箱子集与黑盒完全一致。
-                List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, McVersion.V1_19);
+                List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos);
                 debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
                 results.addAll(chests);
             } catch (Throwable t) {
@@ -290,99 +291,53 @@ public class FOAncientCitySearch extends Module {
     }
 
     /**
-     * 重放一座古城的结构并收集箱子。
+     * 重放一座古城的结构、取出箱子并掷骰判定（纯 Java，无黑盒）。
      *
-     * @param cityChunkX 古城所在【区块】X（黑盒内部会自己 <<4 换成方块坐标，这里不能再提前换算）
+     * @param cityChunkX 古城所在【区块】X（与 {@code AncientCityLocatorLogic.City.chunkX()} 一致）
      * @param cityChunkZ 古城所在【区块】Z
      */
-    private List<FoundChest> chestsOfOneCity(long seed, int cityChunkX, int cityChunkZ, BlockPos playerPos, McVersion mcVersion) {
+    private List<FoundChest> chestsOfOneCity(long seed, int cityChunkX, int cityChunkZ, BlockPos playerPos) {
         List<FoundChest> results = new ArrayList<>();
-        AncientCityLootScanner scanner = new AncientCityLootScanner();
-        WorldSeedFunctions wsf = new WorldSeedFunctions();
-        scanner.generateAt(seed, cityChunkX, cityChunkZ, wsf);
-        debug("古城结构生成完成: 区块 " + cityChunkX + "," + cityChunkZ);
+        AncientResourceSource structures = AncientResourceSource.bundledStructures();
+        AncientResourceSource pools = AncientResourceSource.bundledPools();
+        AncientResourceSource dataSource = AncientResourceSource.bundledAncient();
 
-        if (gameVersionSetting.get() == GameVersionOption.FROM_26_1) {
-            List<?> randomSeq = scanner.collectChestsRandomSequence();
-            debug("random_sequence 箱子数: " + randomSeq.size());
-            processTriples(randomSeq, results, playerPos);
-        }
-        try {
-            List<?> legacy = scanner.collectChestsLegacy();
-            debug("legacy 箱子数: " + legacy.size());
-            processTriples(legacy, results, playerPos);
-        } catch (Exception e) {
-            warning("古城生成失败: " + e.getMessage());
-            debugStack(e);
-        }
-        return results;
-    }
+        List<AncientJigsawSimulator.Piece> pieces =
+            AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
+        List<AncientChestExtractor.Chest> chests =
+            AncientChestExtractor.extract(pieces, seed, structures);
+        debug("古城结构生成完成: 区块 " + cityChunkX + "," + cityChunkZ
+            + " 拼图块 " + pieces.size() + " 箱子 " + chests.size());
 
-    private void processTriples(List<?> triples, List<FoundChest> results, BlockPos playerPos) {
-        for (Object obj : triples) {
-            Triple triple = (Triple) obj;
-            Vec3i pos = (Vec3i) triple.getFirst();
-            LootTable lootTable = (LootTable) triple.getSecond();
-            long lootSeed = (Long) triple.getThird();
+        AncientEnchantData enchantData = AncientEnchantData.bundled();
+        LootTarget target = searchTypeSetting.get();
 
-            LootTarget target = searchTypeSetting.get();
-            boolean hasGold = (target == LootTarget.ENCHANTED_GOLDEN_APPLE || target == LootTarget.BOTH)
-                && hasEnchantedGoldenApple(lootTable, lootSeed);
-            boolean hasSwift = (target == LootTarget.SWIFT_SNEAK_3 || target == LootTarget.BOTH)
-                && hasSwiftSneakThree(lootTable, lootSeed);
+        for (AncientChestExtractor.Chest chest : chests) {
+            String lootTableId = chest.lootTable().replace("minecraft:", "");
+            AncientLootTable table = AncientLootTable.load(lootTableId, dataSource);
+            List<AncientLootEvaluator.ItemStack> items =
+                AncientLootEvaluator.roll(table, chest.seed(), enchantData);
+
+            // 与旧实现一致：「两者都搜索」是「任一命中就收」，不是「必须同时命中」
+            boolean hasGold = target != LootTarget.SWIFT_SNEAK_3
+                && AncientLootEvaluator.hasEnchantedGoldenApple(items);
+            boolean hasSwift = target != LootTarget.ENCHANTED_GOLDEN_APPLE
+                && AncientLootEvaluator.hasSwiftSneak(items, 3);
             if (!hasGold && !hasSwift) {
-                debug("箱子 " + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+                debug("箱子 " + chest.x() + "," + chest.y() + "," + chest.z()
                     + " 判定: 附魔金=" + hasGold + " 迅捷3=" + hasSwift + "（无目标物品，跳过）");
                 continue;
             }
 
             double dist = Math.sqrt(
-                Math.pow(pos.getX() - playerPos.getX(), 2)
-                    + Math.pow(pos.getY() - playerPos.getY(), 2)
-                    + Math.pow(pos.getZ() - playerPos.getZ(), 2));
+                Math.pow(chest.x() - playerPos.getX(), 2)
+                    + Math.pow(chest.y() - playerPos.getY(), 2)
+                    + Math.pow(chest.z() - playerPos.getZ(), 2));
             String label = hasGold && hasSwift ? "两者" : hasGold ? "附魔金" : "迅捷3";
-            results.add(new FoundChest(new BlockPos(pos.getX(), pos.getY(), pos.getZ()), dist, label));
-            debug("箱子命中: " + pos.getX() + "," + pos.getY() + "," + pos.getZ() + " -> " + label);
+            results.add(new FoundChest(new BlockPos(chest.x(), chest.y(), chest.z()), dist, label));
+            debug("箱子命中: " + chest.x() + "," + chest.y() + "," + chest.z() + " -> " + label);
         }
-    }
-
-    /** 掷战利品表，判定是否包含附魔金苹果（掷骰固定按 1.21 版本文本种子，与 misaka 一致）。 */
-    private boolean hasEnchantedGoldenApple(LootTable lootTable, long lootSeed) {
-        try {
-            VersionedRandom rand = new VersionedRandom(lootSeed, McVersion.V1_21);
-            for (Object obj : lootTable.generateLoot(rand)) {
-                LootStack stack = (LootStack) obj;
-                if ("enchanted_golden_apple".equals(stack.getItem().getItemId())) {
-                    return true;
-                }
-            }
-        } catch (Exception e) {
-            // 忽略
-        }
-        return false;
-    }
-
-    /** 掷战利品表，判定是否包含迅捷潜行3 附魔书。 */
-    private boolean hasSwiftSneakThree(LootTable lootTable, long lootSeed) {
-        try {
-            VersionedRandom rand = new VersionedRandom(lootSeed, McVersion.V1_21);
-            for (Object obj : lootTable.generateLoot(rand)) {
-                LootStack stack = (LootStack) obj;
-                LootItem item = stack.getItem();
-                if (!"swift_sneak_book".equals(item.getItemId())) {
-                    continue;
-                }
-                for (Object po : item.getEnchantments()) {
-                    Pair pair = (Pair) po;
-                    if ("swift_sneak".equals(pair.getFirst()) && (Integer) pair.getSecond() == 3) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // 忽略
-        }
-        return false;
+        return results;
     }
 
     private void reportResults(List<FoundChest> results, BlockPos playerPos) {

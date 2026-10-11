@@ -1,7 +1,7 @@
 # FO 版本归档
 
 每个修复/功能版本交付前，把构建产物（`fo/build/libs/FO-<mod版本>.jar`，当前
-`FO-V6.7.jar`）复制为 `FO-V<版本号>.jar`（不带 commit 短哈希）并提交到本目录，
+`FO-V6.8.jar`）复制为 `FO-V<版本号>.jar`（不带 commit 短哈希）并提交到本目录，
 保证版本留存。mod 版本号在 `fo/gradle/libs.versions.toml` 的 `mod-version`，升版时同步改。
 
 ## 命名规范
@@ -108,6 +108,7 @@ V2.4–V4.62 与 V6.0 的说明按各版本 commit 原文回追，只去掉了�
 | FO-V6.5.jar | V6.5 | 修复古城搜索中断：Meteor info() 内部 String.format，进度消息裸 %（%）抛 UnknownFormatConversionException（Conversion = ')'）——已转义 %%；新增「调试模式」开关：输出 DLL 加载/生成器/城市定位/箱子判定明细 + 完整异常堆栈到聊天 |
 | FO-V6.6.jar | V6.6 | 修正 V6.4 的坐标空间错误（V6.4 说明里「距离判定对齐原版方块坐标」其实对齐反了）：搜索半径单位是区块，misaka 原实现在用 <<4 后的方块坐标复核 isViableAncientCity 之后会**再取回区块坐标**做距离判定并传给结构重放。V6.4~V6.5 直接拿方块距离比区块半径，有效半径被压成 1/16（默认 1000 区块只剩约 62 区块），且把方块坐标传给 generateAt 造成二次 <<4。现统一走 AncientSearchLogic.chunkDistance / blockToChunk，新增 4 条坐标回归测试 |
 | FO-V6.7.jar | V6.7 | 古城「彻底零原生依赖」第 1 步：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`，每 24×24 区块一个区域、LCG 推偏移、setLargeFeatureSeed 推旋转与起始件），不再走 cubiomes 的 region 扫描；**结构数据入包**（MC 1.21.11 客户端 jar 的 58 个古城结构 NBT + 7 个拼图池 JSON，共 281.8 KiB），新增 `ancient/core/AncientResourceSource` 从 jar 内直读（`DirectoryResourceSource` 供测试与解压目录、`ClasspathResourceSource` 供运行时），不再需要解压临时目录；顺带修掉两个隐患（`AncientTemplate/AncientPool` 的缓存改 `ConcurrentHashMap`、缓存键带上数据源身份）。半径语义按用户拍板改为**新语义**：半径单位仍是区块，但距离按方块距离、基准点为城市原点（旧实现是区块距离、基准点原点 + 8，两者在半径边界差半个区块）。新增黄金回归测试 `AncientCityGoldenTest`：期望值来自独立参考实现 zychen027/AncientCityLootPredictor（纯 Python），5 座古城 89/100/101/87/92 个拼图块、18/26/28/21/20 共 113 个箱子的坐标+LootTableSeed+战利品表逐项全等，且**不依赖黑盒 jar**（V6.8 删黑盒后依然有效）；新增 `AncientResourceSourceTest` 覆盖资源加载/缺失退化/缓存数据源隔离/并发安全。36 套件 255 测试全绿；构建产物 3.05 MiB |
+| FO-V6.8.jar | V6.8 | 古城「彻底零原生依赖」第 2 步：**战利品掷骰改为自研实现，删掉黑盒 jar**。新增 `ancient/core/AncientLootTable`（战利品表解析）、`AncientEnchantData`（附魔与标签数据 + 标签递归展开）、`AncientEnchantAlgorithm`（附魔台算法：getAvailableEnchantmentResults / selectEnchantment / 互斥过滤）、`AncientLootEvaluator`（池掷次数 → 加权抽条目 → 逐个函数 → 命中判定）。数据入包：2 张战利品表 + 43 个附魔 + 22 个附魔标签 + 32 个可达物品标签 + `index.json` 索引（共 107 个文件，来自 MC 1.21.11 客户端 jar）。**删掉 `libs/fo-ancient-blackbox.jar`（657 个混淆类，压缩 890 KiB）**，黑盒里的两个 Windows DLL 抽到 `src/main/resources/natives/windows/` 继续供群系验证用，jar 从 3.19 MiB 降到 **1.98 MiB**。新增 `AncientLootEvaluatorTest` 把 113 个箱子的掷骰结果逐箱锁死（坐标+命中标签+完整物品清单），另附附魔标签语义、互斥规则、RNG 退化分支等单测，37 套件 261 测试全绿。**等价性验证**：本实现与参考实现 zychen027/AncientCityLootPredictor 在同一份 MC 1.21.11 数据下做到 **113/113 逐箱全等**（物品清单 + 附魔清单），并据此修正了参考实现的两处偏差（`enchant_with_levels` 忽略 options 用全量附魔、`enchant_randomly` 的标签不展开嵌套），这两处会改变 113 箱里 21 箱的物品清单。同时发现参考实现自带的是 MC 26.1.2 的战利品表（比 1.21.11 少一个 `minecraft:name_tag` 条目），本版以 mod 自身版本 1.21.11 为准。**已知缺口**：「>= 26.1」选项对应的 26.x 战利品表与 random_sequence 子系统尚未自写，选中该选项时会明确提示 |
 
 > 备注：8430096（AutoTrash 白名单修复）的云端交付链接已失效，
 > 本地无 jar 副本；其源码仍完整保留在 Git 历史中（commit 8430096），
