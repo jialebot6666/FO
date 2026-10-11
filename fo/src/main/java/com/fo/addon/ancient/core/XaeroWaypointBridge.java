@@ -87,6 +87,16 @@ public final class XaeroWaypointBridge {
     private static final String CLS_THIRD_PARTY = "xaero.hud.minimap.waypoint.thirdparty.ThirdPartyWaypoints";
     /** 颜色枚举：按名字取色，不用猜索引。 */
     private static final String CLS_WAYPOINT_COLOR = "xaero.hud.minimap.waypoint.WaypointColor";
+    /**
+     * 可见目的地枚举（Xaero 26.x 起）：{@code LOCAL / GLOBAL / WORLD_MAP_LOCAL / WORLD_MAP_GLOBAL}。
+     * 把路径点设为 {@code WORLD_MAP_LOCAL} 后，Xaero 的小地图与世界内渲染器（共用的
+     * {@code AbstractWaypointRenderProvider}）会直接跳过它，只有世界地图（M 界面）显示 ——
+     * 这是「搜索结果太多糊满小地图和视野」的正解，已对着真实 jar 的过滤字节码核实。
+     * 24.7.1 及更早版本没有该枚举，取不到时保持 Xaero 默认（到处显示），行为同旧版。
+     */
+    private static final String CLS_VISIBILITY_TYPE = "xaero.hud.minimap.waypoint.WaypointVisibilityType";
+    /** 写入路径点时使用的可见目的地：只在世界地图（当前世界）显示。 */
+    private static final String VISIBILITY_WORLD_MAP_LOCAL = "WORLD_MAP_LOCAL";
 
     /** 官方通道里我们这组路径点的来源标识（决定 Xaero 侧的分组与开关）。 */
     private static final String ORIGIN_NAMESPACE = "fo";
@@ -102,6 +112,7 @@ public final class XaeroWaypointBridge {
     private static final Class<?> WAYPOINT_SET_CLS = cls(CLS_WAYPOINT_SET);
     private static final Class<?> THIRD_PARTY_CLS = cls(CLS_THIRD_PARTY);
     private static final Class<?> WAYPOINT_COLOR_CLS = cls(CLS_WAYPOINT_COLOR);
+    private static final Class<?> VISIBILITY_TYPE_CLS = cls(CLS_VISIBILITY_TYPE);
 
     /** Xaero 是否装了。 */
     private static final boolean XAERO_PRESENT = WAYPOINT_CLS != null;
@@ -380,7 +391,10 @@ public final class XaeroWaypointBridge {
         if (set == null) {
             return false;
         }
-        if (findInSet(set, x, z) != null) {
+        Object existing = findInSet(set, x, z);
+        if (existing != null) {
+            // 已存在（可能是旧版写入的）：补一次「只在世界地图显示」，幂等
+            applyWorldMapOnlyVisibility(existing);
             return true;
         }
         Method add = exactMethod(set.getClass(), "add", WAYPOINT_CLS);
@@ -472,6 +486,13 @@ public final class XaeroWaypointBridge {
      */
     private static Object newWaypoint(int x, int y, int z, String name, String group, String colorName)
         throws Exception {
+        Object waypoint = rawNewWaypoint(x, y, z, name, group, colorName);
+        applyWorldMapOnlyVisibility(waypoint);
+        return waypoint;
+    }
+
+    private static Object rawNewWaypoint(int x, int y, int z, String name, String group, String colorName)
+        throws Exception {
         Object color = colorConstant(colorName);
         if (color != null) {
             try {
@@ -486,6 +507,30 @@ public final class XaeroWaypointBridge {
             .getConstructor(int.class, int.class, int.class, String.class, String.class, int.class, int.class,
                 boolean.class)
             .newInstance(x, y, z, name, group, colorIndexFallback(colorName), 0, false);
+    }
+
+    /**
+     * 把路径点可见性设为「只在世界地图（当前世界）」（Xaero 26.x 起）。
+     *
+     * <p>效果（对着真实 jar 的 {@code AbstractWaypointRenderProvider} 字节码核实）：
+     * 小地图角标与世界内渲染（视角里的点/光柱）会跳过该路径点，只有世界地图界面显示 ——
+     * 几百个搜索结果不再糊满小地图和视野。旧版 Xaero（&lt; 26.x）没有该枚举，静默跳过，
+     * 保持默认的「到处显示」。
+     */
+    private static void applyWorldMapOnlyVisibility(Object waypoint) {
+        if (VISIBILITY_TYPE_CLS == null) {
+            return;
+        }
+        try {
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Object value = Enum.valueOf((Class<Enum>) VISIBILITY_TYPE_CLS, VISIBILITY_WORLD_MAP_LOCAL);
+            Method setVisibility = namedMethod(waypoint.getClass(), "setVisibility", 1);
+            if (setVisibility != null) {
+                setVisibility.invoke(waypoint, value);
+            }
+        } catch (Throwable ignored) {
+            // 设置失败不阻断写入，路径点以 Xaero 默认可见性存在
+        }
     }
 
     /** 颜色枚举常量；取不到返回 null。 */

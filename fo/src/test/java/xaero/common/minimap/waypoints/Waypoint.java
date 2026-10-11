@@ -1,6 +1,7 @@
 package xaero.common.minimap.waypoints;
 
 import xaero.hud.minimap.waypoint.WaypointColor;
+import xaero.hud.minimap.waypoint.WaypointVisibilityType;
 
 /** 与真实 Xaero 的 {@code Waypoint} 同签名。 */
 public class Waypoint {
@@ -11,6 +12,7 @@ public class Waypoint {
     private final String symbol;
     private final WaypointColor color;
     private final int colorIndex;
+    private WaypointVisibilityType visibility;
 
     public Waypoint(int x, int y, int z, String name, String symbol, WaypointColor color) {
         this.x = x;
@@ -58,5 +60,13 @@ public class Waypoint {
 
     public int getColorIndex() {
         return colorIndex;
+    }
+
+    public void setVisibility(WaypointVisibilityType visibility) {
+        this.visibility = visibility;
+    }
+
+    public WaypointVisibilityType getVisibility() {
+        return visibility;
     }
 }

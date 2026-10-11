@@ -128,6 +128,28 @@ class XaeroWaypointBridgeTest {
     }
 
     @Test
+    void 写入的路径点可见性为只在世界地图本地() {
+        assertTrue(XaeroWaypointBridge.addWaypoint(XaeroWaypointBridge.Preference.WAYPOINT_SET,
+            100, 64, 200, "附魔金 #1", "附魔金", "GOLD"));
+        assertEquals(1, playerSet.size());
+        // 26.x 的 WaypointVisibilityType.WORLD_MAP_LOCAL：小地图与世界内渲染器跳过，只有世界地图显示
+        assertEquals(xaero.hud.minimap.waypoint.WaypointVisibilityType.WORLD_MAP_LOCAL,
+            playerSet.get(0).getVisibility(), "写入的路径点应是「只在世界地图（当前世界）」");
+
+        // 官方通道同样生效
+        assertTrue(XaeroWaypointBridge.addWaypoint(XaeroWaypointBridge.Preference.OFFICIAL,
+            300, 64, 400, "迅捷3 #1", "迅捷3", "BLUE"));
+        assertEquals(xaero.hud.minimap.waypoint.WaypointVisibilityType.WORLD_MAP_LOCAL,
+            officialView.getAll().get("fo-ancient-300-400").getVisibility());
+
+        // 重复写入已存在的点（幂等分支）也要补设可见性
+        assertTrue(XaeroWaypointBridge.addWaypoint(XaeroWaypointBridge.Preference.WAYPOINT_SET,
+            100, 64, 200, "附魔金 #1", "附魔金", "GOLD"));
+        assertEquals(xaero.hud.minimap.waypoint.WaypointVisibilityType.WORLD_MAP_LOCAL,
+            playerSet.get(0).getVisibility());
+    }
+
+    @Test
     void 删除会同时清理两条通道() {
         // 先两条通道都写一个（模拟用户中途换过写入方式）
         XaeroWaypointBridge.addWaypoint(XaeroWaypointBridge.Preference.AUTO, X, Y, Z, "a", "b", "GOLD");
