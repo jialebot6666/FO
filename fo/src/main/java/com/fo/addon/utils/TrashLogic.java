@@ -57,6 +57,21 @@ public final class TrashLogic {
     public record BookRule(Set<String> enchantIds, int minLevel) {}
 
     /**
+     * 「附魔ID → 最低等级」映射转规则列表（V6.22，来自附魔书列表设置）。
+     * 等级 ≤ 0 / 空映射返回空列表（= 无规则，附魔书跟随物品名单）。
+     */
+    public static java.util.List<BookRule> rulesFromLevelMap(java.util.Map<String, Integer> levelMap) {
+        java.util.List<BookRule> rules = new java.util.ArrayList<>();
+        if (levelMap == null || levelMap.isEmpty()) return rules;
+        for (java.util.Map.Entry<String, Integer> e : levelMap.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null && e.getValue() > 0) {
+                rules.add(new BookRule(Set.of(e.getKey()), e.getValue()));
+            }
+        }
+        return rules;
+    }
+
+    /**
      * 附魔书是否命中任一规则（任一附魔达标即命中，宽松策略，用户确认）。
      *
      * @param rules        已启用规则

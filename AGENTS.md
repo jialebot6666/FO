@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.21`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.22`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -101,6 +101,15 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     语言文件走资产索引单独下载，需外取）。判定逻辑不变：书内任一附魔达标即命中 →
     视同「在名单里」走黑白名单；全部 0 = 跟随物品名单。注意：`EnchantListTest` 用官方 43 个
     ID 清单做锚点断言，未来 MC 新增附魔需同步更新 `EnchantList` 与该测试。
+  - ✅ V6.22 已完成：**附魔书列表改为一个自定义设置项**（V6.21 的 43 条滑条把模块设置页撑爆，
+    用户要求做成"物品列表那样"的一个条目；方案经用户确认后实施）。删除「附魔书过滤」设置组，
+    新增 `utils/EnchantLevelMapSetting`（附魔 ID→最低等级映射 Setting，仿 Meteor 官方
+    `StatusEffectAmplifierMapSetting`：NBT 持久化 value 复合标签、parseImpl 文本解析、只存 >0 条目）
+    + `gui/EnchantLevelMapSettingScreen`（全 43 附魔逐行配等级 + 搜索框，仿官方药水界面），
+    通过公开 API `SettingsWidgetFactory.registerCustomFactory` 注册控件（AddonTemplate.onInitialize，
+    设置页里是「选择」按钮）。位置：sgGeneral 的物品列表与丢弃间隔之间。
+    纯逻辑 `TrashLogic.rulesFromLevelMap`（映射→规则）可单测；判定语义不变（≥ 最低等级，
+    命中视同在名单走黑白名单）。V6.21 的 43 条滑条设置不迁移旧配置（形态不同，用户重配一次）。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。

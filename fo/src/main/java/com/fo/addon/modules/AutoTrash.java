@@ -1,7 +1,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
-import com.fo.addon.utils.EnchantList;
+import com.fo.addon.utils.EnchantLevelMapSetting;
 import com.fo.addon.utils.TrashDefaults;
 import com.fo.addon.utils.TrashLogic;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -24,9 +24,8 @@ import net.minecraft.item.Items;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.slot.SlotActionType;
 
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -39,11 +38,12 @@ import java.util.Map;
  * <p>V4.38：丢弃改为 misaka 式批量——每个「丢弃间隔」扫一遍背包，把所有命中的堆一次性全扔
  * （此前每轮只扔一种，视觉上一个一个蹦）。
  *
- * <p>V6.20~V6.21：附魔书过滤重做（用户确认方案后实施）。V6.20 曾是「文本规则列表」，
- * 用户反馈要打字太麻烦；V6.21 改为**每个原版附魔一条独立等级设置**（{@link EnchantList}，
- * 43 个附魔、中文名、滑条上限=该附魔真实最高等级，0=不启用/1=任意等级/2~max=≥该等级命中），
- * 全部在设置界面点选，无需打字。判定逻辑不变：书内任一附魔达标即命中（宽松策略，合并书不误删），
- * 命中的书视同「在名单里」统一走黑白名单；全部默认 0 时附魔书完全跟随物品名单；
+ * <p>V6.20~V6.22：附魔书过滤重做（用户确认方案后实施）。V6.20 文本规则要打字；
+ * V6.21 改为 43 条滑条但设置页被撑爆；V6.22 改为**一个「附魔书列表」设置项**
+ * （物品列表下面，{@link EnchantLevelMapSetting} + 专属列表界面）：点开 = 全部 43 个原版附魔
+ * 逐行配等级（带搜索，0=不启用 / 1~最高=≥该等级命中），体验对齐物品列表、纯点选零打字，
+ * 每附魔单独配等级的能力保留。判定逻辑不变：书内任一附魔达标即命中（宽松策略，合并书不误删），
+ * 命中的书视同「在名单里」统一走黑白名单；全部 0 时附魔书完全跟随物品名单；
  * 整本全留/全丢可把「附魔书」物品加进/排除出物品列表。
  */
 public class AutoTrash extends Module {
@@ -61,6 +61,18 @@ public class AutoTrash extends Module {
         .defaultValue(TrashDefaults.toItems())
         .build());
 
+    /**
+     * V6.22：附魔书列表（附魔 ID → 最低命中等级，>0 即启用；0 不存 = 不启用）。
+     * 设置页里是一个「选择」按钮，点开全附魔配等级界面（见 EnchantLevelMapSettingScreen）。
+     * 命中的附魔书视同「在名单里」，照旧走黑白名单判定。
+     */
+    private final Setting<Object2IntMap<String>> enchantBookLevels = sgGeneral.add(new EnchantLevelMapSetting.Builder()
+        .name("附魔书列表")
+        .description("点开为全部原版附魔的列表：给附魔填 1~最高等级表示「≥该等级命中」（0=不启用）。"
+            + "命中的附魔书视同在名单里（白名单=保留，黑名单=丢弃）；全部为 0 时附魔书完全跟随物品名单。"
+            + "整本全留/全丢：把「附魔书」物品加入/排除出物品列表即可。")
+        .build());
+
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
         .name("丢弃间隔")
         .description("扫描间隔（tick）：每隔 N tick 扫一遍背包，把所有命中的堆一次性全扔（misaka 式批量）。0 = 每 tick 扫.")
@@ -75,15 +87,6 @@ public class AutoTrash extends Module {
         .description("丢弃整组物品；关闭时每次只丢一个.")
         .defaultValue(true)
         .build());
-
-    private final SettingGroup sgBook = settings.createGroup("附魔书过滤");
-
-    /**
-     * V6.21：每个原版附魔一条独立等级设置（用户确认方案）——
-     * 0=不启用；1=任意等级算命中；2~最高等级=≥该等级算命中。滑条上限=该附魔真实最高等级。
-     * 命中的附魔书视同「在名单里」，照旧走黑白名单判定。
-     */
-    private final List<Setting<Integer>> bookEnchantLevels = new ArrayList<>();
 
     private final Setting<Boolean> excludeHotbar = sgGeneral.add(new BoolSetting.Builder()
         .name("排除快捷栏")
@@ -110,21 +113,6 @@ public class AutoTrash extends Module {
 
     public AutoTrash() {
         super(AddonTemplate.CATEGORY, "FO 自动扔垃圾", "自动扔垃圾：黑/白名单模式自动丢弃指定物品。");
-
-        // V6.21：按 EnchantList 数据表生成每附魔的等级设置（中文名、滑条上限=真实最高等级）
-        for (EnchantList.Entry e : EnchantList.VANILLA) {
-            bookEnchantLevels.add(sgBook.add(new IntSetting.Builder()
-                .name(e.name())
-                .description("附魔书过滤：" + e.name() + " 的命中等级。0=不启用；1=任意等级算命中；"
-                    + "2~" + e.maxLevel() + "=≥该等级算命中。命中的附魔书视同在名单里"
-                    + "（白名单=保留，黑名单=丢弃）。全部保持 0 时附魔书完全跟随物品名单。")
-                .defaultValue(0)
-                .min(0)
-                .max(e.maxLevel())
-                .sliderMin(0)
-                .sliderMax(e.maxLevel())
-                .build()));
-        }
     }
 
     /** 供 ElytraCollector 联动调用：强制白名单模式；列表非空则沿用用户配置，空才填默认列表；额外弹一次系统通知 */
@@ -310,16 +298,9 @@ public class AutoTrash extends Module {
         }
     }
 
-    /** V6.21：从每附魔等级设置构建启用中的规则（等级 >0 的附魔各成一条规则）。 */
+    /** V6.22：从附魔书列表设置构建启用中的规则（等级 > 0 的附魔各成一条规则）。 */
     private List<TrashLogic.BookRule> buildBookRules() {
-        List<TrashLogic.BookRule> rules = new ArrayList<>();
-        for (int i = 0; i < EnchantList.VANILLA.size() && i < bookEnchantLevels.size(); i++) {
-            int level = bookEnchantLevels.get(i).get();
-            if (level > 0) {
-                rules.add(new TrashLogic.BookRule(java.util.Set.of(EnchantList.VANILLA.get(i).id()), level));
-            }
-        }
-        return rules;
+        return TrashLogic.rulesFromLevelMap(enchantBookLevels.get());
     }
 
     /** 该附魔书堆内的附魔：附魔 ID（minecraft:xxx）→ 等级。 */
