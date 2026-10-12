@@ -15,6 +15,8 @@ import org.apache.commons.lang3.Strings;
  *
  * <p>全部 43 个原版附魔逐行列出：每行 = 附魔名 + 等级编辑框（0 = 不启用，1~最高等级），
  * 顶部搜索框按中文名/ID 过滤。等级 &gt; 0 写入设置映射，改回 0 移除。
+ *
+ * <p>V6.23：等级是<b>精确命中等级</b>——填 3 只命中 3 级、填 1 只命中 1 级（不再是「≥该等级」）。
  */
 public class EnchantLevelMapSettingScreen extends WindowScreen {
 
