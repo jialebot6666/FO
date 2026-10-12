@@ -1,5 +1,7 @@
 package com.fo.addon;
 
+import com.fo.addon.ancient.core.AncientStealStats;
+import com.fo.addon.ancient.core.StealStatsFile;
 import com.fo.addon.ancient.modules.FOAncientCitySearch;
 import com.fo.addon.gui.EnchantLevelMapSettingScreen;
 import com.fo.addon.modules.AutoLog;
@@ -10,10 +12,12 @@ import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOKillAura;
 import com.fo.addon.utils.EnchantLevelMapSetting;
+import com.fo.addon.utils.StealStatsSetting;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
+import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -40,6 +44,18 @@ public class AddonTemplate extends MeteorAddon {
             button.action = () -> MinecraftClient.getInstance()
                 .setScreen(new EnchantLevelMapSettingScreen(theme, cast));
         });
+
+        // V6.27：自动偷取累计统计（只读文字块，位于设置页「自动偷取」开关正下方）。
+        // 设置名的左侧标签由 Meteor 框架自动加（取 Setting.title），这里只补右侧内容。
+        SettingsWidgetFactory.registerCustomFactory(StealStatsSetting.class, theme -> (table, setting) -> {
+            WVerticalList lines = table.add(theme.verticalList()).expandCellX().widget();
+            for (String line : AncientStealStats.get().displayLines()) {
+                lines.add(theme.label(line));
+            }
+        });
+
+        // V6.27：累计统计要在模块启动前就能被设置页读到，所以加载期先读一次文件
+        AncientStealStats.get().replaceWith(StealStatsFile.load());
 
         // Modules
         Modules.get().add(new ElytraCollector());

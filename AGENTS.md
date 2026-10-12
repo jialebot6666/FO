@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.26`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.26-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.27`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.27-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -129,6 +129,22 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     潜影盒 / 木桶 / 末影箱等一律不偷；**依据缺失或过期时保守不偷**（fail-safe，宁可漏偷）。
     ⚠️ 教训：移植别的模块时，凡涉及「动不动玩家物品」的行为，边界条件（对哪些容器生效）
       必须逐条确认后再上线，别默认照搬上游语义。
+  - ✅ 6.27 已完成：**自动偷取累计统计**（用户要求：写本地文件、跨重启、**不自动清零**，长期累加）。
+    设置页「自动偷取」开关正下方新增只读文字块，显示
+    `您已使用本插件共计获取了 / N 个附魔金苹果 / M 迅捷潜行III`（若把「迅捷潜行最低等级」调低、
+    确实偷到过 I/II 级书，才补出对应两行）。
+    - 数据落 `fo-steal-stats.json`（游戏目录）：`{"version":1,"items":{物品ID:N},"books":{附魔ID:{"等级":N}}}`。
+      键用 **物品 ID / 附魔 ID**（与显示文案解耦），附魔书按**等级分开计**，以后改文案/加统计项不用迁数据。
+    - 纯逻辑 `ancient/core/AncientStealStats`（计数 / 展示文案 / 序列化，可单测）；
+      文件读写 `ancient/core/StealStatsFile`（由 `AddonTemplate.onInitialize()` 在加载期读一次——
+      用户可能一进游戏就打开设置看总数，那时模块还没被激活过）。
+    - 只读展示控件：`utils/StealStatsSetting`（**不承载任何配置**，save/load 全空、不往配置里写键）
+      + `AddonTemplate` 里注册 `SettingsWidgetFactory.registerCustomFactory`，用 `theme.verticalList()` 放多行标签。
+      ⚠️ 设置名的左侧标签是 Meteor **框架自动加**的（取 `Setting.title`），工厂只需补右侧内容。
+    - ⚠️ **记账口径 = 真的取到手才算**：`InvUtils.shiftClick()` 返回 void、不报成败，背包满时点击等于白点；
+      直接在点击时记账会让累计数字虚高。实现是「点击时记下槽位原本内容 → 下一刻回读核对
+      （槽位变空/变少才算取到）」，界面关掉来不及核对的那一次按乐观口径计入。
+  - ⏳ 待做（用户可按需追加）：自动偷取的「只偷本模块搜索命中的古城箱子」更严格模式（当前按用户口径只判「是不是箱子」）
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。

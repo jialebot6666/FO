@@ -10,13 +10,16 @@ import com.fo.addon.ancient.core.AncientLootTable;
 import com.fo.addon.ancient.core.AncientOpenedChestPolicy;
 import com.fo.addon.ancient.core.AncientResourceSource;
 import com.fo.addon.ancient.core.AncientSearchLogic;
+import com.fo.addon.ancient.core.AncientStealStats;
 import com.fo.addon.ancient.core.CubiomesJNI;
 import com.fo.addon.ancient.core.FoundChest;
 import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
+import com.fo.addon.ancient.core.StealStatsFile;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
 import com.fo.addon.utils.AncientCityLocatorLogic;
 import com.fo.addon.utils.AncientStealLogic;
+import com.fo.addon.utils.StealStatsSetting;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -62,6 +65,7 @@ import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.util.hit.BlockHitResult;
@@ -96,6 +100,13 @@ import net.minecraft.world.Heightmap;
  * 「刚打开的是哪个方块」的准星判定（{@link #TARGET_FRESH_TICKS} 时效），潜影盒 / 木桶 / 末影箱
  * 等一律不偷；判断依据缺失或过期时保守不偷。判定纯逻辑在
  * {@code AncientStealLogic.shouldScanContainer}（可单测）。
+ *
+ * <p>V6.27：**累计偷取统计**。设置页「自动偷取」开关正下方新增只读文字块
+ * （{@code 您已使用本插件共计获取了 / N 个附魔金苹果 / M 迅捷潜行III}），
+ * 数据写游戏目录 {@code fo-steal-stats.json}、**跨重启保留、不自动清零**（用户要求长期累加）。
+ * ⚠️ 记账口径是「**真的取到手才算**」：{@code InvUtils.shiftClick()} 不返回成败，背包满时点击等于白点，
+ * 所以在点击时记下槽位原本的内容、下一刻回读核对（槽位变空/变少才算取到），
+ * 避免累计数字虚高。界面关掉来不及核对的那一次按乐观口径计入。
  */
 public class FOAncientCitySearch extends Module {
 
@@ -146,6 +157,8 @@ public class FOAncientCitySearch extends Module {
     private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
 
     private final Setting<Boolean> autoStealSetting;
+    /** 只读展示：累计偷取统计（V6.27，位于设置页「自动偷取」开关正下方）。 */
+    private final Setting<Boolean> stealStatsSetting;
     private final Setting<List<Item>> stealItemsSetting;
     private final Setting<Integer> swiftSneakMinLevelSetting;
     private final Setting<Integer> stealDelaySetting;
@@ -205,6 +218,22 @@ public class FOAncientCitySearch extends Module {
     private int stealDelayTimer;
     /** 本轮偷到的物品统计（物品名 → 个数），取完在聊天栏汇报一次。 */
     private final Map<String, Integer> stealSummary = new LinkedHashMap<>();
+
+    /**
+     * 上一次点击的槽位，以及那一刻该槽位里的东西——用于**下一刻核对这次点击是否真的取走了**。
+     *
+     * <p>为什么要核对：{@code InvUtils.shiftClick().slotId(i)} 不返回成败，背包满时点击等于白点。
+     * 直接在心那一刻记账会让「累计统计」虚高（用户要的是长期累计，数字必须可信）。
+     * shift 点击是整组挪走，所以下一刻该槽位变空 = 真取到；还剩原来的数量 = 没生效，不记。
+     */
+    private int pendingStealSlot = -1;
+    private String pendingStealItemId;
+    private String pendingStealBookEnchantId;
+    private int pendingStealBookLevel;
+    private int pendingStealCount;
+
+    /** 累计统计有改动、还没落盘。 */
+    private boolean stealStatsDirty;
 
     /**
      * 「柱子地表 Y」缓存：key = (x<<32)|z。每根柱子只扫一次地表，维度切换时整体失效。
@@ -349,6 +378,13 @@ public class FOAncientCitySearch extends Module {
             .name("自动偷取")
             .description("自动偷取箱子附魔金苹果和迅捷潜行三")
             .defaultValue(true)
+            .build());
+
+        // V6.27：累计统计（只读展示，紧挨「自动偷取」开关下方）。
+        // 控件由 AddonTemplate 注册的 StealStatsSetting 工厂负责画，这里只占位置。
+        stealStatsSetting = sgSteal.add(new StealStatsSetting.Builder()
+            .name("累计统计")
+            .description("本插件至今一共帮你拿到了多少（跨重启累计，不清零）。数据存在游戏目录 fo-steal-stats.json")
             .build());
 
         stealItemsSetting = sgSteal.add(new ItemListSetting.Builder()
@@ -500,6 +536,12 @@ public class FOAncientCitySearch extends Module {
         }
         if (hit.isEmpty()) return;
 
+        // 换了容器（syncId 变了）说明上一个容器已经关掉：它的最后一次点击没法再核对，
+        // 按乐观口径计入累计统计，别把那次漏掉
+        if (stealQueueSyncId != handler.syncId) {
+            commitPendingStealOptimistically();
+        }
+
         stealQueue.clear();
         stealQueue.addAll(hit);
         stealQueueSyncId = handler.syncId;
@@ -513,14 +555,26 @@ public class FOAncientCitySearch extends Module {
      *
      * <p>界面被关掉或换成别的容器 → 整队丢弃：彗星端原版 {@code moveSlots} 每一步也都要重查界面，
      * 这里做同一件事，避免「对着已经关掉的界面点槽位」。
+     *
+     * <p>每次开头先结算上一刻那次点击（{@link #verifyPendingSteal}），所以队列排空后还要再跑
+     * 一刻才能真正收尾——这也是这里不能简单地「队列空就 return」的原因。
      */
     private void processStealQueue() {
-        if (stealQueue.isEmpty()) return;
+        if (stealQueue.isEmpty() && pendingStealSlot < 0) return;   // 没活干
 
         ScreenHandler handler = mc.player == null ? null : mc.player.currentScreenHandler;
-        if (mc.currentScreen == null || !(mc.currentScreen instanceof HandledScreen<?>)
-            || handler == null || handler.syncId != stealQueueSyncId) {
-            abortStealQueue();
+        boolean sameScreen = mc.currentScreen instanceof HandledScreen<?>
+            && handler != null && handler.syncId == stealQueueSyncId;
+        if (!sameScreen) {
+            abortStealQueue();      // 界面关了/换容器了
+            return;
+        }
+
+        // 结算上一刻的点击：只有槽位真的空了才计入累计统计（背包满时点击不生效，不能虚记）
+        verifyPendingSteal(handler);
+
+        if (stealQueue.isEmpty()) {
+            reportStealSummary();   // 队列已空且无待核对 → 本轮结束
             return;
         }
         if (stealDelayTimer > 0) {
@@ -532,35 +586,113 @@ public class FOAncientCitySearch extends Module {
         ItemStack stack = handler.getSlot(slotId).getStack();
         if (!stack.isEmpty()) {
             stealSummary.merge(stack.getName().getString(), stack.getCount(), Integer::sum);
+            rememberPendingSteal(slotId, stack);
             InvUtils.shiftClick().slotId(slotId);   // 整组挪进背包（对应彗星端的 shiftClick）
         }
 
         int bound = stealRandomDelaySetting.get();
         stealDelayTimer = AncientStealLogic.delayTicks(stealDelaySetting.get(), bound,
             bound > 0 ? ThreadLocalRandom.current().nextInt(0, bound) : 0);
+    }
 
-        if (stealQueue.isEmpty()) {
-            reportStealSummary();
+    /** 记下这次点击动了哪个槽位、里面原本是什么，供下一刻核对。 */
+    private void rememberPendingSteal(int slotId, ItemStack stack) {
+        pendingStealSlot = slotId;
+        pendingStealCount = stack.getCount();
+        pendingStealItemId = Registries.ITEM.getId(stack.getItem()).toString();
+        int swift = AncientStealLogic.swiftSneakLevel(bookEnchantLevels(stack));
+        pendingStealBookEnchantId = swift > 0 ? AncientStealStats.SWIFT_SNEAK_ID : null;
+        pendingStealBookLevel = swift;
+    }
+
+    /**
+     * 核对上一次点击是否真的把东西取走了，真取到才计入累计统计。
+     *
+     * <p>shift 点击是**整组**挪走，所以：槽位变空（或数量变少）= 取到了；数量没变 = 没生效
+     * （典型是背包满了），此时不记账。
+     */
+    private void verifyPendingSteal(ScreenHandler handler) {
+        if (pendingStealSlot < 0) return;
+        int slot = pendingStealSlot;
+        int amount = pendingStealCount;
+        String itemId = pendingStealItemId;
+        String bookEnchantId = pendingStealBookEnchantId;
+        int bookLevel = pendingStealBookLevel;
+        clearPendingSteal();
+
+        if (handler == null || slot >= handler.slots.size()) return;
+        ItemStack now = handler.getSlot(slot).getStack();
+        int left = now.isEmpty() ? 0 : now.getCount();
+        int taken = Math.max(0, amount - left);
+        if (taken <= 0) return;
+
+        AncientStealStats stats = AncientStealStats.get();
+        if (bookEnchantId != null && bookLevel > 0) {
+            // 附魔书单独按「附魔 + 等级」计，不混进物品计数里
+            stats.addBook(bookEnchantId, bookLevel, taken);
+        } else if (itemId != null) {
+            stats.addItem(itemId, taken);
+        }
+        stealStatsDirty = true;
+    }
+
+    /** 界面已经关掉、没法再核对：这次点击按「已经取到」乐观计入（点击早已发出，绝大多数都生效）。 */
+    private void commitPendingStealOptimistically() {
+        if (pendingStealSlot < 0) return;
+        String itemId = pendingStealItemId;
+        String bookEnchantId = pendingStealBookEnchantId;
+        int bookLevel = pendingStealBookLevel;
+        int amount = pendingStealCount;
+        clearPendingSteal();
+
+        AncientStealStats stats = AncientStealStats.get();
+        if (bookEnchantId != null && bookLevel > 0) {
+            stats.addBook(bookEnchantId, bookLevel, amount);
+        } else if (itemId != null) {
+            stats.addItem(itemId, amount);
+        }
+        stealStatsDirty = true;
+    }
+
+    private void clearPendingSteal() {
+        pendingStealSlot = -1;
+        pendingStealItemId = null;
+        pendingStealBookEnchantId = null;
+        pendingStealBookLevel = 0;
+        pendingStealCount = 0;
+    }
+
+    /** 累计统计有改动就落盘（跨重启保留）。失败不影响游戏，下次还会再试。 */
+    private void saveStealStatsIfDirty() {
+        if (!stealStatsDirty) return;
+        if (StealStatsFile.save(AncientStealStats.get())) {
+            stealStatsDirty = false;
+        } else {
+            debug("累计统计落盘失败，稍后重试");
         }
     }
 
     /** 界面关掉/换容器：丢弃队列，并把已取到的战果先汇报掉（不丢信息）。 */
     private void abortStealQueue() {
+        // 界面已经关了，没法再核对最后一次点击 —— 按乐观口径计入累计统计
+        commitPendingStealOptimistically();
         stealQueue.clear();
         stealQueueSyncId = -1;
         reportStealSummary();
     }
 
-    /** 汇报本轮偷取战果，列出物品名与个数。 */
+    /** 汇报本轮偷取战果（物品名 + 个数），并顺手把累计统计落盘。 */
     private void reportStealSummary() {
-        if (stealSummary.isEmpty()) return;
-        StringBuilder sb = new StringBuilder();
-        stealSummary.forEach((name, count) -> {
-            if (!sb.isEmpty()) sb.append("、");
-            sb.append(name).append("×").append(count);
-        });
-        info("自动偷取完成：" + sb);
-        stealSummary.clear();
+        if (!stealSummary.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            stealSummary.forEach((name, count) -> {
+                if (!sb.isEmpty()) sb.append("、");
+                sb.append(name).append("×").append(count);
+            });
+            info("自动偷取完成：" + sb);
+            stealSummary.clear();
+        }
+        saveStealStatsIfDirty();
     }
 
     /** 该物品堆的附魔（附魔 ID → 等级）；非附魔书返回空表。 */
