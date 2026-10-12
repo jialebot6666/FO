@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.28`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.28-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.29`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.29-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -157,6 +157,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       避免"自动带种子"顺带触发清档/隐藏高亮等新副作用。
   - ⚠️ 全局一份种子的已知取舍：换服务器时保存的种子会跟着带过去（用户选的口径）。若将来想要
     「按服务器+维度各存一份」，改 `AncientSeedStore` 为 map 即可，数据格式已经带 version 字段。
+  - ✅ 6.29 已完成：**累计统计改成独立可折叠分组 + 加"框"**（用户反馈 V6.27 那个文字块太丑、没对齐、没框）。
+    - 位置：新建 `sgStats = settings.createGroup("累计统计")`，**建在 sgSteal 之后** → 渲染在「自动偷取」
+      分组下方（即「初始延迟」下面）。⚠️ 分组按**创建顺序**渲染，位置靠创建时机决定。
+    - 「能展开能关闭」不用自己写：Meteor 的 `SettingGroup` 就是用 `WSection` 渲染的（`DefaultSettingsWidgetFactory.group`
+      → `theme.section(group.name, group.sectionExpanded)`），折叠状态存在 `SettingGroup.sectionExpanded`。
+    - 「黑框」也用现成控件：factory 里不再堆裸标签，而是 `table.add(theme.section(抬头, true))` 拿 `WSection`
+      当框（与「高亮」「自动偷取」同一种控件），抬头行当 section 标题、计数行当框内内容 → 左对齐 + 内边距 + 有框。
+    - 纯逻辑配合拆分：`AncientStealStats.displayHeader()`（抬头，不含数字）/ `displayBody()`（计数行）/
+      `displayLines()`（两者拼接，保留给测试与复用）。
+    - ⚠️ 设置页里**设置名的左侧标签是 Meteor 框架自动加的**（`DefaultSettingsWidgetFactory.group` 里
+      先 `table.add(theme.label(setting.title))` 再调工厂的 `Factory.create(WTable, Setting<?>)`，后者返回 void），
+      所以工厂只能决定"右侧内容"，左侧标题躲不掉；这也是为什么设置名要起得短（当前叫「战果」）。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。

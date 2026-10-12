@@ -115,6 +115,10 @@ import net.minecraft.world.Heightmap;
  * 把输入框清空再点应用 = 清除保存的种子（关闭自动应用）。持久化见 {@code AncientSeedStore}。
  * ⚠️ 刻意**只影响搜索用的种子**：不动本模块原有的记录种子校验与渲染过滤
  * （{@code currentSeedGuess()}），避免"自动带种子"顺带触发清档等新副作用。
+ *
+ * <p>V6.29：累计统计从「自动偷取」组里挪出来，单独成组「累计统计」（建在 sgSteal 之后 →
+ * 渲染在「初始延迟」下面）。分组本身就是可折叠的 {@code WSection}，展示控件也改用
+ * {@code WSection} 当框（抬头行当标题、计数行放框内），解决"没对齐、没框"的问题。
  */
 public class FOAncientCitySearch extends Module {
 
@@ -143,6 +147,14 @@ public class FOAncientCitySearch extends Module {
     private final SettingGroup sgSeed = settings.createGroup("种子设置");
     private final SettingGroup sgHighlight = settings.createGroup("高亮");
     private final SettingGroup sgSteal = settings.createGroup("自动偷取");
+    /**
+     * 累计统计单独一个分组（V6.29）。
+     *
+     * <p>Meteor 的设置分组渲染成 {@code WSection} —— 本身就是「能展开能关闭」的面板，
+     * 与「高亮」「自动偷取」同一种控件。用户要求统计放在「初始延迟」下面并单独成组，
+     * 所以这里建在 sgSteal 之后（分组按创建顺序渲染）。
+     */
+    private final SettingGroup sgStats = settings.createGroup("累计统计");
 
     private final Setting<LootTarget> searchTypeSetting;
     private final Setting<GameVersionOption> gameVersionSetting;
@@ -165,7 +177,7 @@ public class FOAncientCitySearch extends Module {
     private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
 
     private final Setting<Boolean> autoStealSetting;
-    /** 只读展示：累计偷取统计（V6.27，位于设置页「自动偷取」开关正下方）。 */
+    /** 只读展示：累计偷取统计（V6.27；V6.29 挪到独立的「累计统计」分组里）。 */
     private final Setting<Boolean> stealStatsSetting;
     private final Setting<List<Item>> stealItemsSetting;
     private final Setting<Integer> swiftSneakMinLevelSetting;
@@ -399,10 +411,10 @@ public class FOAncientCitySearch extends Module {
             .defaultValue(true)
             .build());
 
-        // V6.27：累计统计（只读展示，紧挨「自动偷取」开关下方）。
+        // V6.27 新增、V6.29 挪进独立的「累计统计」分组（显示在「初始延迟」下面）。
         // 控件由 AddonTemplate 注册的 StealStatsSetting 工厂负责画，这里只占位置。
-        stealStatsSetting = sgSteal.add(new StealStatsSetting.Builder()
-            .name("累计统计")
+        stealStatsSetting = sgStats.add(new StealStatsSetting.Builder()
+            .name("战果")
             .description("本插件至今一共帮你拿到了多少（跨重启累计，不清零）。数据存在游戏目录 fo-steal-stats.json")
             .build());
 

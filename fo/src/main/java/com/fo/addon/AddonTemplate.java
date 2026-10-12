@@ -17,7 +17,7 @@ import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
-import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
+import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -45,12 +45,16 @@ public class AddonTemplate extends MeteorAddon {
                 .setScreen(new EnchantLevelMapSettingScreen(theme, cast));
         });
 
-        // V6.27：自动偷取累计统计（只读文字块，位于设置页「自动偷取」开关正下方）。
-        // 设置名的左侧标签由 Meteor 框架自动加（取 Setting.title），这里只补右侧内容。
+        // V6.27：自动偷取累计统计（只读展示）。
+        // V6.29 改样式：用 WSection（就是「高亮」「自动偷取」这些分组用的同一种控件）当"框"——
+        //   抬头行 → section 标题，计数行 → 框内内容。这样文字左对齐、有内边距、有框，
+        //   并且这个框本身也能折叠，比把几行裸标签堆在设置行右侧整齐得多。
+        //   设置名的左侧标签由 Meteor 框架自动加（取 Setting.title），这里只补右侧内容。
         SettingsWidgetFactory.registerCustomFactory(StealStatsSetting.class, theme -> (table, setting) -> {
-            WVerticalList lines = table.add(theme.verticalList()).expandCellX().widget();
-            for (String line : AncientStealStats.get().displayLines()) {
-                lines.add(theme.label(line));
+            AncientStealStats stats = AncientStealStats.get();
+            WSection box = table.add(theme.section(stats.displayHeader(), true)).expandCellX().widget();
+            for (String line : stats.displayBody()) {
+                box.add(theme.label(line));
             }
         });
 
