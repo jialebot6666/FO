@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.31`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.31-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.32`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.32-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -190,6 +190,12 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     - 抬头行补 `marginTop(6)` 对齐相邻行（框架给标题标签的也是 6）。
     - ⚠️ 修订 6.29 的结论："左侧标题躲不掉"其实躲得掉，只是要整行删掉重画（`Setting.title` 是 final、
       改不了，只能删行）。
+  - ⚠️ 6.31 实机崩溃（打开设置页 `Ticking screen` → `IndexOutOfBoundsException: -1 for length 0`）：
+      `WTable.removeRow(i)` 内部会把行游标 `rowI` 减一；「累计统计」是它分组的**第一个**设置，
+      删掉第 0 行后 rowI = -1，工厂里下一句 `table.add` 走 `rows.get(-1)` 直接越界。
+      修复（6.32）：删行后**必须补一次 `table.row()`** 把游标移回，框架在工厂返回后还会再调一次
+      row()，正好恢复原节奏。教训：用框架的"删行"类 API 前先读源码确认游标/索引副作用。
+  - ✅ 6.32 已完成：6.31 崩溃修复（见上条 ⚠️），无其他改动。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
