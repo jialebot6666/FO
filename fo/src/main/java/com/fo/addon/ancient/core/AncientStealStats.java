@@ -97,18 +97,34 @@ public final class AncientStealStats {
     // ==================== 展示 ====================
 
     /**
-     * 设置页里要显示的行。
+     * 设置页里的**抬头行**（固定文案）。
      *
-     * <p>第一行是固定抬头，其余每行一个统计项；只有「确实偷到过」的等级才会出现，
-     * 免得默认情况下挂一堆 0 出来。
+     * <p>展示时它当"框"的标题用（{@code WSection} 的标题），计数行放在框内 —— 这样文字左对齐、
+     * 有内边距，比把几行裸标签堆在设置行右侧整齐得多。
      */
-    public synchronized List<String> displayLines() {
-        List<String> lines = new ArrayList<>(5);
-        lines.add("您已使用本插件共计获取了");
+    public synchronized String displayHeader() {
+        return "您已使用本插件共计获取了";
+    }
+
+    /**
+     * 设置页里的**内容行**（每行一个统计项）。
+     *
+     * <p>只有「确实偷到过」的等级才会出现，免得默认情况下挂一堆 0 出来。
+     */
+    public synchronized List<String> displayBody() {
+        List<String> lines = new ArrayList<>(4);
         lines.add(itemCount(GOLDEN_APPLE_ID) + " 个附魔金苹果");
         lines.add(bookCount(SWIFT_SNEAK_ID, 3) + " 迅捷潜行III");
         if (bookCount(SWIFT_SNEAK_ID, 2) > 0) lines.add(bookCount(SWIFT_SNEAK_ID, 2) + " 迅捷潜行II");
         if (bookCount(SWIFT_SNEAK_ID, 1) > 0) lines.add(bookCount(SWIFT_SNEAK_ID, 1) + " 迅捷潜行I");
+        return lines;
+    }
+
+    /** 抬头 + 内容行（拼在一起，便于一次性展示或断言）。 */
+    public synchronized List<String> displayLines() {
+        List<String> lines = new ArrayList<>(5);
+        lines.add(displayHeader());
+        lines.addAll(displayBody());
         return lines;
     }
 

@@ -77,6 +77,25 @@ public class AncientStealStatsTest {
         assertEquals("5 迅捷潜行III", lines.get(2));
     }
 
+    /** 展示时抬头当"框"的标题、内容行放框里，所以两者必须分得干净（V6.29）。 */
+    @Test
+    void headerAndBodySplitCleanly() {
+        AncientStealStats s = new AncientStealStats();
+        s.addItem(APPLE, 12);
+        s.addBook(SWIFT, 3, 5);
+
+        assertEquals("您已使用本插件共计获取了", s.displayHeader());
+        // 抬头里不能混进数字
+        assertFalse(s.displayHeader().matches(".*\\d.*"));
+        // 内容行里不能重复抬头
+        for (String line : s.displayBody()) {
+            assertFalse(line.contains("您已使用本插件共计获取了"));
+        }
+        List<String> all = s.displayLines();
+        assertEquals(s.displayHeader(), all.get(0));
+        assertEquals(s.displayBody(), all.subList(1, all.size()));
+    }
+
     @Test
     void displayLinesEmptyStatsStillThreeLines() {
         List<String> lines = new AncientStealStats().displayLines();
