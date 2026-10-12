@@ -89,6 +89,13 @@ import net.minecraft.world.Heightmap;
  *    本模块读 {@code ItemEnchantmentsComponent} 按附魔 ID + 等级判定，补上了这个能力；
  * ② 官方在后台线程 {@code Thread.sleep} 后点槽位（跨线程发交互包），本模块改成
  *    「事件里只快照槽位 → TickEvent.Post 里逐个取」，全程客户端线程（对齐 V6.11 的教训）。
+ *
+ * <p>V6.26：**自动偷取收紧为「只偷箱子」**。V6.25 沿用了官方的行为——不判断开的是什么容器，
+ * 只要容器内容同步过来就偷，实机反馈会把玩家自己存在**潜影盒**里的附魔金苹果/迅捷潜行书
+ * 一并取走。现改为：必须确证「打开的是箱子方块（{@code ChestBlock}）」才偷，依据复用本模块
+ * 「刚打开的是哪个方块」的准星判定（{@link #TARGET_FRESH_TICKS} 时效），潜影盒 / 木桶 / 末影箱
+ * 等一律不偷；判断依据缺失或过期时保守不偷。判定纯逻辑在
+ * {@code AncientStealLogic.shouldScanContainer}（可单测）。
  */
 public class FOAncientCitySearch extends Module {
 
@@ -104,6 +111,14 @@ public class FOAncientCitySearch extends Module {
     private static final String WAYPOINT_COLOR_GOLD = "GOLD";
     private static final String WAYPOINT_COLOR_BLUE = "BLUE";
     private static final String WAYPOINT_COLOR_PURPLE = "PURPLE";
+
+    /**
+     * 「上一 tick 准星指向的方块」记录的时效（tick）。
+     *
+     * <p>开箱那一刻的准星指向是判断「刚打开的是哪个方块」的唯一依据，过期就不能再用
+     * （防止一个无关 GUI 借旧指向触发判定）。开箱检测与自动偷取共用这个阈值。
+     */
+    private static final int TARGET_FRESH_TICKS = 10;
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSeed = settings.createGroup("种子设置");
@@ -457,6 +472,20 @@ public class FOAncientCitySearch extends Module {
         if (handler == null || handler == mc.player.playerScreenHandler) return;
         if (event.packet.syncId() != handler.syncId) return;       // 不是当前这个界面的同步包
 
+        // 只偷箱子（V6.26）：判断依据复用本模块「刚打开的是哪个方块」那一套
+        // （上一 tick 的准星指向 + 时效窗口）——这样偷取与「已开检测」永远指同一个方块。
+        // 彗星端原版不判容器，实测会把用户存在潜影盒里的物资一起取走，这里收紧。
+        // 判定保守：依据缺失/过期 → 不偷（宁可漏，也不能误偷自己的储物盒）。
+        boolean targetKnown = lastTargetedBlock != null
+            && tickCounter - lastTargetedAtTick <= TARGET_FRESH_TICKS;
+        boolean isChest = targetKnown
+            && mc.world.getBlockState(lastTargetedBlock).getBlock() instanceof ChestBlock;
+        if (!AncientStealLogic.shouldScanContainer(targetKnown, isChest)) {
+            debug("自动偷取：打开的不是箱子，跳过（"
+                + (targetKnown ? "识别为其他容器" : "拿不到方块依据") + "）");
+            return;
+        }
+
         // 容器区 = 除玩家背包 36 格（主背包 27 + 快捷栏 9）之外的槽位
         int playerInvStart = Math.max(0, handler.slots.size() - 36);
         List<Integer> hit = new ArrayList<>();
@@ -807,7 +836,7 @@ public class FOAncientCitySearch extends Module {
         boolean containerOpen = mc.currentScreen instanceof HandledScreen<?>
             && !(mc.currentScreen instanceof InventoryScreen);
         if (containerOpen && !wasContainerOpen && lastTargetedBlock != null
-            && tickCounter - lastTargetedAtTick <= 10) {
+            && tickCounter - lastTargetedAtTick <= TARGET_FRESH_TICKS) {
             // 先记入「已开名单」（V6.19）：之后所有搜索都跳过这个坐标，
             // 重开模块/重新搜索不会再把开过的箱子加回来
             if (mc.world.getBlockState(lastTargetedBlock).getBlock() instanceof ChestBlock) {

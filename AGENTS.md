@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.25`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.25-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.26`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.26-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -122,6 +122,13 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
        只快照槽位 → `TickEvent.Post` 里逐个取」，全程客户端线程（对齐 6.11 的教训）。
     触发点用 `InventoryEvent`（服务端同步容器内容时）而非每 tick 扫，天然避开「刚开箱槽位还是空的」误判。
     默认只偷附魔金苹果 + 迅捷潜行3 附魔书，其余物品不动；含「偷取统计」聊天栏汇报。
+  - ✅ 6.26 已完成：**自动偷取收紧为「只偷箱子」**（V6.25 实机翻车修复）。V6.25 沿用彗星端官方行为
+    ——不判断开的是什么容器，只要 `InventoryEvent` 到达就偷，结果把用户自己**存在潜影盒里的**
+    附魔金苹果/迅捷潜行书也一起取走了。现改为：必须确证「打开的是箱子方块（`ChestBlock`）」才偷，
+    判断依据复用本模块「刚打开的是哪个方块」的准星判定（`TARGET_FRESH_TICKS` = 10 tick 时效），
+    潜影盒 / 木桶 / 末影箱等一律不偷；**依据缺失或过期时保守不偷**（fail-safe，宁可漏偷）。
+    ⚠️ 教训：移植别的模块时，凡涉及「动不动玩家物品」的行为，边界条件（对哪些容器生效）
+      必须逐条确认后再上线，别默认照搬上游语义。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
