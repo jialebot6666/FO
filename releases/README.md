@@ -126,6 +126,7 @@
 | V6.22 | `5e550f2` | **附魔书过滤改成「附魔书列表」一个自定义设置项**（V6.21 的 43 条滑条把模块设置页撑爆，用户要求做成"物品列表那样"的一个条目；方案经用户确认后实施）。删除「附魔书过滤」设置组，新增 `utils/EnchantLevelMapSetting`（附魔 ID→最低等级映射 Setting，仿 Meteor 官方 `StatusEffectAmplifierMapSetting`：NBT 持久化、parseImpl 文本解析、只存 >0 条目）+ `gui/EnchantLevelMapSettingScreen`（全部 43 附魔逐行配等级 + 搜索框，0=不启用 / 1~最高=≥该等级命中），经公开 API `SettingsWidgetFactory.registerCustomFactory` 注册控件；设置项位置在物品列表与丢弃间隔之间，设置页里是一个「选择」按钮。判定语义不变（任一附魔达标即命中，视同在名单走黑白名单；全部 0=跟随物品名单）。V6.21 滑条配置不迁移（形态不同）。新增映射转换/端到端/findById 断言；43 套件 331 测试全绿 |
 | V6.23 | `dadbf60` | AutoTrash 附魔书等级语义改为**精确相等**（设 N 只命中恰好 N 级，修复设 1 时 3 级书也被保留） |
 | V6.24 | `f9cf7f7` | FO 杀戮光环：显示名补空格 + 新增「切换回来」（对齐彗星端官方 KillAura 的 swap-back） |
+| V6.25 | `c354eb8` | FO 古城战利品搜索：新增「自动偷取」（移植彗星端 InventoryTweaks 的 Auto Steal） |
 
 > 早期无版本号产物（`FO-5PrWPQNWZm.jar` 首版 / `FO-YoNbGZGn7b.jar` 前端汉化 /
 > `FO-csbnufGjfX.jar` 汉化+FO 前缀）随本次清理一并移除，未打 tag；其内容均已并入 V0.9 之后的版本。
