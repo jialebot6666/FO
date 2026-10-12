@@ -62,9 +62,13 @@ public class AddonTemplate extends MeteorAddon {
             // 一律拒绝输入的过滤器 = 只读（CharFilter.filter(当前文本, 待输入字符)）
             CharFilter readOnly = (text, c) -> false;
 
-            // 框架刚给本行加了左侧标题标签（当前行只有这一个控件），摘下它的 tooltip 后整行删除
+            // 框架刚给本行加了左侧标题标签（当前行只有这一个控件），摘下它的 tooltip 后整行删除。
+            // ⚠️ removeRow 内部会把行游标 rowI 减一（本分组首个设置时变成 -1，下一句 add 直接越界崩溃，
+            //   实机 6.31 crash 已踩过），所以删完必须补一次 row() 把游标移回来；
+            //   框架在工厂返回后还会再调一次 row()，两下正好恢复到"本行已结束"的原始节奏。
             String tooltip = table.getRow(table.rowI()).get(0).widget().tooltip;
             table.removeRow(table.rowI());
+            table.row();
 
             WTable grid = table.add(theme.table()).expandCellX().marginTop(6).widget();
             WLabel header = grid.add(theme.label(stats.displayHeader())).expandCellX().widget();
