@@ -126,6 +126,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 4. **务实说话**：没从代码里实际看到的、没验证过的，不说。不根据猜测推断功能，不编结论。不确定就说"不知道"或"需要看代码确认"。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策，必须先给出方案由用户拍板，未经确认不得直接改代码（与 `.github/skills/fo-development/SKILL.md` 铁律 5 一致）。
 6. **每次发版在 GitHub 建正式 Release（jar 唯一分发渠道）**：每个版本（Vx.y）交付时，构建产物 `FO-Vx.y.jar` **不再提交到 releases/ 目录**（`.gitignore` 已用 `releases/*.jar` 拦截）：① commit（信息含模块名+摘要）→ ② 打 tag `V<版本>`（指向该版本 commit）→ ③ 在 GitHub（jialebot6666/FO）创建正式 Release（标题 `FO Vx.y`、说明写入该版本更新介绍、jar 作为附件）→ ④ 在 `releases/README.md` 版本清单加一行（版本 | commit | 说明）。历史 jar 仍完整保留在 git 历史中，可随时 `git show <commit>:releases/FO-Vx.y.jar` 取回。
+7. **仓库拉取一律浅克隆**：新设备/新环境拉取 FO 仓库用 `git clone --depth=1 https://gh-proxy.com/https://github.com/jialebot6666/FO.git`（只拉最新代码，秒级完成；github.com 直连慢且常超时，历史里还保留着 100+ 个 jar 二进制，全量 clone 要很久）。日常开发增量 `git pull` 即可；确需完整历史时才 `git fetch --unshallow`。不要全量 clone。
 
 ## 构建与测试
 
@@ -137,8 +138,8 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 - ⚠️ `fo/gradle.properties` 里写死了 `org.gradle.java.home=/home/user/jdks/jdk-21.0.12.1+1`（Linux agent 的环境）。
   **不要改这个文件**，Windows 上用 `-Dorg.gradle.java.home=<本地 JDK 路径>` 覆盖。
 - ⚠️ 国内网络：`services.gradle.org` 会 connection reset，别用 `gradlew.bat`；Gradle 9.2.0 走腾讯镜像下载后用 `gradle.bat` 直接跑。
-  `github.com` 的 git 传输在本机超时，clone 走 `https://gh-proxy.com/https://github.com/...`，
-  提交与发版走 `api.github.com` REST API（见 `docs/scripts/gh-deliver.ps1`）。
+  `github.com` 的 git 传输在本机超时，clone 一律**浅克隆**：`git clone --depth=1 https://gh-proxy.com/https://github.com/jialebot6666/FO.git`
+  （硬性规范 7）；提交与发版走 `api.github.com` REST API（见 `docs/scripts/gh-deliver.ps1`）。
 - ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
   解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
 - Baritone 是仓库内的本地 jar（`fo/libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
