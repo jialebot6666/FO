@@ -75,4 +75,18 @@ public final class EnchantList {
         new Entry("minecraft:mending", "经验修补", 1),
         new Entry("minecraft:vanishing_curse", "消失诅咒", 1)
     );
+
+    /**
+     * 按 ID 查附魔，{@code minecraft:swift_sneak} 或不带命名空间的 {@code swift_sneak} 都行。
+     *
+     * @return 命中的条目；不认识返回 null
+     */
+    public static Entry findById(String idOrShort) {
+        if (idOrShort == null) return null;
+        String id = idOrShort.contains(":") ? idOrShort : "minecraft:" + idOrShort;
+        for (Entry e : VANILLA) {
+            if (e.id().equals(id)) return e;
+        }
+        return null;
+    }
 }

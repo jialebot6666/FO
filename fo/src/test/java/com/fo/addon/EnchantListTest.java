@@ -94,4 +94,12 @@ class EnchantListTest {
             assertFalse(e.name().equals(e.id()));
         }
     }
+
+    @Test
+    void findById_带与不带命名空间都能查() {
+        assertEquals("minecraft:swift_sneak", EnchantList.findById("minecraft:swift_sneak").id());
+        assertEquals("minecraft:swift_sneak", EnchantList.findById("swift_sneak").id());
+        assertTrue(EnchantList.findById("minecraft:nonexistent") == null);
+        assertTrue(EnchantList.findById(null) == null);
+    }
 }

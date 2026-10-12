@@ -81,4 +81,35 @@ class TrashLogicTest {
         assertFalse(TrashLogic.bookMatches(null, Map.of("minecraft:mending", 1)));
         assertFalse(TrashLogic.bookMatches(List.of(经验修补任意), Map.of()));
     }
+
+    // ==================== 等级映射 → 规则（V6.22 附魔书列表设置） ====================
+
+    @Test
+    void 等级映射_只收正值各成一条规则() {
+        List<TrashLogic.BookRule> rules = TrashLogic.rulesFromLevelMap(java.util.Map.of(
+            "minecraft:swift_sneak", 3,
+            "minecraft:mending", 1));
+        assertEquals(2, rules.size());
+        assertTrue(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 3)));
+        assertTrue(TrashLogic.bookMatches(rules, Map.of("minecraft:mending", 1)));
+        assertFalse(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 2)));
+    }
+
+    @Test
+    void 等级映射_空与空值安全() {
+        assertEquals(0, TrashLogic.rulesFromLevelMap(null).size());
+        assertEquals(0, TrashLogic.rulesFromLevelMap(Map.of()).size());
+        // 0 或负值 = 不启用
+        assertEquals(0, TrashLogic.rulesFromLevelMap(java.util.Map.of("minecraft:mending", 0)).size());
+    }
+
+    @Test
+    void 等级映射_端到端_映射转换后可直接判定命中() {
+        // 模块里的实际链路：设置映射 → rulesFromLevelMap → bookMatches
+        var map = new java.util.HashMap<String, Integer>();
+        map.put("minecraft:swift_sneak", 2);
+        List<TrashLogic.BookRule> rules = TrashLogic.rulesFromLevelMap(map);
+        assertTrue(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 2)));
+        assertFalse(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 1)));
+    }
 }
