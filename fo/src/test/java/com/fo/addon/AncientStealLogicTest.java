@@ -89,6 +89,37 @@ public class AncientStealLogicTest {
         assertFalse(AncientStealLogic.shouldSteal(false, 0, 0));
     }
 
+    // ---------- 容器范围（V6.26：只偷箱子）----------
+
+    /**
+     * 只偷箱子：确证是箱子方块才偷。
+     *
+     * <p>潜影盒 / 木桶 / 末影箱等由调用方判成 {@code isChestBlock=false} 传进来，
+     * 这里只需锁定「非箱子一律不偷」。
+     */
+    @Test
+    void stealsOnlyFromChestContainer() {
+        assertTrue(AncientStealLogic.shouldScanContainer(true, true));
+    }
+
+    /** 用户把自己的物资存在潜影盒里——打开潜影盒（非箱子）绝不能偷。 */
+    @Test
+    void neverStealsFromNonChestContainer() {
+        assertFalse(AncientStealLogic.shouldScanContainer(true, false));   // 潜影盒/木桶/末影箱…
+    }
+
+    /**
+     * 拿不到「刚打开的是哪个方块」的有效依据时保守不偷（fail-safe）。
+     *
+     * <p>宁可漏偷（还能手动拿），也不能因为依据缺失就退回「什么容器都偷」——
+     * 那正是 V6.25 把潜影盒一起偷掉的原因。
+     */
+    @Test
+    void unknownTargetNeverSteals() {
+        assertFalse(AncientStealLogic.shouldScanContainer(false, false));
+        assertFalse(AncientStealLogic.shouldScanContainer(false, true));    // 依据过期 → 即便看起来像箱子也不偷
+    }
+
     // ---------- 间隔计算 ----------
 
     @Test
