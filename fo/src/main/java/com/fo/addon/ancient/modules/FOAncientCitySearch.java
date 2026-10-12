@@ -116,9 +116,11 @@ import net.minecraft.world.Heightmap;
  * ⚠️ 刻意**只影响搜索用的种子**：不动本模块原有的记录种子校验与渲染过滤
  * （{@code currentSeedGuess()}），避免"自动带种子"顺带触发清档等新副作用。
  *
- * <p>V6.29：累计统计从「自动偷取」组里挪出来，单独成组「累计统计」（建在 sgSteal 之后 →
- * 渲染在「初始延迟」下面）。分组本身就是可折叠的 {@code WSection}，展示控件也改用
- * {@code WSection} 当框（抬头行当标题、计数行放框内），解决"没对齐、没框"的问题。
+ * <p>V6.29/V6.30：累计统计从「自动偷取」组里挪出来，单独成组「累计统计」（建在 sgSteal 之后 →
+ * 渲染在「初始延迟」下面）；分组本身就是可折叠的 {@code WSection}。展示控件两轮调整后定为
+ * 「{@code WTable} 两列：名称 | 只读黑框(数值)」——框用 {@code theme.textBox(文本, 拒绝一切输入的过滤器)}，
+ * 即「高亮半径 [256]」同款**原生**只读框（曾经用 WSection 当框，它的标题走大号字体、嵌在设置行里会盖住
+ * 左侧标签，实机截图确认"卡成一团"，已弃用）。
  */
 public class FOAncientCitySearch extends Module {
 

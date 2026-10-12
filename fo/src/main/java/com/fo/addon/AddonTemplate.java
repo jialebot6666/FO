@@ -16,8 +16,9 @@ import com.fo.addon.utils.StealStatsSetting;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
+import meteordevelopment.meteorclient.gui.utils.CharFilter;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
-import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
+import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -45,16 +46,25 @@ public class AddonTemplate extends MeteorAddon {
                 .setScreen(new EnchantLevelMapSettingScreen(theme, cast));
         });
 
-        // V6.27：自动偷取累计统计（只读展示）。
-        // V6.29 改样式：用 WSection（就是「高亮」「自动偷取」这些分组用的同一种控件）当"框"——
-        //   抬头行 → section 标题，计数行 → 框内内容。这样文字左对齐、有内边距、有框，
-        //   并且这个框本身也能折叠，比把几行裸标签堆在设置行右侧整齐得多。
+        // V6.27 新增；V6.29/V6.30 反复调样式，最终定成"像普通设置行那样"：
+        //   内容用 WTable 排成「名称 | 只读黑框(数值)」两列 —— 框自动对齐；
+        //   框用 theme.textBox(文本, 过滤器)，过滤器一律返回 false → 看得见、点不进、改不动
+        //   （即「高亮半径 [256]」「种子 [...]」同款原生框，不是自己画的野框）。
+        //   ⚠️ 曾经用 WSection 当框，但它的标题走**大号字体**，嵌在设置行里会盖住左侧标签
+        //   （实机截图确认"卡成一团"），所以改用 WTable + 只读文本框。
         //   设置名的左侧标签由 Meteor 框架自动加（取 Setting.title），这里只补右侧内容。
         SettingsWidgetFactory.registerCustomFactory(StealStatsSetting.class, theme -> (table, setting) -> {
             AncientStealStats stats = AncientStealStats.get();
-            WSection box = table.add(theme.section(stats.displayHeader(), true)).expandCellX().widget();
-            for (String line : stats.displayBody()) {
-                box.add(theme.label(line));
+            // 一律拒绝输入的过滤器 = 只读（CharFilter.filter(当前文本, 待输入字符)）
+            CharFilter readOnly = (text, c) -> false;
+
+            WTable grid = table.add(theme.table()).expandCellX().widget();
+            grid.add(theme.label(stats.displayHeader())).expandCellX();
+            grid.row();
+            for (AncientStealStats.StatRow row : stats.displayRows()) {
+                grid.add(theme.label(row.name()));
+                grid.add(theme.textBox(row.value(), readOnly)).expandCellX().widget();
+                grid.row();
             }
         });
 
