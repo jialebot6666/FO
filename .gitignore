@@ -3,3 +3,27 @@
 
 # 参考源码（Ying/LeavesHack 等外部项目源码，211MB，不入库）
 ref-src/
+
+# 构建产物 jar 一律走 GitHub Releases，不入库（历史 jar 保留在 git 历史中可回溯）
+releases/*.jar
+
+# 参考素材 / 历史会话产物（外部项目源码、jar、zip、nbt 存档，不入库）
+.novel-workflow/
+20260822.nbt
+20260822_noVia.nbt
+FO-项目源码包-V4.13.zip
+RustElytraClient-1.21.11-beta1.8-fireworkspeed1.5.jar
+RustElytraClient-1.21.11-beta1.8-patched.jar
+SlimefunHelper-1.21.11-1.1.7.1.jar
+icehack-v1/
+icehack2/
+misaka-review.zip
+misaka-v2.zip
+misaka-v2/
+misaka-v3.zip
+misaka-v3/
+misaka/
+rust-elytra/
+seedmapper-2.21.2-1.21.11.jar
+work/
+全部材料-用户上传与交付.zip

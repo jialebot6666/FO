@@ -29,7 +29,7 @@ license: CC0-1.0
 3. **补测试**：为行为变更写/更新断言（尤其是判定类逻辑，必须覆盖新行为）。
 4. **验证**：`cd fo && ./gradlew build` 全绿（BUILD SUCCESSFUL + 全部测试 0 failures / 0 errors）。Windows 上按 `docs/windows-build.md` 用本地 `gradle.bat` + `-Dorg.gradle.java.home=<JDK>`，不要用 `gradlew.bat`。
 5. **提交**：`git add` 相关文件 → commit（仓库根）。本机 `github.com` 的 git 传输会超时，推送改用 `api.github.com` 的 REST API（blob → tree → commit → 推进 `main`），见 `docs/scripts/gh-deliver.ps1`；**提交前先按 blob SHA-1 与远端 tree 比对，避免用旧副本覆盖别人的新提交**。
-6. **归档 jar**：把 `fo/build/libs/FO-<mod版本>.jar` 复制到 `releases/FO-V<版本号>.jar`（版本号在当前 `mod-version` 上顺延，如 V6.0 → V6.1；**文件名不带 commit 短哈希**，与构建产物、GitHub Release 附件同名），同时在 `releases/README.md` 的版本清单加一行，并 `git add releases/` 提交——**每个修复/功能版本必须留 jar 存档**。纯文档改动**不要**发版、不要建 Release（没有新 jar，只会产生内容重复的归档）。
+6. **发布 jar 走 GitHub Release（不再归档到 releases/）**：`cd fo && ./gradlew build` 产出 `fo/build/libs/FO-<mod版本>.jar` 后：① commit（信息含模块名+摘要）→ ② 打 tag `V<版本>`（指向该版本 commit）→ ③ `gh release create V<版本> fo/build/libs/FO-<mod版本>.jar --title "FO V<版本>" --notes "<更新说明>"` 建正式 Release（jar 为附件）→ ④ 在 `releases/README.md` 版本清单加一行（版本 | commit | 说明）。**releases/*.jar 已被 `.gitignore` 拦截，禁止再往仓库提交 jar**；历史 jar 保留在 git 历史中可回溯。纯文档改动**不要**发版、不要建 Release。
 7. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
 
 ## 用户偏好（历史沉淀）
