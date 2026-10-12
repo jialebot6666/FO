@@ -10,6 +10,7 @@ import com.fo.addon.ancient.core.AncientLootTable;
 import com.fo.addon.ancient.core.AncientOpenedChestPolicy;
 import com.fo.addon.ancient.core.AncientResourceSource;
 import com.fo.addon.ancient.core.AncientSearchLogic;
+import com.fo.addon.ancient.core.AncientSeedStore;
 import com.fo.addon.ancient.core.AncientStealStats;
 import com.fo.addon.ancient.core.CubiomesJNI;
 import com.fo.addon.ancient.core.FoundChest;
@@ -107,6 +108,13 @@ import net.minecraft.world.Heightmap;
  * ⚠️ 记账口径是「**真的取到手才算**」：{@code InvUtils.shiftClick()} 不返回成败，背包满时点击等于白点，
  * 所以在点击时记下槽位原本的内容、下一刻回读核对（槽位变空/变少才算取到），
  * 避免累计数字虚高。界面关掉来不及核对的那一次按乐观口径计入。
+ *
+ * <p>V6.28：**「应用种子」改成点一次就记住**。{@code manualSeed} 原本只活在内存里、每次启动游戏归零，
+ * 用户每次开模块都得重设。现在点「应用种子」会把值写进 {@code fo-ancient-seed.json}（全局一份），
+ * 模块激活时自动带上；想换种子就改「种子」输入框再点一次应用（覆盖保存）；
+ * 把输入框清空再点应用 = 清除保存的种子（关闭自动应用）。持久化见 {@code AncientSeedStore}。
+ * ⚠️ 刻意**只影响搜索用的种子**：不动本模块原有的记录种子校验与渲染过滤
+ * （{@code currentSeedGuess()}），避免"自动带种子"顺带触发清档等新副作用。
  */
 public class FOAncientCitySearch extends Module {
 
@@ -192,6 +200,15 @@ public class FOAncientCitySearch extends Module {
     /** 已找到的目标箱子记录（按作用域分组）。 */
     private AncientChestStore chestStore = new AncientChestStore();
     private boolean storeLoaded;
+
+    /**
+     * 「已应用的种子」的本地持久化（V6.28，全局一份）。
+     *
+     * <p>{@link #manualSeed} 只活在内存里，每次启动游戏都归零 —— 于是用户每次开模块都得重点一次
+     * 「应用种子」。现在点一次就把值存进 {@code fo-ancient-seed.json}，激活时自动带回来。
+     */
+    private final AncientSeedStore seedStore = new AncientSeedStore();
+    private boolean seedStoreLoaded;
 
     /** 上一 tick 准星指向的方块，用来判断「刚打开的是哪个箱子」。 */
     private BlockPos lastTargetedBlock;
@@ -297,13 +314,15 @@ public class FOAncientCitySearch extends Module {
 
         seedSetting = sgSeed.add(new StringSetting.Builder()
             .name("种子")
-            .description("输入世界种子")
+            .description("输入世界种子（改完记得点一次「应用种子」）")
             .defaultValue("-7346913998703726680")
             .build());
 
         applySeedSetting = sgSeed.add(new BoolSetting.Builder()
             .name("应用种子")
-            .description("应用手动输入的种子")
+            .description("应用手动输入的种子，并记住它——以后打开模块自动生效，不用再点。"
+                + "想换种子：改上面的输入框后再点一次这里覆盖保存；"
+                + "想取消自动应用：把输入框清空后再点一次这里")
             .defaultValue(false)
             .onChanged(this::onApplySeedChanged)
             .build());
@@ -436,6 +455,27 @@ public class FOAncientCitySearch extends Module {
     @Override
     public void onActivate() {
         loadStore();
+        // V6.28：自动带上上次「应用」过的种子 —— 点过一次就一直记住，不用每次开模块重设。
+        // 没应用过（或已手动清除）时保持 manualSeed = null，行为与以前一致（联机会提示手动设种子）。
+        loadSeedStore();
+        if (manualSeed == null && seedStore.hasSeed()) {
+            manualSeed = seedStore.seed();
+            info("已自动应用上次保存的种子: " + manualSeed + "（想换种子：改「种子」输入框后再点一次「应用种子」）");
+        }
+        if (manualSeed != null) {
+            // 输入框内容与"已生效的种子"不一致时点一下 —— 否则用户会困惑"我明明填了新的却没生效"
+            String boxText = seedSetting.get().trim();
+            if (!boxText.isEmpty()) {
+                try {
+                    if (AncientSearchLogic.parseSeedInput(boxText) != manualSeed.longValue()) {
+                        info("提示：「种子」输入框里是 " + boxText + "，当前生效的是 " + manualSeed
+                            + "；要用输入框里的那个请点一次「应用种子」");
+                    }
+                } catch (RuntimeException e) {
+                    // 解析不了就算了，别为一个提示影响模块启用
+                }
+            }
+        }
         if (autoSearchSetting.get()) {
             startSearch();
         }
@@ -1414,22 +1454,47 @@ public class FOAncientCitySearch extends Module {
         return removed;
     }
 
-    /** 应用种子开关回调：解析输入并写入手动种子。 */
+    /** 应用种子开关回调：解析输入、写入手动种子，并**持久化记住**（V6.28）。 */
     private void onApplySeedChanged(boolean apply) {
-        if (apply) {
-            String seedText = seedSetting.get().trim();
-            if (!seedText.isEmpty()) {
-                try {
-                    manualSeed = AncientSearchLogic.parseSeedInput(seedText);
-                    info("已设置种子: " + seedText);
-                } catch (Exception e) {
-                    error("设置种子失败: " + e.getMessage());
-                }
-            } else {
-                error("请先输入种子");
-            }
+        if (!apply) return;
+
+        String seedText = seedSetting.get().trim();
+
+        // 清空输入框再点应用 = 忘掉保存的种子（关闭「自动应用」的唯一出口）
+        if (seedText.isEmpty()) {
+            manualSeed = null;
+            seedStore.setSeed(null);
+            boolean cleared = seedStore.save();
+            info(cleared ? "已清除保存的种子（下次打开模块不再自动应用）"
+                : "已清除本次生效的种子（⚠️ 文件写入失败，重启后可能仍会自动应用）");
             applySeedSetting.set(false);
+            return;
         }
+
+        long parsed;
+        try {
+            parsed = AncientSearchLogic.parseSeedInput(seedText);
+        } catch (RuntimeException e) {
+            error("设置种子失败: " + e.getMessage());
+            applySeedSetting.set(false);
+            return;
+        }
+
+        manualSeed = parsed;
+        seedStore.setSeed(parsed);
+        // 记住它：以后每次打开模块自动带上，不用再点（用户要求，V6.28）
+        boolean saved = seedStore.save();
+        info("已设置种子: " + seedText + (saved
+            ? "（已保存，下次打开模块自动生效）"
+            : "（⚠️ 保存失败，本次有效但重启后需重新应用）"));
+        applySeedSetting.set(false);
+    }
+
+    /** 读一次「已应用的种子」（幂等）。 */
+    private void loadSeedStore() {
+        if (seedStoreLoaded) return;
+        seedStoreLoaded = true;
+        seedStore.setSeed(AncientSeedStore.load().seed());
     }
 
     private void setSearching(boolean value) {

@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.27`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.27-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.28`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.28-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -145,6 +145,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       直接在点击时记账会让累计数字虚高。实现是「点击时记下槽位原本内容 → 下一刻回读核对
       （槽位变空/变少才算取到）」，界面关掉来不及核对的那一次按乐观口径计入。
   - ⏳ 待做（用户可按需追加）：自动偷取的「只偷本模块搜索命中的古城箱子」更严格模式（当前按用户口径只判「是不是箱子」）
+  - ✅ 6.28 已完成：**「应用种子」点一次就记住**（用户要求：不想每次开模块都重设）。
+    `manualSeed` 原本只在内存里、模块构造时归零，所以每次启动游戏都得重点一次。
+    现在点「应用种子」会写进 **`fo-ancient-seed.json`（全局一份）**，模块激活时自动带上；
+    换种子 = 改「种子」输入框再点一次应用（覆盖保存）；**清空输入框再点应用 = 清除保存的种子**（关闭自动应用，
+    原来这种情况只报「请先输入种子」，现在给了用户一个退出自动应用的出口）。
+    - 为什么单独一个文件：`fo-ancient-chests.json` 有「换种子=换世界就整批清空」的生命周期
+      （`clear(scope)` 连作用域种子一起删），「上次应用过的种子」是**输入**、不该被结果的清理牵连。
+    - 持久化 `ancient/core/AncientSeedStore`（纯逻辑 toJson/fromJson 可单测 + 文件读写）。
+    - ⚠️ 刻意**只影响搜索用的种子**，不动 `currentSeedGuess()`（记录种子校验 + 渲染过滤），
+      避免"自动带种子"顺带触发清档/隐藏高亮等新副作用。
+  - ⚠️ 全局一份种子的已知取舍：换服务器时保存的种子会跟着带过去（用户选的口径）。若将来想要
+    「按服务器+维度各存一份」，改 `AncientSeedStore` 为 map 即可，数据格式已经带 version 字段。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
