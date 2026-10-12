@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.29`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.29-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.30`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.30-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -169,6 +169,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     - ⚠️ 设置页里**设置名的左侧标签是 Meteor 框架自动加的**（`DefaultSettingsWidgetFactory.group` 里
       先 `table.add(theme.label(setting.title))` 再调工厂的 `Factory.create(WTable, Setting<?>)`，后者返回 void），
       所以工厂只能决定"右侧内容"，左侧标题躲不掉；这也是为什么设置名要起得短（当前叫「战果」）。
+  - ✅ 6.30 已完成：**累计统计展示控件定稿**（V6.29 那版实机"卡成一团"）。
+    - 失败原因（实机截图确认）：把 `WSection` 嵌在设置行里当框 —— `WSection` 的标题走**大号字体**
+      （`TITLE_TEXT_SCALE`），直接盖住左侧标签「战果」，且数行挤在一起。
+    - 定稿方案：`WTable` 两列 —— 第一列物品名、第二列**只读黑框**放数值，列宽自动对齐。
+      只读框 = `theme.textBox(文本, CharFilter)`，过滤器 `(text, c) -> false` 一律拒绝输入
+      → 得到与「高亮半径 [256]」「种子 [...]」**完全同款的原生框**，且点不进、改不动。
+      首行仍是抬头「您已使用本插件共计获取了」（普通字号，占满一行）。
+    - 纯逻辑配套：`AncientStealStats.displayRows()` 返回 `List<StatRow>(名称, 数值)`（数值为纯数字串），
+      `displayHeader()` 抬头，`displayLines()` = 抬头 + "名称 数值"（供断言/将来复用）。
+      ⚠️ 教训：**凡是能在设置页里用的控件，优先挑"框架已经在用的那种"**（分组=WSection、
+      行内块=WTable、只读值=textBox+拒绝过滤器），不要自绘或塞大号字体的控件——看渲染效果的人只有用户，
+      一次猜错就得多发一版。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。

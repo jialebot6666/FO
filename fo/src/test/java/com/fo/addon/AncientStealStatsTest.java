@@ -64,7 +64,7 @@ public class AncientStealStatsTest {
 
     // ---------- 展示文案 ----------
 
-    /** 默认情况（只偷满级书）= 用户要求的三行。 */
+    /** 默认情况（只偷满级书）= 抬头 + 两行统计。 */
     @Test
     void displayLinesDefaultThreeLines() {
         AncientStealStats s = new AncientStealStats();
@@ -73,51 +73,67 @@ public class AncientStealStatsTest {
         List<String> lines = s.displayLines();
         assertEquals(3, lines.size());
         assertEquals("您已使用本插件共计获取了", lines.get(0));
-        assertEquals("12 个附魔金苹果", lines.get(1));
-        assertEquals("5 迅捷潜行III", lines.get(2));
+        assertEquals("附魔金苹果 12", lines.get(1));
+        assertEquals("迅捷潜行III 5", lines.get(2));
     }
 
-    /** 展示时抬头当"框"的标题、内容行放框里，所以两者必须分得干净（V6.29）。 */
+    /** 设置页展示成「名称 | 只读黑框(数值)」两列，所以数值与名称必须拆开给（V6.30）。 */
     @Test
-    void headerAndBodySplitCleanly() {
+    void displayRowsSplitNameAndValue() {
+        AncientStealStats s = new AncientStealStats();
+        s.addItem(APPLE, 12);
+        s.addBook(SWIFT, 3, 5);
+
+        List<AncientStealStats.StatRow> rows = s.displayRows();
+        assertEquals(2, rows.size());
+        assertEquals(new AncientStealStats.StatRow("附魔金苹果", "12"), rows.get(0));
+        assertEquals(new AncientStealStats.StatRow("迅捷潜行III", "5"), rows.get(1));
+        // 数值里只放数字（框里就一个数，跟「高亮半径 [256]」一致）
+        for (AncientStealStats.StatRow row : rows) {
+            assertTrue(row.value().matches("\\d+"), "数值应为纯数字: " + row.value());
+        }
+    }
+
+    /** 抬头/内容分离：抬头不含数字、内容行不重复抬头，displayLines == 抬头 + 各行。 */
+    @Test
+    void headerAndRowsSplitCleanly() {
         AncientStealStats s = new AncientStealStats();
         s.addItem(APPLE, 12);
         s.addBook(SWIFT, 3, 5);
 
         assertEquals("您已使用本插件共计获取了", s.displayHeader());
-        // 抬头里不能混进数字
         assertFalse(s.displayHeader().matches(".*\\d.*"));
-        // 内容行里不能重复抬头
-        for (String line : s.displayBody()) {
-            assertFalse(line.contains("您已使用本插件共计获取了"));
-        }
+
         List<String> all = s.displayLines();
         assertEquals(s.displayHeader(), all.get(0));
-        assertEquals(s.displayBody(), all.subList(1, all.size()));
+        for (AncientStealStats.StatRow row : s.displayRows()) {
+            assertFalse(row.name().contains("您已使用本插件共计获取了"));
+            assertTrue(all.contains(row.name() + " " + row.value()));
+        }
+        assertEquals(s.displayRows().size() + 1, all.size());
     }
 
     @Test
     void displayLinesEmptyStatsStillThreeLines() {
         List<String> lines = new AncientStealStats().displayLines();
         assertEquals(3, lines.size());
-        assertEquals("0 个附魔金苹果", lines.get(1));
-        assertEquals("0 迅捷潜行III", lines.get(2));
+        assertEquals("附魔金苹果 0", lines.get(1));
+        assertEquals("迅捷潜行III 0", lines.get(2));
     }
 
     /** 只有下调过门槛、真的偷到过低级书，才补出 II / I 两行。 */
     @Test
-    void displayLinesAddsLowerLevelsOnlyWhenStolen() {
+    void displayRowsAddsLowerLevelsOnlyWhenStolen() {
         AncientStealStats s = new AncientStealStats();
         s.addBook(SWIFT, 3, 1);
         s.addBook(SWIFT, 2, 4);
-        List<String> lines = s.displayLines();
-        assertEquals(4, lines.size());
-        assertTrue(lines.contains("4 迅捷潜行II"));
-        assertFalse(lines.contains("0 迅捷潜行I"));
+        assertEquals(3, s.displayRows().size());
+        assertTrue(s.displayRows().contains(new AncientStealStats.StatRow("迅捷潜行II", "4")));
+        assertFalse(s.displayRows().contains(new AncientStealStats.StatRow("迅捷潜行I", "0")));
 
         s.addBook(SWIFT, 1, 2);
-        assertEquals(5, s.displayLines().size());
-        assertTrue(s.displayLines().contains("2 迅捷潜行I"));
+        assertEquals(4, s.displayRows().size());
+        assertTrue(s.displayRows().contains(new AncientStealStats.StatRow("迅捷潜行I", "2")));
     }
 
     // ---------- 序列化（跨重启） ----------

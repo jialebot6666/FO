@@ -106,25 +106,35 @@ public final class AncientStealStats {
         return "您已使用本插件共计获取了";
     }
 
+    /** 展示用的一行：名称 + 数值（数值会放进只读黑框里，与「高亮半径 [256]」同款控件）。 */
+    public record StatRow(String name, String value) {
+    }
+
     /**
-     * 设置页里的**内容行**（每行一个统计项）。
+     * 设置页里的**内容行**（名称 + 数值）。
      *
      * <p>只有「确实偷到过」的等级才会出现，免得默认情况下挂一堆 0 出来。
      */
-    public synchronized List<String> displayBody() {
-        List<String> lines = new ArrayList<>(4);
-        lines.add(itemCount(GOLDEN_APPLE_ID) + " 个附魔金苹果");
-        lines.add(bookCount(SWIFT_SNEAK_ID, 3) + " 迅捷潜行III");
-        if (bookCount(SWIFT_SNEAK_ID, 2) > 0) lines.add(bookCount(SWIFT_SNEAK_ID, 2) + " 迅捷潜行II");
-        if (bookCount(SWIFT_SNEAK_ID, 1) > 0) lines.add(bookCount(SWIFT_SNEAK_ID, 1) + " 迅捷潜行I");
-        return lines;
+    public synchronized List<StatRow> displayRows() {
+        List<StatRow> rows = new ArrayList<>(4);
+        rows.add(new StatRow("附魔金苹果", String.valueOf(itemCount(GOLDEN_APPLE_ID))));
+        rows.add(new StatRow("迅捷潜行III", String.valueOf(bookCount(SWIFT_SNEAK_ID, 3))));
+        if (bookCount(SWIFT_SNEAK_ID, 2) > 0) {
+            rows.add(new StatRow("迅捷潜行II", String.valueOf(bookCount(SWIFT_SNEAK_ID, 2))));
+        }
+        if (bookCount(SWIFT_SNEAK_ID, 1) > 0) {
+            rows.add(new StatRow("迅捷潜行I", String.valueOf(bookCount(SWIFT_SNEAK_ID, 1))));
+        }
+        return rows;
     }
 
-    /** 抬头 + 内容行（拼在一起，便于一次性展示或断言）。 */
+    /** 抬头 + 内容行（拼成纯文本，便于一次性断言或将来复用到聊天输出）。 */
     public synchronized List<String> displayLines() {
         List<String> lines = new ArrayList<>(5);
         lines.add(displayHeader());
-        lines.addAll(displayBody());
+        for (StatRow row : displayRows()) {
+            lines.add(row.name() + " " + row.value());
+        }
         return lines;
     }
 
