@@ -51,26 +51,34 @@ class TrashLogicTest {
 
     private static final TrashLogic.BookRule 迅捷潜行3 =
         new TrashLogic.BookRule(java.util.Set.of("minecraft:swift_sneak"), 3);
-    private static final TrashLogic.BookRule 经验修补任意 =
+    private static final TrashLogic.BookRule 经验修补1 =
         new TrashLogic.BookRule(java.util.Set.of("minecraft:mending"), 1);
 
     @Test
-    void 命中_等级达标才算() {
+    void 命中_等级必须精确相等() {
         assertTrue(TrashLogic.bookMatches(List.of(迅捷潜行3), Map.of("minecraft:swift_sneak", 3)));
-        assertTrue(TrashLogic.bookMatches(List.of(迅捷潜行3), Map.of("minecraft:swift_sneak", 4)));
+        // V6.23：等级语义改为精确相等——4 级（假设存在）与 2 级都不命中
+        assertFalse(TrashLogic.bookMatches(List.of(迅捷潜行3), Map.of("minecraft:swift_sneak", 4)));
         assertFalse(TrashLogic.bookMatches(List.of(迅捷潜行3), Map.of("minecraft:swift_sneak", 2)));
     }
 
     @Test
-    void 命中_等级1即任意等级() {
-        assertTrue(TrashLogic.bookMatches(List.of(经验修补任意), Map.of("minecraft:mending", 1)));
+    void 命中_设1只命中1级_不命中更高等级() {
+        // 回归：用户反馈「设迅捷潜行 1，3 级也被保留」——精确语义下 1 != 3，不命中
+        assertTrue(TrashLogic.bookMatches(List.of(经验修补1), Map.of("minecraft:mending", 1)));
+        assertFalse(TrashLogic.bookMatches(
+            List.of(new TrashLogic.BookRule(java.util.Set.of("minecraft:swift_sneak"), 1)),
+            Map.of("minecraft:swift_sneak", 3)));
+        assertFalse(TrashLogic.bookMatches(
+            List.of(new TrashLogic.BookRule(java.util.Set.of("minecraft:swift_sneak"), 1)),
+            Map.of("minecraft:swift_sneak", 2)));
     }
 
     @Test
     void 命中_合并书任一附魔达标即保留() {
         // 迅捷潜行1 + 经验修补1 的合并书：迅捷潜行3 不中，但经验修补命中 → 保留
         Map<String, Integer> book = Map.of("minecraft:swift_sneak", 1, "minecraft:mending", 1);
-        assertTrue(TrashLogic.bookMatches(List.of(迅捷潜行3, 经验修补任意), book));
+        assertTrue(TrashLogic.bookMatches(List.of(迅捷潜行3, 经验修补1), book));
         // 只有迅捷潜行3 一条规则时：等级不够 → 不中
         assertFalse(TrashLogic.bookMatches(List.of(迅捷潜行3), book));
     }
@@ -79,7 +87,7 @@ class TrashLogicTest {
     void 命中_规则或书为空一律不中() {
         assertFalse(TrashLogic.bookMatches(List.of(), Map.of("minecraft:mending", 1)));
         assertFalse(TrashLogic.bookMatches(null, Map.of("minecraft:mending", 1)));
-        assertFalse(TrashLogic.bookMatches(List.of(经验修补任意), Map.of()));
+        assertFalse(TrashLogic.bookMatches(List.of(经验修补1), Map.of()));
     }
 
     // ==================== 等级映射 → 规则（V6.22 附魔书列表设置） ====================
@@ -110,6 +118,8 @@ class TrashLogicTest {
         map.put("minecraft:swift_sneak", 2);
         List<TrashLogic.BookRule> rules = TrashLogic.rulesFromLevelMap(map);
         assertTrue(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 2)));
+        // V6.23 精确语义：1 级与 3 级都不命中「迅捷潜行 2」
         assertFalse(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 1)));
+        assertFalse(TrashLogic.bookMatches(rules, Map.of("minecraft:swift_sneak", 3)));
     }
 }

@@ -62,13 +62,15 @@ public class AutoTrash extends Module {
         .build());
 
     /**
-     * V6.22：附魔书列表（附魔 ID → 最低命中等级，>0 即启用；0 不存 = 不启用）。
+     * V6.22：附魔书列表（附魔 ID → 精确命中等级，>0 即启用；0 不存 = 不启用）。
+     * V6.23：等级语义由「≥」改为「精确相等」——设 N 只命中恰好 N 级的附魔书。
      * 设置页里是一个「选择」按钮，点开全附魔配等级界面（见 EnchantLevelMapSettingScreen）。
      * 命中的附魔书视同「在名单里」，照旧走黑白名单判定。
      */
     private final Setting<Object2IntMap<String>> enchantBookLevels = sgGeneral.add(new EnchantLevelMapSetting.Builder()
         .name("附魔书列表")
-        .description("点开为全部原版附魔的列表：给附魔填 1~最高等级表示「≥该等级命中」（0=不启用）。"
+        .description("点开为全部原版附魔的列表：给附魔填 1~最高等级表示「恰好该等级命中」，"
+            + "如「迅捷潜行 3」只命中 3 级、1~2 级不命中；填 1 同理只命中 1 级（0=不启用）。"
             + "命中的附魔书视同在名单里（白名单=保留，黑名单=丢弃）；全部为 0 时附魔书完全跟随物品名单。"
             + "整本全留/全丢：把「附魔书」物品加入/排除出物品列表即可。")
         .build());

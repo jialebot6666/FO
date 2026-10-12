@@ -51,13 +51,13 @@ public final class TrashLogic {
     // ==================== 附魔书规则（V6.20 引入，V6.21 起由 EnchantList 驱动） ====================
 
     /**
-     * 已启用的附魔规则：附魔 ID（minecraft:xxx）+ 最低等级（1 = 任意等级）。
-     * 通常由模块侧从 EnchantList + 各附魔等级设置构建。
+     * 已启用的附魔规则：附魔 ID（minecraft:xxx）+ <b>精确命中等级</b>（V6.23 起：等级需完全相等）。
+     * 通常由模块侧从「附魔书列表」设置构建。
      */
-    public record BookRule(Set<String> enchantIds, int minLevel) {}
+    public record BookRule(Set<String> enchantIds, int level) {}
 
     /**
-     * 「附魔ID → 最低等级」映射转规则列表（V6.22，来自附魔书列表设置）。
+     * 「附魔ID → 精确等级」映射转规则列表（V6.22 引入，V6.23 起为精确等级）。
      * 等级 ≤ 0 / 空映射返回空列表（= 无规则，附魔书跟随物品名单）。
      */
     public static java.util.List<BookRule> rulesFromLevelMap(java.util.Map<String, Integer> levelMap) {
@@ -72,7 +72,10 @@ public final class TrashLogic {
     }
 
     /**
-     * 附魔书是否命中任一规则（任一附魔达标即命中，宽松策略，用户确认）。
+     * 附魔书是否命中任一规则（任一附魔<b>等级恰好相等</b>即命中，宽松策略，用户确认）。
+     *
+     * <p>V6.23：等级语义由「≥」改为「精确相等」——设「迅捷潜行 3」只命中 3 级，1/2 级都不命中；
+     * 设「迅捷潜行 1」同样只命中 1 级（修复“设 1 时 3 级也被保留”）。
      *
      * @param rules        已启用规则
      * @param bookEnchants 书内附魔：附魔 ID（minecraft:xxx）→ 等级
@@ -83,7 +86,7 @@ public final class TrashLogic {
             if (rule == null || rule.enchantIds() == null || rule.enchantIds().isEmpty()) continue;
             for (Map.Entry<String, Integer> e : bookEnchants.entrySet()) {
                 if (!rule.enchantIds().contains(e.getKey())) continue;
-                if (e.getValue() >= rule.minLevel()) return true;
+                if (e.getValue() == rule.level()) return true;
             }
         }
         return false;
