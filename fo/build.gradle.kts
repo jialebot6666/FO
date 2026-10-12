@@ -5,9 +5,15 @@ plugins {
 val archivesBaseName = providers.gradleProperty("archives_base_name").get()
 val mavenGroup = providers.gradleProperty("maven_group").get()
 
+// 命名准则（见 AGENTS.md「命名规范」）：
+//   构建产物名 = FO-<mod版本>-<MC版本>.jar，例如 FO-6.25-1.21.11.jar
+//   mod 版本号不带 V 前缀；MC 版本随 libs.versions.toml 的 minecraft 自动跟随，升 MC 不用改两处。
+val modVersion = libs.versions.mod.version.get()
+val minecraftVersion = libs.versions.minecraft.get()
+
 base {
     archivesName = archivesBaseName
-    version = libs.versions.mod.version.get()
+    version = "$modVersion-$minecraftVersion"
     group = mavenGroup
 }
 
@@ -99,9 +105,11 @@ fun toMinecraftCompat(version: String): String {
 
 tasks {
     processResources {
+        // fabric.mod.json 里的版本号用纯 mod 版本（不带 MC 后缀）：
+        // 带 "-1.21.11" 会被 Fabric 的 semver 解析成 6.25 的预发布版，影响依赖判定，没必要。
         val propertyMap = mapOf(
-            "version" to project.version,
-            "minecraft_version" to toMinecraftCompat(libs.versions.minecraft.get()),
+            "version" to modVersion,
+            "minecraft_version" to toMinecraftCompat(minecraftVersion),
             "jdk_version" to libs.versions.jdk.get(),
         )
 

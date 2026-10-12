@@ -1,4 +1,19 @@
 ﻿<#
+  ⚠️⚠️ 本脚本是 **V5.x 时代的旧流程，已废弃，不要照它执行** ⚠️⚠️
+
+  与现行准则不一致的地方（以 AGENTS.md 为准，冲突时一律按 AGENTS.md）：
+    ① 它会把 jar 归档进 `releases/FO-<版本>-<短哈希>.jar` —— 现行硬性规范 6 已禁止
+       （`.gitignore` 用 `releases/*.jar` 拦截），jar 只作为 GitHub Release 附件分发；
+    ② 它的版本号/tag 用旧的 `V5.3` / `FO-V5.3` 写法 —— 现行准则：版本号不带 V、tag 用 `<版本>`、
+       产物与附件名用 `FO-<mod版本>-<MC版本>.jar`（如 `FO-6.25-1.21.11.jar`），
+       详见 AGENTS.md「命名规范」与 releases/README.md「命名规范」；
+    ③ 它假定本机有 git 工作区，实际本机 git 传输不通，改用 `api.github.com` REST API 逐步执行。
+
+  需要交付新版本时，请直接按 AGENTS.md 硬性规范 6 与 `.github/skills/fo-development/SKILL.md` 工作流 6
+  逐步走 REST API（blob → tree → commit → 推进 main → 建 tag → 建 Release → 传附件 → 更新版本清单）。
+  本文件仅作历史参考保留。
+
+  原始说明（已过期）：
   不用 git，直接走 GitHub REST API 交付一个新版本 FO。
 
   做三件事（对应 AGENTS.md 铁律 6）：
@@ -10,14 +25,14 @@
       # token 放临时文件，别写进脚本、别提交
       Set-Content .ghtoken -Value 'ghp_xxx' -Encoding ASCII -NoNewline
       powershell -NoProfile -ExecutionPolicy Bypass -File docs\scripts\gh-deliver.ps1 `
-          -Version V5.3 `
+          -Version 6.25 `
           -Files @('fo/gradle/libs.versions.toml','fo/src/main/java/com/fo/addon/....java') `
           -CommitMessageFile rel\commit1.txt `
-          -NotesFile rel\notes-V5.3.md
+          -NotesFile rel\notes-6.25.md
       Remove-Item .ghtoken      # 用完删掉，并去 GitHub 吊销 token
 
   参数：
-      -Version            版本号，如 V5.3（须与 fo/gradle/libs.versions.toml 的 mod-version 一致）
+      -Version            版本号，如 6.25（不带 V；须与 fo/gradle/libs.versions.toml 的 mod-version 一致）
       -Files              本次改动/新增的仓库相对路径（正斜杠）
       -CommitMessageFile  源码 commit 的完整说明（UTF-8 文件）
       -NotesFile          Release 更新介绍（UTF-8 文件；其中的 @@HASH@@ 会替换成源码 commit 短哈希）
@@ -25,6 +40,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Version,
+    [string]$McVersion = '1.21.11',
     [Parameter(Mandatory = $true)][string[]]$Files,
     [Parameter(Mandatory = $true)][string]$CommitMessageFile,
     [Parameter(Mandatory = $true)][string]$NotesFile,
@@ -89,9 +105,9 @@ Write-Host "commit1 = $($c1.sha)  (short $short)"
 
 # ---------- 阶段二：归档 jar ----------
 Write-Host "=== 阶段二：归档 jar ==="
-$jarName = "FO-$Version-$short.jar"
-$srcJar  = Join-Path $ws "FO\fo\build\libs\FO-$Version.jar"
-if (-not (Test-Path $srcJar)) { throw "jar not found: $srcJar (mod-version 对得上吗？)" }
+$jarName = "FO-$Version-$McVersion.jar"
+$srcJar  = Join-Path $ws "FO\fo\build\libs\FO-$Version-$McVersion.jar"
+if (-not (Test-Path $srcJar)) { throw "jar not found: $srcJar (mod-version / minecraft 对得上吗？)" }
 $dstJar  = Join-Path $ws "FO\releases\$jarName"
 Copy-Item $srcJar $dstJar -Force
 Write-Host "archived -> releases/$jarName ($((Get-Item $dstJar).Length) bytes)"
@@ -124,10 +140,11 @@ $body = [System.IO.File]::ReadAllText((Join-Path $ws $NotesFile), [System.Text.E
 $body = $body.Replace('@@HASH@@', $short)
 
 # tag 由 GitHub 自动创建，指向 target_commitish
+# ⚠️ 新版准则：tag 不带 V（如 6.25），标题形如 "FO 6.25-1.21.11"，附件名 = FO-<mod版本>-<MC版本>.jar
 $rel = Call-Api POST "$Api/releases" (@{
-    tag_name         = "FO-$Version"
+    tag_name         = "$Version"
     target_commitish = $c2.sha
-    name             = "FO $Version"
+    name             = "FO $Version-$McVersion"
     body             = $body
     draft            = $false
     prerelease       = $false

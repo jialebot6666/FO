@@ -122,7 +122,8 @@ $env:GRADLE_USER_HOME = "$ws\.gradle-home"     # 依赖缓存放工作区，别�
 产物：
 
 ```
-fo\build\libs\FO-<mod版本>.jar      ← 版本号来自 fo/gradle/libs.versions.toml 的 mod-version
+fo\build\libs\FO-<mod版本>-<MC版本>.jar   ← 两段分别来自 fo/gradle/libs.versions.toml 的 mod-version 与 minecraft
+                                         （例：mod-version=6.25 + minecraft=1.21.11 → FO-6.25-1.21.11.jar）
 ```
 
 ### ⚠️ 坑 3：Windows PowerShell 5.1 会把 stderr 当终止错误
@@ -230,13 +231,18 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
 
 ③ 建 Release（tag 由 GitHub 自动指向 target_commitish）
    POST   /repos/{o}/{r}/releases
-          {tag_name:"FO-Vx.y", target_commitish:<②的commit>, name:"FO Vx.y",
+          {tag_name:"<mod版本>", target_commitish:<commit>, name:"FO <mod版本>-<MC版本>",
            body:<更新介绍>, draft:false, prerelease:false}
+          ← tag 不带 V；标题形如 "FO 6.25-1.21.11"
    POST   https://uploads.github.com/repos/{o}/{r}/releases/{id}/assets?name=<jar名>
-          --data-binary @<jar路径>       ← 用 curl.exe 传二进制
+          --data-binary @<jar路径>       ← 用 curl.exe 传二进制；附件名 = 构建产物名（FO-<mod版本>-<MC版本>.jar）
 ```
 
-**版本号**改 `fo/gradle/libs.versions.toml` 的 `mod-version`，产物文件名自动跟随。
+**版本号**改 `fo/gradle/libs.versions.toml` 的 `mod-version`（不带 V），**MC 版本**改同文件的 `minecraft`，
+产物文件名（`FO-<mod版本>-<MC版本>.jar`）由 `fo/build.gradle.kts` 自动跟随，不要在别处写死版本串。
+
+> ⚠️ 上面 ② 的「把 jar 归档进 `releases/`」是 V5.x 时代的旧流程，**已废弃**：
+> 按 `AGENTS.md` 硬性规范 6，`releases/*.jar` 已被 `.gitignore` 拦截，jar 只作为 GitHub Release 附件分发。
 
 > **纯文档改动不要发版**：没有新 jar 就不升版本、不建 Release，否则会污染版本历史
 > （会出现两个内容完全相同的 jar）。
