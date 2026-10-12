@@ -146,7 +146,7 @@ public class AutoMining extends Module {
 
     private final Setting<Boolean> autoKillAura = sgGeneral.add(new BoolSetting.Builder()
         .name("联动杀戮光环")
-        .description("开启自动挖矿时同步开启 FO 杀戮光环，关闭时同步关闭（成对联动）")
+        .description("开启自动挖矿时同步开启 FO杀戮光环，关闭时同步关闭（成对联动）")
         .defaultValue(true)
         .build());
 
@@ -304,7 +304,7 @@ public class AutoMining extends Module {
             if (trash != null) trash.enableForMineLink();
         }
 
-        // FO 杀戮光环联动（成对：开→开）
+        // FO杀戮光环联动（成对：开→开）
         if (autoKillAura.get()) {
             FOKillAura ka = Modules.get().get(FOKillAura.class);
             if (ka != null && !ka.isActive()) ka.toggle();
@@ -329,7 +329,7 @@ public class AutoMining extends Module {
             AutoTrash trash = Modules.get().get(AutoTrash.class);
             if (trash != null) trash.disableForMineLink();
         }
-        // FO 杀戮光环联动（成对：关→关）
+        // FO杀戮光环联动（成对：关→关）
         if (autoKillAura.get()) {
             FOKillAura ka = Modules.get().get(FOKillAura.class);
             if (ka != null && ka.isActive()) ka.toggle();
