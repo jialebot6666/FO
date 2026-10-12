@@ -32,6 +32,12 @@ license: CC0-1.0
 6. **发布 jar 走 GitHub Release（不再归档到 releases/）**：`cd fo && ./gradlew build` 产出 `fo/build/libs/FO-<mod版本>.jar` 后：① commit（信息含模块名+摘要）→ ② 打 tag `V<版本>`（指向该版本 commit）→ ③ `gh release create V<版本> fo/build/libs/FO-<mod版本>.jar --title "FO V<版本>" --notes "<更新说明>"` 建正式 Release（jar 为附件）→ ④ 在 `releases/README.md` 版本清单加一行（版本 | commit | 说明）。**releases/*.jar 已被 `.gitignore` 拦截，禁止再往仓库提交 jar**；历史 jar 保留在 git 历史中可回溯。纯文档改动**不要**发版、不要建 Release。
 7. **交付**：`present_files` 交付新 jar，并告知用户改动点与测试建议。
 
+## 仓库拉取（与 AGENTS.md 硬性规范 7 一致）
+
+- 新设备/新环境一律**浅克隆**（github.com 直连慢且常超时，历史含 100+ 个 jar 二进制，全量 clone 要很久）：
+  `git clone --depth=1 https://gh-proxy.com/https://github.com/jialebot6666/FO.git`
+- 日常开发增量 `git pull` 即可；确需完整历史时才 `git fetch --unshallow`；**不要全量 clone**。
+
 ## 用户偏好（历史沉淀）
 
 - 默认值/物资类需求：用户喜欢"直接从代码层改"，不要只给配置教程。
