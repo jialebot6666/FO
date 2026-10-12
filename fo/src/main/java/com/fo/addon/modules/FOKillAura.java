@@ -3,7 +3,6 @@ package com.fo.addon.modules;
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Rotation;
 import com.fo.addon.utils.RotationManager;
-import com.fo.addon.utils.SwapBackTracker;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.pathing.PathManagers;
@@ -49,26 +48,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-/**
- * FO 杀戮光环（移植自 meteor-miku KillAuraMiku；显示名统一为「FO 杀戮光环」）。
- *
- * <p>V6.24 两项改动（用户确认后实施）：
- * <ol>
- *   <li><b>显示名补空格</b>：由「FO杀戮光环」改为「FO 杀戮光环」——其余 7 个模块统一是
- *       {@code FO } 前缀 + 空格，只有它漏了，UI 上看着不齐。</li>
- *   <li><b>新增「切换回来」</b>：对齐彗星端（Meteor）官方 KillAura 的 {@code swap-back}
- *       ——自动切武器前记住原来占的快捷栏槽位，攻击会话结束时切回；会话期间反复切武器不覆盖记录。
- *       默认<b>关闭</b>（与官方默认一致）。状态机抽到 {@link SwapBackTracker}（纯逻辑，可单测）。</li>
- * </ol>
- *
- * <p>「切换回来」的触发点严格对齐官方 {@code stopAttacking()} 的调用位置：仅在
- * <b>目标列表为空 / 手上不是可接受武器 / 关闭模块</b>时结束会话并切回；暂停类守卫
- * （使用物品、仅点击、卡顿、水晶光环）直接 return，<b>不</b>结束会话（与官方一致）。
- *
- * <p>⚠️ 已知遗留（本轮刻意不动，避免扩大改动面，需要时另行确认）：
- * {@code 停止格挡} 设置声明后从未被读取（{@code shouldShieldBreak()} 恒返回 false，属死设置）；
- * {@code attack()} 在非「发包攻击」分支下会重复执行一次攻击与挥手。
- */
+/** FO杀戮光环（移植自 meteor-miku KillAuraMiku，显示名 FO杀戮光环） */
 public class FOKillAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgTargeting = settings.createGroup("目标选择");
@@ -94,18 +74,6 @@ public class FOKillAura extends Module {
         .name("自动切换")
         .description("攻击目标时自动切换到选定的武器")
         .defaultValue(true)
-        .build()
-    );
-
-    /**
-     * 切换回来（对应彗星端官方 KillAura 的 swap-back，V6.24 新增）。
-     * 自动切武器前记住原来占的快捷栏槽位，攻击会话结束时切回；会话期间反复切武器不覆盖记录。
-     */
-    private final Setting<Boolean> swapBack = sgGeneral.add(new BoolSetting.Builder()
-        .name("切换回来")
-        .description("攻击结束后切回原来占用的快捷栏槽位（仅在开启「自动切换」时有效）.")
-        .defaultValue(false)
-        .visible(autoSwitch::get)
         .build()
     );
 
@@ -319,27 +287,16 @@ public class FOKillAura extends Module {
     private final List<Entity> targets = new ArrayList<>();
     private int switchTimer, hitTimer;
     private boolean wasPathing = false;
-    /** 「切换回来」状态机：记录本次攻击会话切换武器前占用的快捷栏槽位（V6.24） */
-    private final SwapBackTracker swapBackTracker = new SwapBackTracker();
     /** 正在攻击实体（有目标且已切换/手持武器）——自动挖矿锁时运镐会据此跳过避免抢槽 */
     public boolean attacking;
 
     public FOKillAura() {
-        super(AddonTemplate.CATEGORY, "FO 杀戮光环", "超级强力的杀敌光环，自动攻击你周围指定的实体，不卡脚");
-    }
-
-    @Override
-    public void onActivate() {
-        // 对齐官方 onActivate：复位「切换回来」记录（previousSlot = -1, swapped = false）
-        swapBackTracker.reset();
+        super(AddonTemplate.CATEGORY, "FO杀戮光环", "超级强力的杀敌光环，自动攻击你周围指定的实体，不卡脚");
     }
 
     @Override
     public void onDeactivate() {
         targets.clear();
-        // 对齐官方 onDeactivate（targets.clear() → stopAttacking()）：关闭模块时若还欠着切回就补上，
-        // 否则玩家会被留在武器槽上
-        restoreSwapBack();
         attacking = false;
     }
 
@@ -371,8 +328,6 @@ public class FOKillAura extends Module {
                 PathManagers.get().resume();
                 wasPathing = false;
             }
-            // 无目标 = 本次攻击会话结束（对齐官方 stopAttacking 的调用点）
-            restoreSwapBack();
             return;
         }
 
@@ -390,18 +345,10 @@ public class FOKillAura extends Module {
             };
             FindItemResult weaponResult = InvUtils.findInHotbar(predicate);
 
-            // 「切换回来」：本会话首次切换时记住切换前占用的槽位（对齐官方 if (!swapped) 语义，
-            // 与「切换回来」开关无关——开关只决定会话结束时是否真的切回）
-            swapBackTracker.recordBeforeSwap(mc.player.getInventory().getSelectedSlot());
-
             InvUtils.swap(weaponResult.slot(), false);
         }
 
-        if (!itemInHand()) {
-            // 手上不是可接受武器 = 本次攻击会话结束（对齐官方 acceptableWeapon 判定失败时调用 stopAttacking）
-            restoreSwapBack();
-            return;
-        }
+        if (!itemInHand()) return;
 
         attacking = true;
         if (rotation.get() == RotationMode.Always)
@@ -418,19 +365,6 @@ public class FOKillAura extends Module {
     private void onSendPacket(PacketEvent.Send event) {
         if (event.packet instanceof UpdateSelectedSlotC2SPacket) {
             switchTimer = switchDelay.get();
-        }
-    }
-
-    /**
-     * 攻击会话结束：按「切换回来」设置决定是否切回原快捷栏槽位
-     * （对齐官方 {@code KillAura.stopAttacking()} 末尾的切回段）。
-     *
-     * <p>无论是否真的切回，状态机都会复位，下次会话重新记录原槽位。
-     */
-    private void restoreSwapBack() {
-        int slot = swapBackTracker.completeSession(swapBack.get());
-        if (slot != SwapBackTracker.NO_SLOT) {
-            InvUtils.swap(slot, false);
         }
     }
 
