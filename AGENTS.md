@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.30`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.30-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.31`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.31-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -181,6 +181,15 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       ⚠️ 教训：**凡是能在设置页里用的控件，优先挑"框架已经在用的那种"**（分组=WSection、
       行内块=WTable、只读值=textBox+拒绝过滤器），不要自绘或塞大号字体的控件——看渲染效果的人只有用户，
       一次猜错就得多发一版。
+  - ✅ 6.31 已完成：**累计统计去掉左标签 + 说明改悬停**（用户反馈：删掉「战果」左标签、其余内容左对齐，
+    截图里的说明文案放到「您已使用本插件共计获取了」上悬停可看）。
+    - 发现：`DefaultSettingsWidgetFactory.group` 调工厂**之前**已把左侧标题标签加进当前行
+      （当前行当时只有这一个控件），且 `WTable.removeRow(i)` 是 public —— 工厂里可以
+      `table.getRow(table.rowI()).get(0).widget()` 摘下标签（顺手拿走它的 `tooltip`，即设置 description），
+      再 `removeRow` 整行删除，自己从零画 → 左标签彻底消失、内容顶到最左。
+    - 抬头行补 `marginTop(6)` 对齐相邻行（框架给标题标签的也是 6）。
+    - ⚠️ 修订 6.29 的结论："左侧标题躲不掉"其实躲得掉，只是要整行删掉重画（`Setting.title` 是 final、
+      改不了，只能删行）。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
