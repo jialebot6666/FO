@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = V6.22`（见 `fo/gradle/libs.versions.toml`）
+- 当前版本：`mod-version = V6.25`（见 `fo/gradle/libs.versions.toml`）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -12,7 +12,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   4. FO 自动LogPlus（`modules/AutoLog`）
   5. FO 自动挖沙（`modules/AutoMineSand`）
   6. FO 自动挖矿（`modules/AutoMining`）
-  7. FO杀戮光环（`modules/FOKillAura`）
+  7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，V6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ V6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
@@ -110,6 +110,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     设置页里是「选择」按钮）。位置：sgGeneral 的物品列表与丢弃间隔之间。
     纯逻辑 `TrashLogic.rulesFromLevelMap`（映射→规则）可单测；判定语义不变（≥ 最低等级，
     命中视同在名单走黑白名单）。V6.21 的 43 条滑条设置不迁移旧配置（形态不同，用户重配一次）。
+  - ✅ V6.24 已完成：**FO 杀戮光环显示名补空格 + 新增「切换回来」**（对齐彗星端官方 KillAura 的 `swap-back`：
+    切武器前记住原快捷栏槽位、攻击会话结束时切回；只在会话首次记录，会话中反复切武器不覆盖；
+    仅「目标为空 / 手上非可接受武器 / 关闭模块」结束会话，暂停类守卫不结束。默认关闭。
+    状态机 `utils/SwapBackTracker` 可单测）。显示名 `FO杀戮光环` → `FO 杀戮光环`（其余模块均为 `FO ` + 空格）。
+  - ✅ V6.25 已完成：**古城模块新增「自动偷取」**（用户确认后实施）。移植彗星端 Meteor 官方
+    `InventoryTweaks` 的 Auto Steal（源码 + 本机 1.21.11-85 字节码双向核对），差别两点：
+    ① 官方只按 `Item` 匹配、**认不出附魔书附的是哪条附魔**，拿不到「迅捷潜行3」——本模块读
+       `ItemEnchantmentsComponent` 按附魔 ID + 等级判定（`utils/AncientStealLogic`，可单测）；
+    ② 官方在后台线程 `Thread.sleep` 后点槽位（跨线程发交互包），本模块改为「`InventoryEvent` 里
+       只快照槽位 → `TickEvent.Post` 里逐个取」，全程客户端线程（对齐 V6.11 的教训）。
+    触发点用 `InventoryEvent`（服务端同步容器内容时）而非每 tick 扫，天然避开「刚开箱槽位还是空的」误判。
+    默认只偷附魔金苹果 + 迅捷潜行3 附魔书，其余物品不动；含「偷取统计」聊天栏汇报。
   - ⏳ V7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
@@ -143,7 +155,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 - ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
   解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
 - Baritone 是仓库内的本地 jar（`fo/libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
-- 产物：`fo/build/libs/FO-V6.19.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
+- 产物：`fo/build/libs/FO-V6.25.jar`（版本号随 mod 版本走，见 `fo/gradle/libs.versions.toml` 的 `mod-version`）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 
 ## 命名规范（硬性）

@@ -16,6 +16,8 @@ import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
 import com.fo.addon.utils.AncientCityLocatorLogic;
+import com.fo.addon.utils.AncientStealLogic;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -25,9 +27,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadLocalRandom;
+import meteordevelopment.meteorclient.events.packets.InventoryEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -35,10 +40,12 @@ import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.ItemListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.fabricmc.loader.api.FabricLoader;
@@ -49,6 +56,14 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.client.gui.screen.ingame.InventoryScreen;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.EnchantmentHelper;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.screen.ScreenHandler;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -66,6 +81,14 @@ import net.minecraft.world.Heightmap;
  *
  * <p>半径语义：搜索半径的单位是「区块」，但距离按**方块距离**计算，基准点是城市原点方块坐标。
  * （旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块。）
+ *
+ * <p>V6.25：新增「自动偷取」设置组——打开容器时自动取走 **附魔金苹果** 与 **迅捷潜行3 附魔书**，
+ * 其余物品一律不动。方案移植自彗星端（Meteor Client）官方 {@code InventoryTweaks} 的 Auto Steal
+ * （源码 + 本机 1.21.11-85 字节码双向核对），差别有两点：
+ * ① 官方只能按 {@code Item} 匹配，**认不出附魔书附的是哪条附魔**，所以拿不到「迅捷潜行3」——
+ *    本模块读 {@code ItemEnchantmentsComponent} 按附魔 ID + 等级判定，补上了这个能力；
+ * ② 官方在后台线程 {@code Thread.sleep} 后点槽位（跨线程发交互包），本模块改成
+ *    「事件里只快照槽位 → TickEvent.Post 里逐个取」，全程客户端线程（对齐 V6.11 的教训）。
  */
 public class FOAncientCitySearch extends Module {
 
@@ -85,6 +108,7 @@ public class FOAncientCitySearch extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSeed = settings.createGroup("种子设置");
     private final SettingGroup sgHighlight = settings.createGroup("高亮");
+    private final SettingGroup sgSteal = settings.createGroup("自动偷取");
 
     private final Setting<LootTarget> searchTypeSetting;
     private final Setting<GameVersionOption> gameVersionSetting;
@@ -105,6 +129,13 @@ public class FOAncientCitySearch extends Module {
     private final Setting<Boolean> autoCleanSetting;
     private final Setting<Boolean> beamSetting;
     private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
+
+    private final Setting<Boolean> autoStealSetting;
+    private final Setting<List<Item>> stealItemsSetting;
+    private final Setting<Integer> swiftSneakMinLevelSetting;
+    private final Setting<Integer> stealDelaySetting;
+    private final Setting<Integer> stealRandomDelaySetting;
+    private final Setting<Integer> stealInitDelaySetting;
 
     private final MinecraftClient mc;
     private Long manualSeed;
@@ -142,6 +173,24 @@ public class FOAncientCitySearch extends Module {
     private long tickCounter;
     private int cleanCooldown;
 
+    // ---------- 自动偷取（V6.25）----------
+
+    /**
+     * 待偷取的容器槽位队列。
+     *
+     * <p><b>只在客户端线程消费</b>：彗星端原版是在后台线程里 {@code Thread.sleep} 后再点槽位，
+     * 那等于从非渲染线程发交互包。本项目在 V6.11 已经吃过一次「后台线程动共享状态」的亏
+     * （Xaero 渲染线程 ConcurrentModificationException 直接崩游戏），所以这里改成
+     * 「事件里只快照槽位 → TickEvent.Post 里逐个取」，全程不跨线程。
+     */
+    private final Deque<Integer> stealQueue = new ArrayDeque<>();
+    /** {@link #stealQueue} 所属容器的 syncId；界面一关或换成别的容器，整队作废。 */
+    private int stealQueueSyncId = -1;
+    /** 距下一次取物还要等几刻（对应彗星端的 delay / initial-delay / random）。 */
+    private int stealDelayTimer;
+    /** 本轮偷到的物品统计（物品名 → 个数），取完在聊天栏汇报一次。 */
+    private final Map<String, Integer> stealSummary = new LinkedHashMap<>();
+
     /**
      * 「柱子地表 Y」缓存：key = (x<<32)|z。每根柱子只扫一次地表，维度切换时整体失效。
      */
@@ -156,7 +205,8 @@ public class FOAncientCitySearch extends Module {
 
     public FOAncientCitySearch() {
         super(AddonTemplate.CATEGORY, "FO 古城战利品搜索",
-            "精确搜索古城中包含附魔金苹果和迅捷潜行3的箱子位置（半自动，结果输出到聊天与 Xaero 路径点）");
+            "精确搜索古城中包含附魔金苹果和迅捷潜行3的箱子位置（半自动，结果输出到聊天与 Xaero 路径点；"
+                + "开启「自动偷取」后开箱即自动取走这两样）");
 
         mc = MinecraftClient.getInstance();
 
@@ -278,6 +328,56 @@ public class FOAncientCitySearch extends Module {
             .defaultValue(XaeroWaypointBridge.Preference.WAYPOINT_SET)
             .build());
 
+        // ---------- 自动偷取（V6.25；移植彗星端 InventoryTweaks 的 Auto Steal）----------
+
+        autoStealSetting = sgSteal.add(new BoolSetting.Builder()
+            .name("自动偷取")
+            .description("自动偷取箱子附魔金苹果和迅捷潜行三")
+            .defaultValue(true)
+            .build());
+
+        stealItemsSetting = sgSteal.add(new ItemListSetting.Builder()
+            .name("偷取物品列表")
+            .description("打开容器时自动取走的物品（按物品匹配，与彗星端一致）。默认只取附魔金苹果。")
+            .defaultValue(Items.ENCHANTED_GOLDEN_APPLE)
+            .build());
+
+        swiftSneakMinLevelSetting = sgSteal.add(new IntSetting.Builder()
+            .name("迅捷潜行最低等级")
+            .description("附魔书的额外识别：迅捷潜行等级 ≥ 此值就取走（0=不识别附魔书，只按物品列表偷）。"
+                + "默认 3 = 只偷满级书。彗星端原版只能按物品匹配、认不出附魔书附的是哪条附魔，"
+                + "所以它拿不到迅捷潜行3 —— 这条是本模块比它多出来的。")
+            .defaultValue(3)
+            .min(0).max(3)
+            .sliderMin(0).sliderMax(3)
+            .build());
+
+        stealDelaySetting = sgSteal.add(new IntSetting.Builder()
+            .name("偷取间隔")
+            .description("每取走一组之后等多少刻再取下一组（刻≈50 毫秒）。"
+                + "彗星端原版是 20 毫秒 + 随机 50 毫秒，约合 1~2 刻。")
+            .defaultValue(1)
+            .min(0).max(40)
+            .sliderMin(0).sliderMax(20)
+            .build());
+
+        stealRandomDelaySetting = sgSteal.add(new IntSetting.Builder()
+            .name("随机附加延迟")
+            .description("在「偷取间隔」之上再随机加 0~此值 刻，避免每次都固定节奏（对应彗星端的 random）")
+            .defaultValue(1)
+            .min(0).max(40)
+            .sliderMin(0).sliderMax(20)
+            .build());
+
+        stealInitDelaySetting = sgSteal.add(new IntSetting.Builder()
+            .name("初始延迟")
+            .description("开箱到取第一组之间先等多少刻（对应彗星端的 initial-delay；"
+                + "本模块由服务端内容同步事件触发、已确保槽位数据到位，所以可以很短）")
+            .defaultValue(1)
+            .min(0).max(40)
+            .sliderMin(0).sliderMax(20)
+            .build());
+
         searching = false;
         manualSeed = null;
     }
@@ -296,6 +396,8 @@ public class FOAncientCitySearch extends Module {
     public void onDeactivate() {
         // 丢弃还没落地的命中点：模块已关，再往 Xaero 写就属于意外副作用
         pendingMarks.clear();
+        // 关模块时把没取完的偷取队列一起丢掉（已取到的先汇报掉）
+        abortStealQueue();
         if (searchTask != null && !searchTask.isDone()) {
             searchTask.cancel(true);
             setSearching(false);
@@ -329,6 +431,118 @@ public class FOAncientCitySearch extends Module {
         if (autoCleanSetting.get()) {
             cleanupStaleMarks();
         }
+        // 自动偷取：队列也在客户端线程逐个消费（不跨线程，见 stealQueue 的注释）
+        if (autoStealSetting.get()) {
+            processStealQueue();
+        }
+    }
+
+    // ==================== 自动偷取（V6.25）====================
+
+    /**
+     * 自动偷取：服务端把容器内容同步过来时，快照「该偷哪些槽位」。
+     *
+     * <p>触发点对齐彗星端（它也是监听 {@code InventoryEvent}，而不是每 tick 扫容器）——
+     * 这样天然避开「刚开箱、槽位还是空的」那一刻：内容同步事件到达时物品已经在客户端了，
+     * 不会把「还没同步」误判成「箱子里没有目标物品」。
+     */
+    @EventHandler
+    private void onInventory(InventoryEvent event) {
+        if (!autoStealSetting.get()) return;
+        if (mc.player == null || mc.world == null) return;
+        if (!(mc.currentScreen instanceof HandledScreen<?>)) return;
+        if (mc.currentScreen instanceof InventoryScreen) return;   // 玩家自己的背包不算容器
+
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        if (handler == null || handler == mc.player.playerScreenHandler) return;
+        if (event.packet.syncId() != handler.syncId) return;       // 不是当前这个界面的同步包
+
+        // 容器区 = 除玩家背包 36 格（主背包 27 + 快捷栏 9）之外的槽位
+        int playerInvStart = Math.max(0, handler.slots.size() - 36);
+        List<Integer> hit = new ArrayList<>();
+        for (int i = 0; i < playerInvStart; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            boolean inList = stealItemsSetting.get().contains(stack.getItem());
+            int swift = AncientStealLogic.swiftSneakLevel(bookEnchantLevels(stack));
+            if (AncientStealLogic.shouldSteal(inList, swift, swiftSneakMinLevelSetting.get())) {
+                hit.add(i);
+            }
+        }
+        if (hit.isEmpty()) return;
+
+        stealQueue.clear();
+        stealQueue.addAll(hit);
+        stealQueueSyncId = handler.syncId;
+        stealDelayTimer = Math.max(0, stealInitDelaySetting.get());
+        stealSummary.clear();
+        debug("自动偷取：命中 " + hit.size() + " 个槽位");
+    }
+
+    /**
+     * 逐个取走队列里的槽位（客户端线程，每刻最多取一组）。
+     *
+     * <p>界面被关掉或换成别的容器 → 整队丢弃：彗星端原版 {@code moveSlots} 每一步也都要重查界面，
+     * 这里做同一件事，避免「对着已经关掉的界面点槽位」。
+     */
+    private void processStealQueue() {
+        if (stealQueue.isEmpty()) return;
+
+        ScreenHandler handler = mc.player == null ? null : mc.player.currentScreenHandler;
+        if (mc.currentScreen == null || !(mc.currentScreen instanceof HandledScreen<?>)
+            || handler == null || handler.syncId != stealQueueSyncId) {
+            abortStealQueue();
+            return;
+        }
+        if (stealDelayTimer > 0) {
+            stealDelayTimer--;
+            return;
+        }
+
+        int slotId = stealQueue.poll();
+        ItemStack stack = handler.getSlot(slotId).getStack();
+        if (!stack.isEmpty()) {
+            stealSummary.merge(stack.getName().getString(), stack.getCount(), Integer::sum);
+            InvUtils.shiftClick().slotId(slotId);   // 整组挪进背包（对应彗星端的 shiftClick）
+        }
+
+        int bound = stealRandomDelaySetting.get();
+        stealDelayTimer = AncientStealLogic.delayTicks(stealDelaySetting.get(), bound,
+            bound > 0 ? ThreadLocalRandom.current().nextInt(0, bound) : 0);
+
+        if (stealQueue.isEmpty()) {
+            reportStealSummary();
+        }
+    }
+
+    /** 界面关掉/换容器：丢弃队列，并把已取到的战果先汇报掉（不丢信息）。 */
+    private void abortStealQueue() {
+        stealQueue.clear();
+        stealQueueSyncId = -1;
+        reportStealSummary();
+    }
+
+    /** 汇报本轮偷取战果，列出物品名与个数。 */
+    private void reportStealSummary() {
+        if (stealSummary.isEmpty()) return;
+        StringBuilder sb = new StringBuilder();
+        stealSummary.forEach((name, count) -> {
+            if (!sb.isEmpty()) sb.append("、");
+            sb.append(name).append("×").append(count);
+        });
+        info("自动偷取完成：" + sb);
+        stealSummary.clear();
+    }
+
+    /** 该物品堆的附魔（附魔 ID → 等级）；非附魔书返回空表。 */
+    private Map<String, Integer> bookEnchantLevels(ItemStack stack) {
+        if (!stack.isOf(Items.ENCHANTED_BOOK)) return Map.of();
+        ItemEnchantmentsComponent enchantments = EnchantmentHelper.getEnchantments(stack);
+        Map<String, Integer> out = new HashMap<>();
+        for (Object2IntMap.Entry<RegistryEntry<Enchantment>> entry : enchantments.getEnchantmentEntries()) {
+            entry.getKey().getKey().ifPresent(key -> out.put(key.getValue().toString(), entry.getIntValue()));
+        }
+        return out;
     }
 
     /** 世界内高亮：只画玩家附近的命中箱子，颜色按命中类型区分。 */

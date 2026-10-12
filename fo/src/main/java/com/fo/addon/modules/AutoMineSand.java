@@ -70,7 +70,7 @@ public class AutoMineSand extends Module {
 
     private final Setting<Boolean> autoKillAura = sgGeneral.add(new BoolSetting.Builder()
         .name("联动杀戮光环")
-        .description("开启自动挖沙时同步开启 FO杀戮光环，关闭时同步关闭（成对联动）")
+        .description("开启自动挖沙时同步开启 FO 杀戮光环，关闭时同步关闭（成对联动）")
         .defaultValue(true)
         .build());
 
@@ -196,7 +196,7 @@ public class AutoMineSand extends Module {
         // onDeactivate 会触发 disableForMineSandLink，此时标记未设=无操作，不会误关。
         AutoTrash trash = Modules.get().get(AutoTrash.class);
         if (trash != null) trash.enableForMineSandLink();
-        // FO杀戮光环联动（成对：开→开）
+        // FO 杀戮光环联动（成对：开→开）
         if (autoKillAura.get()) {
             FOKillAura ka = Modules.get().get(FOKillAura.class);
             if (ka != null && !ka.isActive()) ka.toggle();
@@ -243,7 +243,7 @@ public class AutoMineSand extends Module {
         // 用户手动开的自动扔垃圾不受影响（联动来源标记为空则不关）。
         AutoTrash trash = Modules.get().get(AutoTrash.class);
         if (trash != null) trash.disableForMineSandLink();
-        // FO杀戮光环联动（成对：关→关）
+        // FO 杀戮光环联动（成对：关→关）
         if (autoKillAura.get()) {
             FOKillAura ka = Modules.get().get(FOKillAura.class);
             if (ka != null && ka.isActive()) ka.toggle();
