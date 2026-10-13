@@ -63,69 +63,95 @@ public class BaritonePathManager implements IPathManager {
 
     @Override
     public boolean isPathing() {
-        return baritone.getPathingBehavior().isPathing();
+        try {
+            return baritone.getPathingBehavior().isPathing();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @Override
     public void stop() {
-        baritone.getPathingBehavior().cancelEverything();
+        try {
+            baritone.getPathingBehavior().cancelEverything();
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void moveTo(BlockPos pos, boolean ignoreY) {
-        Goal goal = ignoreY
-            ? new GoalXZ(pos.getX(), pos.getZ())
-            : new GoalGetToBlock(pos);
-        baritone.getCustomGoalProcess().setGoalAndPath(goal);
+        try {
+            Goal goal = ignoreY
+                ? new GoalXZ(pos.getX(), pos.getZ())
+                : new GoalGetToBlock(pos);
+            baritone.getCustomGoalProcess().setGoalAndPath(goal);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void moveToPrecise(BlockPos pos) {
-        // GoalNear(pos, 0)：range 是 int 整格容忍度（写成 double 编译不过）。
-        // range=0 → 玩家脚所在格必须 == 目标格 =「一格空间都不留」；
-        // GoalGetToBlock 只到相邻格就停，会留 2-3 格空隙。
-        baritone.getCustomGoalProcess().setGoalAndPath(new GoalNear(pos, 0));
+        try {
+            // GoalNear(pos, 0)：range 是 int 整格容忍度（写成 double 编译不过）。
+            // range=0 → 玩家脚所在格必须 == 目标格 =「一格空间都不留」；
+            // GoalGetToBlock 只到相邻格就停，会留 2-3 格空隙。
+            baritone.getCustomGoalProcess().setGoalAndPath(new GoalNear(pos, 0));
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void mine(Block... blocks) {
-        baritone.getMineProcess().mine(blocks);
+        try {
+            baritone.getMineProcess().mine(blocks);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void pickupItems(Predicate<ItemStack> filter) {
-        baritone.getFollowProcess().pickup(filter);
+        try {
+            baritone.getFollowProcess().pickup(filter);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public boolean isMining() {
-        return baritone.getMineProcess().isActive();
+        try {
+            return baritone.getMineProcess().isActive();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     // ---- 潜影盒保护 ----
 
     /** 设置 Baritone 保护潜影盒不被挖 */
     public void protectShulkerBoxes(boolean protect) {
-        Settings.Setting<List<Block>> setting = BaritoneAPI.getSettings().blocksToDisallowBreaking;
-        setting.value = protect ? new ArrayList<>(Arrays.asList(
-            Blocks.SHULKER_BOX,
-            Blocks.WHITE_SHULKER_BOX,
-            Blocks.ORANGE_SHULKER_BOX,
-            Blocks.MAGENTA_SHULKER_BOX,
-            Blocks.LIGHT_BLUE_SHULKER_BOX,
-            Blocks.YELLOW_SHULKER_BOX,
-            Blocks.LIME_SHULKER_BOX,
-            Blocks.PINK_SHULKER_BOX,
-            Blocks.GRAY_SHULKER_BOX,
-            Blocks.LIGHT_GRAY_SHULKER_BOX,
-            Blocks.CYAN_SHULKER_BOX,
-            Blocks.PURPLE_SHULKER_BOX,
-            Blocks.BLUE_SHULKER_BOX,
-            Blocks.BROWN_SHULKER_BOX,
-            Blocks.GREEN_SHULKER_BOX,
-            Blocks.RED_SHULKER_BOX,
-            Blocks.BLACK_SHULKER_BOX
-        )) : new ArrayList<>();
+        try {
+            Settings.Setting<List<Block>> setting = BaritoneAPI.getSettings().blocksToDisallowBreaking;
+            setting.value = protect ? new ArrayList<>(Arrays.asList(
+                Blocks.SHULKER_BOX,
+                Blocks.WHITE_SHULKER_BOX,
+                Blocks.ORANGE_SHULKER_BOX,
+                Blocks.MAGENTA_SHULKER_BOX,
+                Blocks.LIGHT_BLUE_SHULKER_BOX,
+                Blocks.YELLOW_SHULKER_BOX,
+                Blocks.LIME_SHULKER_BOX,
+                Blocks.PINK_SHULKER_BOX,
+                Blocks.GRAY_SHULKER_BOX,
+                Blocks.LIGHT_GRAY_SHULKER_BOX,
+                Blocks.CYAN_SHULKER_BOX,
+                Blocks.PURPLE_SHULKER_BOX,
+                Blocks.BLUE_SHULKER_BOX,
+                Blocks.BROWN_SHULKER_BOX,
+                Blocks.GREEN_SHULKER_BOX,
+                Blocks.RED_SHULKER_BOX,
+                Blocks.BLACK_SHULKER_BOX
+            )) : new ArrayList<>();
+        } catch (Throwable ignored) {
+        }
     }
 
     // ---- 自动挖矿避让设置（V4.30，移植 misaka AutoMining）----
@@ -155,6 +181,14 @@ public class BaritonePathManager implements IPathManager {
 
     @Override
     public void applyMiningAvoidance(boolean avoidMobs, boolean avoidBlocks) {
+        try {
+            applyMiningAvoidance0(avoidMobs, avoidBlocks);
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+
+    private void applyMiningAvoidance0(boolean avoidMobs, boolean avoidBlocks) {
         Settings s = BaritoneAPI.getSettings();
 
         // 最小挖掘 Y（主世界基床岩上 6 格起挖，与 misaka 一致）
@@ -189,34 +223,51 @@ public class BaritonePathManager implements IPathManager {
 
     @Override
     public void resetMiningAvoidance() {
-        for (SettingBackup<?> entry : avoidanceBackup) {
-            entry.restore();
+        try {
+            for (SettingBackup<?> entry : avoidanceBackup) {
+                entry.restore();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+        } finally {
+            avoidanceBackup.clear();
         }
-        avoidanceBackup.clear();
     }
 
     @Override
     public void setAutoTool(boolean enabled) {
-        Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().autoTool;
-        backupIfAbsent(setting);
-        setting.value = enabled;
+        try {
+            Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().autoTool;
+            backupIfAbsent(setting);
+            setting.value = enabled;
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
     }
 
     /** V4.42：mine 找不到新矿时把地面掉落物当目标捡起（兜住挖了没捡到钻石） */
     @Override
     public void setMineScanDroppedItems(boolean enabled) {
-        Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().mineScanDroppedItems;
-        backupIfAbsent(setting);
-        setting.value = enabled;
+        try {
+            Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().mineScanDroppedItems;
+            backupIfAbsent(setting);
+            setting.value = enabled;
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
     }
 
     /** V4.60：残骸模式限制挖掘 Y 范围（8~22）；不限制时 6~256（minY 防挖穿基床岩） */
     @Override
     public void setMiningYRange(int minY, int maxY) {
-        Settings s = BaritoneAPI.getSettings();
-        backupIfAbsent(s.minYLevelWhileMining);
-        backupIfAbsent(s.maxYLevelWhileMining);
-        s.minYLevelWhileMining.value = minY;
-        s.maxYLevelWhileMining.value = maxY;
+        try {
+            Settings s = BaritoneAPI.getSettings();
+            backupIfAbsent(s.minYLevelWhileMining);
+            backupIfAbsent(s.maxYLevelWhileMining);
+            s.minYLevelWhileMining.value = minY;
+            s.maxYLevelWhileMining.value = maxY;
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
     }
 }
