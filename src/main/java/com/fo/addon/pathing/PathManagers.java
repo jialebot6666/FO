@@ -12,8 +12,10 @@ public class PathManagers {
                 Debug.info("[FO] Baritone 已连接，防卡住寻路可用。");
                 Debug.chat("[FO] Baritone 已连接，防卡住寻路可用。");
             } catch (Throwable e) {
+                // 最常见是 NoClassDefFoundError：玩家没装 Baritone，或装的版本与编译期 API 不匹配。
+                // 此时静默降级到 NopPathManager——只关掉「防卡住寻路」，其余模块照常工作。
                 Debug.info("[FO] Baritone 初始化失败: " + e);
-                Debug.chat("[FO] Baritone 初始化失败: " + e);
+                Debug.chat("[FO] Baritone 初始化失败（未安装或版本不匹配），防卡住寻路不可用: " + e);
             }
         } else {
             Debug.info("[FO] 未检测到 Baritone，防卡住寻路不可用。");

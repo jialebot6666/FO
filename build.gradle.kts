@@ -49,15 +49,25 @@ dependencies {
     // Meteor (modImplementation 让 loom remap 到 yarn 命名空间)
     modImplementation("meteordevelopment:meteor-client:1.21.11-SNAPSHOT")
 
-    // Baritone API（icehack-2 鞘翅套件编译期依赖；modCompileOnly 让 loom remap 到 yarn 命名空间，运行时由 baritone mod 提供）
-    modCompileOnly(files("libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar"))
+    // Baritone：编译期 API 依赖，运行时由玩家装的 Baritone mod 提供。
+    //
+    // 用原版 baritone（mod id: baritone），不是 Meteor 打包的 baritone-meteor——
+    // 玩家装的是原版，两者的 mod id 与运行时实现都不同。之前这里写的是
+    // baritone-api-fabric-1.21.11-SNAPSHOT.jar（baritone-meteor 版），而代码因为
+    // 拿不准运行时到底是哪个，全靠反射调用（见 BaritonePathManager）。
+    // 2026-10-13 起改为直接引用编译期 API，反射层已删除。
+    //
+    // ⚠️ Baritone 官方不提供 Maven 仓库（多个来源一致确认），只能文件依赖。
+    // ⚠️ 该 jar 用 intermediary 映射（Block = class_2248），loom 的 modCompileOnly
+    //    会自动 remap 到 yarn，所以源码里照常写 net.minecraft.block.Block 即可。
+    modCompileOnly(files("libs/baritone-1.21.11-2026.jar"))
 
     // V6.8 起古城模块已全程自写（纯 Java），不再打包 libs/fo-ancient-blackbox.jar。
-    // 该黑盒里的 657 个类已被 ancient/ 下的自写实现替代。
+    // 该黑盒里的 657 个类已被 ancient/ 下的自写实现替代（历史残留已于 2026-10-13 剥离）。
     //
     // ⚠️ 为什么 libs/ 与 natives/ 里的二进制必须入库（而不是改成 Maven 依赖）：
-    //   1. libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar —— Baritone 未发布到任何公开 Maven 仓库，
-    //      只能以文件依赖引入；SNAPSHOT 也没有可锁定的版本号。
+    //   1. libs/baritone-1.21.11-2026.jar —— Baritone 官方不提供 Maven 仓库，
+    //      只能以文件依赖引入。
     //   2. src/main/resources/natives/windows/*.dll —— CubiomesJNI 的原生库，且 JNI 导出符号是
     //      Java_com_custom_addon_util_CubiomesJNI_*，与 com.custom.addon.util 包名硬绑定。
     //      换成 Maven 坐标无法保留这个符号约定，改包名则链接失败。

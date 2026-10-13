@@ -1,30 +1,53 @@
 package com.fo.addon.pathing;
 
+import baritone.api.BaritoneAPI;
+import baritone.api.IBaritone;
+import baritone.api.Settings;
+import baritone.api.pathing.goals.Goal;
+import baritone.api.pathing.goals.GoalGetToBlock;
+import baritone.api.pathing.goals.GoalNear;
+import baritone.api.pathing.goals.GoalXZ;
 import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.Predicate;
 
-/** 纯反射调用 BaritoneAPI，不依赖 baritone-api 编译期类。任何一步失败都会抛出异常，由 PathManagers 回退到空实现。 */
+/**
+ * 直接调用 Baritone 编译期 API（不再用反射）。
+ *
+ * <p>2026-10-13 改写：此前全靠 {@code Class.forName} + 反射，原因是依赖的是
+ * {@code baritone-meteor}（Meteor 打包版，mod id baritone-meteor）的 API jar，
+ * 而实际运行时玩家装的是原版 {@code baritone}——拿不准才用反射兜着。
+ * 现在改用原版 baritone 的 API jar 作为 {@code modCompileOnly} 依赖，直接写类型即可。
+ *
+ * <p>好处：
+ * <ul>
+ *   <li>编译期就能发现签名不匹配——旧反射里 {@code GoalNear(BlockPos, int)} 的 int/double
+ *       写错要等到运行时才炸；</li>
+ *   <li>不再需要「兼容新老包名」的 try/catch（{@code baritone.api.behavior} 与旧的
+ *       {@code baritone.api.pathing.behavior} 二选一）；</li>
+ *   <li>省掉 12 个 Method/Constructor/Field 字段与满屏 try-catch。</li>
+ * </ul>
+ *
+ * <p>Baritone 缺失时（{@link #isAvailable()} 为 false），由 {@link PathManagers}
+ * 回退到 {@link NopPathManager}，其余模块照常工作。
+ *
+ * <p>⚠️ 签名核对：本类每个方法签名都对 {@code libs/baritone-1.21.11-2026.jar}
+ * 用 javap 逐条反编译确认，未凭记忆书写。升级 Baritone 时请重新核对。
+ */
 public class BaritonePathManager implements IPathManager {
-    private final Object baritone;
-    private final Method pathingBehaviorM;
-    private final Method isPathingM;
-    private final Method cancelEverythingM;
-    private final Method customGoalProcessM;
-    private final Method setGoalAndPathM;
-    private final Method mineProcessM;
-    private final Method mineM;
-    private final Method followProcessM;
-    private final Method pickupM;
-    private final Constructor<?> goalXZCtor;
-    private final Constructor<?> goalGetToBlockCtor;
-    private final Constructor<?> goalNearCtor;
+    private final IBaritone baritone;
 
+    /**
+     * Baritone 是否在运行时可用。判据是 {@code BaritoneAPI} 这个纯 API 门面类能否加载——
+     * 它存在即代表 baritone mod 已装。注意本项目对 Baritone 是 {@code modCompileOnly}，
+     * 编译期有、运行时未必有，所以这个检查不可省。
+     */
     public static boolean isAvailable() {
         try {
             Class.forName("baritone.api.BaritoneAPI");
@@ -34,318 +57,166 @@ public class BaritonePathManager implements IPathManager {
         }
     }
 
-    public BaritonePathManager() throws ReflectiveOperationException {
-        if (!isAvailable()) {
-            throw new IllegalStateException("Baritone API not available");
-        }
-
-        Class<?> api = Class.forName("baritone.api.BaritoneAPI");        Object provider = api.getMethod("getProvider").invoke(null);
-        baritone = provider.getClass().getMethod("getPrimaryBaritone").invoke(provider);
-        // 兼容新老包名：优先 baritone.api.behavior (1.21.x)，回退 baritone.api.pathing.behavior (老版)
-        Class<?> pathingBehavior;
-        try {
-            pathingBehavior = Class.forName("baritone.api.behavior.IPathingBehavior");
-        } catch (ClassNotFoundException e) {
-            pathingBehavior = Class.forName("baritone.api.pathing.behavior.IPathingBehavior");
-        }
-        pathingBehaviorM = baritone.getClass().getMethod("getPathingBehavior");
-        isPathingM = pathingBehavior.getMethod("isPathing");
-        cancelEverythingM = pathingBehavior.getMethod("cancelEverything");
-
-        Class<?> customGoalProcess = Class.forName("baritone.api.process.ICustomGoalProcess");
-        customGoalProcessM = baritone.getClass().getMethod("getCustomGoalProcess");
-        setGoalAndPathM = customGoalProcess.getMethod("setGoalAndPath", Class.forName("baritone.api.pathing.goals.Goal"));
-
-        Class<?> mineProcess = Class.forName("baritone.api.process.IMineProcess");
-        mineProcessM = baritone.getClass().getMethod("getMineProcess");
-        // mine(Block...) 是变参，编译后签名是 mine(Block[])，反射用数组类型匹配
-        mineM = mineProcess.getMethod("mine", Block[].class);
-        isActiveM = mineProcess.getMethod("isActive");
-
-        // FollowProcess.pickup(Predicate<ItemStack>)：持续走到匹配掉落物旁拾取
-        Class<?> followProcess = Class.forName("baritone.api.process.IFollowProcess");
-        followProcessM = baritone.getClass().getMethod("getFollowProcess");
-        pickupM = followProcess.getMethod("pickup", Predicate.class);
-
-        // GoalXZ 没有 (BlockPos) 构造器，只有 (int,int) 和 (BetterBlockPos)
-        goalXZCtor = Class.forName("baritone.api.pathing.goals.GoalXZ").getConstructor(int.class, int.class);
-        goalGetToBlockCtor = Class.forName("baritone.api.pathing.goals.GoalGetToBlock").getConstructor(BlockPos.class);
-        // GoalNear(BlockPos, int range)：精确到达。range 是整格容忍度（注意是 int 不是 double，
-        // 写 double 会 NoSuchMethodException 导致整个 Baritone 桥接初始化失败）。
-        // range=0 → 玩家脚所在格必须等于目标格 = "一格空间都不留"（站到盒子紧邻格正中）。
-        goalNearCtor = Class.forName("baritone.api.pathing.goals.GoalNear").getConstructor(BlockPos.class, int.class);
+    public BaritonePathManager() {
+        this.baritone = BaritoneAPI.getProvider().getPrimaryBaritone();
     }
 
     @Override
     public boolean isPathing() {
-        try {
-            return (boolean) isPathingM.invoke(pathingBehaviorM.invoke(baritone));
-        } catch (ReflectiveOperationException e) {
-            return false;
-        }
+        return baritone.getPathingBehavior().isPathing();
     }
 
     @Override
     public void stop() {
-        try {
-            cancelEverythingM.invoke(pathingBehaviorM.invoke(baritone));
-        } catch (ReflectiveOperationException ignored) {
-        }
+        baritone.getPathingBehavior().cancelEverything();
     }
 
     @Override
     public void moveTo(BlockPos pos, boolean ignoreY) {
-        try {
-            Object goal = ignoreY
-                ? goalXZCtor.newInstance(pos.getX(), pos.getZ())
-                : goalGetToBlockCtor.newInstance(pos);
-            setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
-        } catch (ReflectiveOperationException e) {
-            e.printStackTrace();
-        }
+        Goal goal = ignoreY
+            ? new GoalXZ(pos.getX(), pos.getZ())
+            : new GoalGetToBlock(pos);
+        baritone.getCustomGoalProcess().setGoalAndPath(goal);
     }
 
     @Override
     public void moveToPrecise(BlockPos pos) {
-        try {
-            // GoalNear(pos, 0)：玩家脚所在格必须 == 目标格才算到达（range=0 整格精确），
-            // 站在盒子紧邻格正中，一格空间都不留（GoalGetToBlock 只到相邻格就停）。
-            Object goal = goalNearCtor.newInstance(pos, 0);
-            setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
-        } catch (ReflectiveOperationException e) {
-            e.printStackTrace();
-        }
+        // GoalNear(pos, 0)：range 是 int 整格容忍度（写成 double 编译不过）。
+        // range=0 → 玩家脚所在格必须 == 目标格 =「一格空间都不留」；
+        // GoalGetToBlock 只到相邻格就停，会留 2-3 格空隙。
+        baritone.getCustomGoalProcess().setGoalAndPath(new GoalNear(pos, 0));
     }
 
     @Override
     public void mine(Block... blocks) {
-        try {
-            mineM.invoke(mineProcessM.invoke(baritone), (Object) blocks);
-        } catch (ReflectiveOperationException ignored) {
-        }
+        baritone.getMineProcess().mine(blocks);
     }
 
     @Override
     public void pickupItems(Predicate<ItemStack> filter) {
-        try {
-            pickupM.invoke(followProcessM.invoke(baritone), filter);
-        } catch (ReflectiveOperationException ignored) {
-        }
+        baritone.getFollowProcess().pickup(filter);
     }
-
-    /** 设置 Baritone 保护潜影盒不被挖 */
-    public void protectShulkerBoxes(boolean protect) {
-        try {
-            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
-            Object settings = api.getMethod("getSettings").invoke(null);
-            // blocksToDisallowBreaking 是 Setting<List<Block>>，直接改它的 value 字段（List）
-            java.lang.reflect.Field f = settings.getClass().getField("blocksToDisallowBreaking");
-            Object setting = f.get(settings);
-            java.lang.reflect.Field valueField = setting.getClass().getField("value");
-            if (protect) {
-                Block[] shulkers = new Block[]{
-                    net.minecraft.block.Blocks.SHULKER_BOX,
-                    net.minecraft.block.Blocks.WHITE_SHULKER_BOX,
-                    net.minecraft.block.Blocks.ORANGE_SHULKER_BOX,
-                    net.minecraft.block.Blocks.MAGENTA_SHULKER_BOX,
-                    net.minecraft.block.Blocks.LIGHT_BLUE_SHULKER_BOX,
-                    net.minecraft.block.Blocks.YELLOW_SHULKER_BOX,
-                    net.minecraft.block.Blocks.LIME_SHULKER_BOX,
-                    net.minecraft.block.Blocks.PINK_SHULKER_BOX,
-                    net.minecraft.block.Blocks.GRAY_SHULKER_BOX,
-                    net.minecraft.block.Blocks.LIGHT_GRAY_SHULKER_BOX,
-                    net.minecraft.block.Blocks.CYAN_SHULKER_BOX,
-                    net.minecraft.block.Blocks.PURPLE_SHULKER_BOX,
-                    net.minecraft.block.Blocks.BLUE_SHULKER_BOX,
-                    net.minecraft.block.Blocks.BROWN_SHULKER_BOX,
-                    net.minecraft.block.Blocks.GREEN_SHULKER_BOX,
-                    net.minecraft.block.Blocks.RED_SHULKER_BOX,
-                    net.minecraft.block.Blocks.BLACK_SHULKER_BOX
-                };
-                valueField.set(setting, java.util.Arrays.asList(shulkers));
-            } else {
-                valueField.set(setting, new java.util.ArrayList<Block>());
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private final java.lang.reflect.Method isActiveM;
 
     @Override
     public boolean isMining() {
-        try {
-            return (boolean) isActiveM.invoke(mineProcessM.invoke(baritone));
-        } catch (ReflectiveOperationException e) {
-            return false;
+        return baritone.getMineProcess().isActive();
+    }
+
+    // ---- 潜影盒保护 ----
+
+    /** 设置 Baritone 保护潜影盒不被挖 */
+    public void protectShulkerBoxes(boolean protect) {
+        Settings.Setting<List<Block>> setting = BaritoneAPI.getSettings().blocksToDisallowBreaking;
+        setting.value = protect ? new ArrayList<>(Arrays.asList(
+            Blocks.SHULKER_BOX,
+            Blocks.WHITE_SHULKER_BOX,
+            Blocks.ORANGE_SHULKER_BOX,
+            Blocks.MAGENTA_SHULKER_BOX,
+            Blocks.LIGHT_BLUE_SHULKER_BOX,
+            Blocks.YELLOW_SHULKER_BOX,
+            Blocks.LIME_SHULKER_BOX,
+            Blocks.PINK_SHULKER_BOX,
+            Blocks.GRAY_SHULKER_BOX,
+            Blocks.LIGHT_GRAY_SHULKER_BOX,
+            Blocks.CYAN_SHULKER_BOX,
+            Blocks.PURPLE_SHULKER_BOX,
+            Blocks.BLUE_SHULKER_BOX,
+            Blocks.BROWN_SHULKER_BOX,
+            Blocks.GREEN_SHULKER_BOX,
+            Blocks.RED_SHULKER_BOX,
+            Blocks.BLACK_SHULKER_BOX
+        )) : new ArrayList<>();
+    }
+
+    // ---- 自动挖矿避让设置（V4.30，移植 misaka AutoMining）----
+    // 改设置前先备份，resetMiningAvoidance 时还原。
+
+    private final List<SettingBackup<?>> avoidanceBackup = new ArrayList<>();
+
+    /** 一条 Setting 的原值备份。泛型保留 Setting<T> 类型，restore() 直接赋值回 value，无需强转。 */
+    private record SettingBackup<T>(Settings.Setting<T> setting, T oldValue) {
+        void restore() {
+            setting.value = oldValue;
         }
     }
 
-    // ---- 自动挖矿避让设置（V4.30，移植 misaka AutoMining onActivate/onDeactivate）----
-    // 备份对象：{settingsObj, 字段名, 原 value}
-    private final List<Object[]> avoidanceBackup = new java.util.ArrayList<>();
+    /** 备份某 Setting 当前值 */
+    private <T> void backup(Settings.Setting<T> setting) {
+        avoidanceBackup.add(new SettingBackup<>(setting, setting.value));
+    }
+
+    /** 备份某 Setting；若已备份过同一个 Setting 对象则跳过（防反复开关叠加备份） */
+    private <T> void backupIfAbsent(Settings.Setting<T> setting) {
+        for (SettingBackup<?> entry : avoidanceBackup) {
+            if (entry.setting() == setting) return;
+        }
+        backup(setting);
+    }
 
     @Override
     public void applyMiningAvoidance(boolean avoidMobs, boolean avoidBlocks) {
-        try {
-            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
-            Object settings = api.getMethod("getSettings").invoke(null);
+        Settings s = BaritoneAPI.getSettings();
 
-            // 最小挖掘 Y（主世界基岩上 6 格起挖，与 misaka 一致）
-            // V4.41 修复：原实现拿 value 字段却对 settings 对象 get/set，抛异常被吞 → 设置从未生效
-            backupSetting(settings, "minYLevelWhileMining");
-            setSettingValue(settings, "minYLevelWhileMining", 6);
+        // 最小挖掘 Y（主世界基床岩上 6 格起挖，与 misaka 一致）
+        backup(s.minYLevelWhileMining);
+        s.minYLevelWhileMining.value = 6;
 
-            if (avoidMobs) {
-                String[] mobFields = {"avoidance", "mobAvoidanceRadius", "mobAvoidanceCoefficient", "mobSpawnerAvoidanceRadius"};
-                for (String name : mobFields) {
-                    backupSetting(settings, name);
-                }
-                setSettingValue(settings, "avoidance", Boolean.TRUE);
-                setSettingValue(settings, "mobAvoidanceRadius", 12);
-                setSettingValue(settings, "mobAvoidanceCoefficient", 5.0d);
-                setSettingValue(settings, "mobSpawnerAvoidanceRadius", 16);
-            }
+        if (avoidMobs) {
+            backup(s.avoidance);
+            backup(s.mobAvoidanceRadius);
+            backup(s.mobAvoidanceCoefficient);
+            backup(s.mobSpawnerAvoidanceRadius);
 
-            if (avoidBlocks) {
-                backupSetting(settings, "blocksToAvoid");
-                List<Block> avoid = new java.util.ArrayList<>();
-                avoid.add(net.minecraft.block.Blocks.SCULK_SENSOR);
-                avoid.add(net.minecraft.block.Blocks.SCULK);
-                avoid.add(net.minecraft.block.Blocks.SCULK_VEIN);
-                avoid.add(net.minecraft.block.Blocks.SCULK_CATALYST);
-                avoid.add(net.minecraft.block.Blocks.SCULK_SHRIEKER);
-                avoid.add(net.minecraft.block.Blocks.TRIAL_SPAWNER);
-                avoid.add(net.minecraft.block.Blocks.SPAWNER);
-                setSettingValue(settings, "blocksToAvoid", avoid);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+            s.avoidance.value = true;
+            s.mobAvoidanceRadius.value = 12;
+            s.mobAvoidanceCoefficient.value = 5.0d;
+            s.mobSpawnerAvoidanceRadius.value = 16;
         }
-    }
 
-    /** 拿 Settings 上的 Setting 对象（反射，任何失败返回 null） */
-    private Object getSettingObject(Object settings, String fieldName) {
-        try {
-            return settings.getClass().getField(fieldName).get(settings);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /** 备份某个 Setting 当前值（供 resetMiningAvoidance 恢复） */
-    private void backupSetting(Object settings, String fieldName) {
-        try {
-            Object settingObj = getSettingObject(settings, fieldName);
-            if (settingObj == null) return;
-            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
-            avoidanceBackup.add(new Object[]{settingObj, fieldName, vf.get(settingObj)});
-        } catch (Exception ignored) {
-        }
-    }
-
-    /**
-     * 设置 Baritone 设置值（对 Setting 对象操作，非 settings 对象）。
-     * V4.41 修复原实现 bug：value 字段定义在 Setting 类上，却对 settings 对象 get/set → 抛异常被吞，设置从未生效。
-     * 类型适配：部分 Baritone Y 类设置是 Long，传 Integer 会类型不匹配。
-     */
-    private boolean setSettingValue(Object settings, String fieldName, Object value) {
-        try {
-            Object settingObj = getSettingObject(settings, fieldName);
-            if (settingObj == null) return false;
-            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
-            Class<?> type = vf.getType();
-            if (value instanceof Integer && (type == Long.class || type == long.class)) {
-                vf.set(settingObj, ((Integer) value).longValue());
-            } else if (value instanceof Integer && (type == Integer.class || type == int.class)) {
-                vf.set(settingObj, value);
-            } else {
-                vf.set(settingObj, value);
-            }
-            return true;
-        } catch (Exception e) {
-            return false;
+        if (avoidBlocks) {
+            backup(s.blocksToAvoid);
+            s.blocksToAvoid.value = new ArrayList<>(Arrays.asList(
+                Blocks.SCULK_SENSOR,
+                Blocks.SCULK,
+                Blocks.SCULK_VEIN,
+                Blocks.SCULK_CATALYST,
+                Blocks.SCULK_SHRIEKER,
+                Blocks.TRIAL_SPAWNER,
+                Blocks.SPAWNER
+            ));
         }
     }
 
     @Override
     public void resetMiningAvoidance() {
-        for (Object[] entry : avoidanceBackup) {
-            try {
-                Object settingObj = entry[0];
-                String name = (String) entry[1];
-                Object oldValue = entry[2];
-                java.lang.reflect.Field vf = settingObj.getClass().getField("value");
-                vf.set(settingObj, oldValue);
-            } catch (Exception ignored) {
-            }
+        for (SettingBackup<?> entry : avoidanceBackup) {
+            entry.restore();
         }
         avoidanceBackup.clear();
     }
 
     @Override
     public void setAutoTool(boolean enabled) {
-        try {
-            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
-            Object settings = api.getMethod("getSettings").invoke(null);
-            Object settingObj = settings.getClass().getField("autoTool").get(settings);
-            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
-            // 只在首次调用时备份（避免重复开关叠加备份）
-            boolean backed = false;
-            for (Object[] e : avoidanceBackup) {
-                if ("autoTool".equals(e[1])) {
-                    backed = true;
-                    break;
-                }
-            }
-            if (!backed) {
-                avoidanceBackup.add(new Object[]{settingObj, "autoTool", vf.get(settingObj)});
-            }
-            vf.set(settingObj, enabled);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().autoTool;
+        backupIfAbsent(setting);
+        setting.value = enabled;
     }
 
     /** V4.42：mine 找不到新矿时把地面掉落物当目标捡起（兜住挖了没捡到钻石） */
     @Override
     public void setMineScanDroppedItems(boolean enabled) {
-        try {
-            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
-            Object settings = api.getMethod("getSettings").invoke(null);
-            backupSetting(settings, "mineScanDroppedItems");
-            setSettingValue(settings, "mineScanDroppedItems", enabled);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        Settings.Setting<Boolean> setting = BaritoneAPI.getSettings().mineScanDroppedItems;
+        backupIfAbsent(setting);
+        setting.value = enabled;
     }
 
-    /** V4.60：残骸模式限制挖掘 Y 范围（8~22）；不限制时 6~256（minY 防挖穿基岩）。maxY 只在首次备份，防重复开关叠加 */
+    /** V4.60：残骸模式限制挖掘 Y 范围（8~22）；不限制时 6~256（minY 防挖穿基床岩） */
     @Override
     public void setMiningYRange(int minY, int maxY) {
-        try {
-            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
-            Object settings = api.getMethod("getSettings").invoke(null);
-            backupSettingIfAbsent(settings, "maxYLevelWhileMining");
-            setSettingValue(settings, "minYLevelWhileMining", minY);
-            setSettingValue(settings, "maxYLevelWhileMining", maxY);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    /** 备份设置，若 avoidanceBackup 已有同名条目则跳过（防重复备份叠加） */
-    private void backupSettingIfAbsent(Object settings, String fieldName) {
-        Object settingObj = getSettingObject(settings, fieldName);
-        if (settingObj == null) return;
-        for (Object[] entry : avoidanceBackup) {
-            if (entry[1].equals(fieldName)) return;
-        }
-        try {
-            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
-            avoidanceBackup.add(new Object[]{settingObj, fieldName, vf.get(settingObj)});
-        } catch (Exception ignored) {
-        }
+        Settings s = BaritoneAPI.getSettings();
+        backupIfAbsent(s.minYLevelWhileMining);
+        backupIfAbsent(s.maxYLevelWhileMining);
+        s.minYLevelWhileMining.value = minY;
+        s.maxYLevelWhileMining.value = maxY;
     }
 }

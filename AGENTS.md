@@ -230,7 +230,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   （硬性规范 7）；提交与发版走 `api.github.com` REST API（见 `docs/scripts/gh-deliver.ps1`）。
 - ⚠️ **依赖下载走国内镜像**：`repo1.maven.org` 直连实测仅约 32 KB/s，Loom 冷启动会直接 `SocketTimeoutException: Read timed out`。
   解决办法（用户级配置，**不改仓库文件**）与实测数据见 `docs/windows-build.md` 第 10 节。
-- Baritone 是仓库内的本地 jar（`libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar`，`modCompileOnly`，运行时由 baritone mod 提供），不需要额外下载。
+- Baritone 是仓库内的本地 jar（`libs/baritone-1.21.11-2026.jar`，`modCompileOnly`，运行时由玩家装的 Baritone mod 提供），不需要额外下载。**Baritone 官方不提供 Maven 仓库**，只能文件依赖。⚠️ 必须用**原版** `baritone`（mod id `baritone`），不是 Meteor 打包的 `baritone-meteor`——玩家装的是原版，两者 mod id 与运行时实现都不同。2026-10-13 起代码已直接引用编译期 API，`BaritonePathManager` 的反射层（含「兼容新老包名」的 try/catch）已删除；升级 Baritone 时须用 javap 重新核对签名，别凭记忆改。
 - 产物：`build/libs/FO-6.25-1.21.11.jar`（`FO-<mod版本>-<MC版本>.jar`，两段都从 `gradle/libs.versions.toml` 的 `mod-version` 与 `minecraft` 自动拼）
 - 交付：最终 jar 必须通过 `present_files` 交给用户
 

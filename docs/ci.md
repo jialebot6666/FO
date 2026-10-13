@@ -82,8 +82,8 @@ tag 与 `mod-version` 不一致会**直接失败**，不会发出半成品 Relea
 
 | 文件 | 大小 | 为什么必须入库 |
 |---|---|---|
-| `gradle/wrapper/gradle-wrapper.jar` | 43 KB | Gradle Wrapper 的标准组件，删了 `./gradlew` 无法自举 |
-| `libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar` | 1.6 MB | Baritone 未发布到任何公开 Maven 仓库，只能文件依赖；且它是 SNAPSHOT，没有可锁定的版本号可写进 toml |
+| `gradle/wrapper/gradle-wrapper.jar` | 48 KB | Gradle Wrapper 的标准组件，删了 `./gradlew` 无法自举 |
+| `libs/baritone-1.21.11-2026.jar` | 4.8 MB | **Baritone 官方不提供 Maven 仓库**，只能文件依赖。必须用原版 `baritone`（mod id `baritone`）而非 Meteor 打包的 `baritone-meteor`——玩家装的是原版，两者运行时实现都不同 |
 | `src/main/resources/natives/windows/cubiomes.dll`<br>`src/main/resources/natives/windows/CubiomesJNI.dll` | 1.1 MB | JNI 原生库。导出符号是 `Java_com_custom_addon_util_CubiomesJNI_*`，**与 `com.custom.addon.util` 包名硬绑定**——改包名会直接链接失败，换 Maven 坐标也无法保留这个符号约定 |
 
 除此之外还有 58 个古城结构 `.nbt`（共 397 KB）——这是**游戏数据**而非二进制依赖，

@@ -44,22 +44,20 @@ jobs:
       - name: 允许入库的二进制有据可查
         run: |
           set -euo pipefail
-          # 白名单里的每一项都必须在 docs/ci.md 的「仓库里为什么仍然有二进制文件」一节里登记了原因。
+          # libs/ 与 natives/ 是源码级依赖（理由见 docs/ci.md），天然放行；
+          # 这里校验的是「理由有没有写进文档」，防止白名单失守成无脑放行。
+          # 文件名用通配而非硬编码：换 Baritone 版本不必改 workflow。
           doc=docs/ci.md
           [ -f "$doc" ] || { echo "::error::缺少 $doc，无法核对二进制白名单的理由"; exit 1; }
-          for f in libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar \
-                   src/main/resources/natives/windows/cubiomes.dll \
-                   src/main/resources/natives/windows/CubiomesJNI.dll \
-                   gradle/wrapper/gradle-wrapper.jar; do
-            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-              echo "  登记检查：$f"
-            fi
-          done
-          if ! grep -q 'baritone' "$doc" || ! grep -q 'cubiomes\|CubiomesJNI' "$doc"; then
-            echo "::error::$doc 未登记 baritone / cubiomes DLL 的入库原因，白名单失守"
-            exit 1
+          missing=0
+          if ls libs/*.jar >/dev/null 2>&1; then
+            grep -qi 'baritone' "$doc" || { echo "::error::$doc 未登记 baritone 的入库原因"; missing=1; }
           fi
-          echo "OK：白名单已在文档登记"
+          if ls src/main/resources/natives/windows/*.dll >/dev/null 2>&1; then
+            grep -qi 'cubiomes' "$doc" || { echo "::error::$doc 未登记 cubiomes DLL 的入库原因"; missing=1; }
+          fi
+          [ "$missing" -eq 0 ] && echo "OK：白名单已在 docs/ci.md 登记"
+          exit "$missing"
 
       - name: 仓库结构未被破坏
         run: |
