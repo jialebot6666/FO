@@ -4,10 +4,15 @@
 （https://github.com/jialebot6666/FO/releases，每个版本一个正式 Release，附 jar + 更新说明）。
 本文件只维护「版本 → commit → 说明」清单，用于回溯版本与代码。
 
-- 历史 jar（0.9 ~ 6.22）仍完整保留在 Git 历史中，可随时用 `git show <commit>:releases/FO-V<版本>.jar` 取回
-  （`releases/FO-V*.jar` 是历史归档名，带 `V` 前缀，属旧格式，不必回改）。
-- 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `./ ./gradlew build` 全绿 →
+- ⚠️ **历史 jar（0.9 ~ 6.22）已从 Git 历史中彻底剥离**（2026-10-13，`git filter-repo`）。
+  原因：110 个 jar 共 **148.6 MiB**，让仓库体积暴涨且 `.gitignore` 对已入库文件无效。
+  旧的 `releases/FO-V*.jar` **无法再用 `git show` 取回**——需要旧版本 jar 请去
+  [Releases](https://github.com/wxh1024/FO/releases) 下载。
+  该版本→commit 对照表仍完整保留在本文件下方，回溯代码不受影响。
+  详见 `docs/ci.md`「为什么 jar 不进仓库」。
+- 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `./gradlew build` 全绿 →
   commit（信息含模块名+摘要）→ 打 tag（`<版本>`，**不带 V**）→ GitHub Release（附 `FO-<版本>-<MC版本>.jar` + 更新说明）→ 本文件加一行。
+  推 tag 后 `release.yml` 会自动完成「校验 → 测试 → 构建 → 发 Release」。
 
 ## 命名规范
 

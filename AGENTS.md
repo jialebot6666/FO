@@ -216,7 +216,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 
 ## 构建与测试
 
-- 构建 + 测试（一条命令）：`./ ./gradlew build`（JUnit 5 随 build 一起跑，交付前必须 0 failures / 0 errors）
+- 构建 + 测试（一条命令）：`./gradlew build`（JUnit 5 随 build 一起跑，交付前必须 0 failures / 0 errors）
 - JDK：21
   - Linux 侧：`/home/user/jdks/jdk-21.0.12.1+1/bin/`
   - Windows 侧：用 Minecraft 启动器自带的 runtime（**必须选带 `javac.exe` 的那个**），
