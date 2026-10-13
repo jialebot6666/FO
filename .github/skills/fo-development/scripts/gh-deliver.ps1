@@ -24,7 +24,7 @@
   用法：
       # token 放临时文件，别写进脚本、别提交
       Set-Content .ghtoken -Value 'ghp_xxx' -Encoding ASCII -NoNewline
-      powershell -NoProfile -ExecutionPolicy Bypass -File docs\scripts\gh-deliver.ps1 `
+      powershell -NoProfile -ExecutionPolicy Bypass -File .github\skills\fo-development\scripts\gh-deliver.ps1 `
           -Version 6.25 `
           -Files @('gradle/libs.versions.toml','src/main/java/com/fo/addon/....java') `
           -CommitMessageFile rel\commit1.txt `

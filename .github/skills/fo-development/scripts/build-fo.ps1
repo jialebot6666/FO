@@ -2,8 +2,8 @@
   在 Windows 上构建 FO（不需要装 Java / Gradle / git）。
 
   用法：
-      powershell -NoProfile -ExecutionPolicy Bypass -File docs\scripts\build-fo.ps1
-      powershell ... -File docs\scripts\build-fo.ps1 -Task compileJava
+      powershell -NoProfile -ExecutionPolicy Bypass -File .github\skills\fo-development\scripts\build-fo.ps1
+      powershell ... -File .github\skills\fo-development\scripts\build-fo.ps1 -Task compileJava
 
   可用环境变量覆盖默认路径：
       FO_WS      工作区根目录（默认 $env:USERPROFILE\Documents\deepseek-harness\default-workspace）

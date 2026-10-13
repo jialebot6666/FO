@@ -134,7 +134,7 @@ $p = Start-Process -FilePath $gradle -ArgumentList $args -NoNewWindow -Wait -Pas
 Write-Host "exit = $($p.ExitCode)"
 ```
 
-现成脚本见 [`docs/scripts/build-fo.ps1`](../../../docs/scripts/build-fo.ps1)。
+现成脚本见 [`scripts/build-fo.ps1`](../scripts/build-fo.ps1)。
 
 ### ⚠️ 坑 4：中文 `.ps1` 必须存成 UTF-8 **带 BOM**
 
@@ -242,7 +242,7 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
 > **纯文档改动不要发版**：没有新 jar 就不升版本、不建 Release，否则会污染版本历史
 > （会出现两个内容完全相同的 jar）。
 
-现成脚本见 [`docs/scripts/gh-deliver.ps1`](../../../docs/scripts/gh-deliver.ps1)。
+现成脚本见 [`scripts/gh-deliver.ps1`](../scripts/gh-deliver.ps1)。
 
 ### Token
 

@@ -73,7 +73,7 @@ gh release create 6.33 build/libs/FO-6.33-1.21.11.jar \
 
 ⚠️ **本机 `github.com` 的 git 传输常超时**：`git push` / `git clone` 直连会挂。
 推送与发版走 `api.github.com` REST API（见 [windows-build.md](windows-build.md) 第 6 节，
-现成脚本 `docs/scripts/gh-deliver.ps1`）；拉取一律浅克隆。
+现成脚本 `.github/skills/fo-development/scripts/gh-deliver.ps1`）；拉取一律浅克隆。
 
 ## CI/CD
 

@@ -10,9 +10,8 @@ FO/                                ← 仓库根，Gradle 工程在这里（没�
 ├── src/main/java|resources
 ├── src/test/java                  ← 含 xaero/** 桩类（Xaero 兼容层单测用）
 ├── .github/workflows/ci.yml       ← 唯一的 .github，嵌套 .github 是死文件
-├── docs/                          ← 脚本（docs/scripts/*.ps1）；说明已并入 skill
 ├── releases/README.md             ← 只放版本清单，不放 jar
-└── .github/skills/fo-development/ ← 本 skill
+└── .github/skills/fo-development/ ← 本 skill（含 scripts/*.ps1 构建与交付脚本）
 ```
 
 - 普通模块：`src/main/java/com/fo/addon/modules/`

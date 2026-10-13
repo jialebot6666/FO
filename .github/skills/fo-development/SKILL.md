@@ -75,7 +75,7 @@ license: GPL-3.0
 5. **提交**：`git add` 相关文件 → commit。**提交前先按 blob SHA-1 与远端 tree 比对**，
    避免用旧副本覆盖别人的新提交（本机 `github.com` 的 git 传输常超时，
    推送与发版走 `api.github.com` REST API，见 [references/windows-build.md](references/windows-build.md) 第 6 节
-   与 `docs/scripts/gh-deliver.ps1`）。
+   与 `scripts/gh-deliver.ps1`）。
 6. **发版**：改 `gradle/libs.versions.toml` 的 `mod-version` → commit → tag → GitHub Release →
    在 `releases/README.md` 补一行（版本 | commit | 说明）。详见 [build-and-release.md](references/build-and-release.md)。
 7. **交付**：`present_files` 把 `build/libs/FO-<mod版本>-<MC版本>.jar` 交给用户，并说明改动点与测试建议。
