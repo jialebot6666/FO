@@ -6,7 +6,7 @@
 
 - 历史 jar（0.9 ~ 6.22）仍完整保留在 Git 历史中，可随时用 `git show <commit>:releases/FO-V<版本>.jar` 取回
   （`releases/FO-V*.jar` 是历史归档名，带 `V` 前缀，属旧格式，不必回改）。
-- 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `cd fo && ./gradlew build` 全绿 →
+- 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `./ ./gradlew build` 全绿 →
   commit（信息含模块名+摘要）→ 打 tag（`<版本>`，**不带 V**）→ GitHub Release（附 `FO-<版本>-<MC版本>.jar` + 更新说明）→ 本文件加一行。
 
 ## 命名规范
@@ -16,7 +16,7 @@
 - **版本号一律不带 `V` 前缀**：写 `6.25`，不写 `V6.25`。旧写法 `V6.25` / `FO-V6.25` 已废弃。
 - **产物文件名 = `FO-<mod版本>-<MC版本>.jar`**，例 `FO-6.25-1.21.11.jar`（不带 commit 短哈希，与构建产物、GitHub Release 附件同名）。
 - **Git tag = `<版本>`**（如 `6.25`）；**Release 标题 = `FO <版本>-<MC版本>`**（如 `FO 6.25-1.21.11`）。
-- MC 版本从 `fo/gradle/libs.versions.toml` 的 `minecraft` 自动取，产物名由 `fo/build.gradle.kts` 自动拼，**不手写版本串**；升 MC 版本只改 `minecraft` 一处。
+- MC 版本从 `gradle/libs.versions.toml` 的 `minecraft` 自动取，产物名由 `build.gradle.kts` 自动拼，**不手写版本串**；升 MC 版本只改 `minecraft` 一处。
 
 | 项目 | 旧（已废弃） | 新（唯一正确） |
 | --- | --- | --- |
@@ -35,7 +35,7 @@
   实测 13 组的 Release 附件哈希都指向 `Vx.y` 那个 tag 的提交，说明 **`FO-Vx.y` 这套 tag 是错位的**（如 `FO-V4.34` 实际指向 4.35 的代码）。
 - **Release**：104 个全部改名为新 tag，标题统一为 `FO <版本>-1.21.11`，正文里的旧 jar 名一并替换。
 - **附件**：104 个全部换名为 `FO-<版本>-1.21.11.jar`（含 75 个原本带 commit 短哈希的）。
-- 各版本当时都是 MC 1.21.11（逐提交核对 `fo/gradle/libs.versions.toml` 的 `minecraft`，120 个提交全部一致），
+- 各版本当时都是 MC 1.21.11（逐提交核对 `gradle/libs.versions.toml` 的 `minecraft`，120 个提交全部一致），
   所以 `-1.21.11` 后缀对每个历史版本都准确。
 - ⚠️ 迁移后**旧链接会失效**：`releases/tag/V6.25`、`releases/download/V6.25/FO-V6.25.jar` 等已不存在，
   请改用 `releases/tag/6.25`、`releases/download/6.25/FO-6.25-1.21.11.jar`。

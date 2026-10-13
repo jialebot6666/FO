@@ -1,0 +1,75 @@
+# 主CI：push 到 main / PR 时自动跑「编译 + 单元测试」。
+# 与发布流程解耦——只有这里负责把关质量，发布只负责发版。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: 编译 + 单元测试
+    uses: ./.github/workflows/fo-build-base.yml
+    with:
+      gradle-task: build
+
+  # 测试报告单独作为 artifact 留档，出问题时能直接看断言而不必重跑 CI。
+  test-report:
+    name: 测试报告
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 版本同样从 libs.versions.toml 解析，与 fo-build-base 保持一致
+      - id: jdk
+        run: echo "version=$(grep -E '^jdk[[:space:]]*=' gradle/libs.versions.toml | head -1 | sed -E 's/.*=[[:space:]]*"(.*)"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.jdk.outputs.version }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # --no-build-cache：确保是真跑一遍测试，而不是复用缓存里上一轮的结果。
+      - name: 运行单元测试
+        run: ./gradlew test --no-build-cache --stacktrace
+
+      - name: 汇总测试结果
+        if: always()
+        run: |
+          set -euo pipefail
+          report=build/reports/tests/test/index.html
+          if [ -f "$report" ]; then
+            echo "测试报告已生成：$report"
+            # 从 XML 汇总通过/失败数，失败时在日志里直接可见
+            python3 - <<'PY'
+            import glob, xml.etree.ElementTree as ET
+            tests = failures = errors = skipped = 0
+            for f in glob.glob('build/test-results/test/*.xml'):
+                r = ET.parse(f).getroot()
+                tests += int(r.get('tests', 0)); failures += int(r.get('failures', 0))
+                errors += int(r.get('errors', 0)); skipped += int(r.get('skipped', 0))
+            print(f"共 {tests} 个测试，失败 {failures}，错误 {errors}，跳过 {skipped}")
+            if failures or errors:
+                raise SystemExit(1)
+            PY
+          else
+            echo "::warning::未找到测试报告，确认 test 任务是否真的执行了"
+          fi
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: build/reports/tests/
+          retention-days: 14
+          if-no-files-found: warn

@@ -44,7 +44,7 @@ $env:GRADLE_USER_HOME = Join-Path $ws '.gradle-home'
 
 New-Item -ItemType Directory -Force (Join-Path $ws 'logs') | Out-Null
 
-# 注意：fo/gradle.properties 里写死了 Linux 的 org.gradle.java.home，这里用命令行覆盖，不改那个文件
+# 注意：gradle.properties 里写死了 Linux 的 org.gradle.java.home，这里用命令行覆盖，不改那个文件
 $gradleArgs = @(
     '-p', $proj,
     $Task,

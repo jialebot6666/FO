@@ -1,0 +1,94 @@
+# 发版：推 tag（如 `6.32`）触发，编译 + 测试 + 发到 GitHub Releases。
+# tag 名即版本号，且不带 V 前缀——见 AGENTS.md「命名规范」。
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的 tag（不带 V，如 6.32）
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: 校验 tag 与版本号一致
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      mc-version: ${{ steps.check.outputs.mc-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 校验
+        id: check
+        run: |
+          set -euo pipefail
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          tag="${tag#refs/tags/}"
+          mod_version=$(grep -E '^mod-version[[:space:]]*=' gradle/libs.versions.toml | head -1 | sed -E 's/.*=[[:space:]]*"(.*)"/\1/')
+          if [ "$tag" != "$mod_version" ]; then
+            echo "::error::tag「$tag」与 gradle/libs.versions.toml 的 mod-version「$mod_version」不一致"
+            echo "::error::发版前请先改版本号，或把 tag 改成 $mod_version"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "mc-version=${mc_version}" >> "$GITHUB_OUTPUT"
+          echo "版本号一致：${tag}（MC ${mc_version}）"
+
+  build:
+    name: 编译 + 测试
+    needs: verify
+    uses: ./.github/workflows/fo-build-base.yml
+    with:
+      gradle-task: build
+
+  publish:
+    name: 发布到 GitHub Releases
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.verify.outputs.tag }}
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: FO-jar
+          path: dist
+
+      - name: 校验产物名与 tag 匹配
+        run: |
+          set -euo pipefail
+          expected="FO-${{ needs.verify.outputs.tag }}-${{ needs.verify.outputs.mc-version }}.jar"
+          actual="$(basename "$(ls dist/*.jar | head -1)")"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::产物名 $actual 与预期 $expected 不符"
+            exit 1
+          fi
+          ls -la dist/
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FO ${{ needs.verify.outputs.tag }}-${{ needs.verify.outputs.mc-version }}
+          tag_name: ${{ needs.verify.outputs.tag }}
+          prerelease: false
+          draft: false
+          # 自动生成更新说明；也可在 tag 上打 release notes 覆盖
+          generate_release_notes: true
+          files: dist/*.jar

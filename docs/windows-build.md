@@ -50,7 +50,7 @@ C:\Users\<用户名>\AppData\Roaming\.minecraft\runtime\java-runtime-delta
 
 ## 2. Gradle 9.2.0：必须走国内镜像
 
-`fo/gradle/wrapper/gradle-wrapper.properties` 要求 **Gradle 9.2.0**：
+`gradle/wrapper/gradle-wrapper.properties` 要求 **Gradle 9.2.0**：
 
 ```
 distributionUrl=https\://services.gradle.org/distributions/gradle-9.2.0-bin.zip
@@ -84,10 +84,10 @@ Expand-Archive "$ws\tools\gradle-9.2.0-bin.zip" -DestinationPath "$ws\tools" -Fo
 
 ---
 
-## 3. ⚠️ 坑 2：`fo/gradle.properties` 里写死了 Linux 路径
+## 3. ⚠️ 坑 2：`gradle.properties` 里写死了 Linux 路径
 
 ```properties
-# fo/gradle.properties
+# gradle.properties
 org.gradle.java.home=/home/user/jdks/jdk-21.0.12.1+1     # ← 这是另一个 agent 的 Linux 环境
 ```
 
@@ -122,7 +122,7 @@ $env:GRADLE_USER_HOME = "$ws\.gradle-home"     # 依赖缓存放工作区，别�
 产物：
 
 ```
-fo\build\libs\FO-<mod版本>-<MC版本>.jar   ← 两段分别来自 fo/gradle/libs.versions.toml 的 mod-version 与 minecraft
+build\libs\FO-<mod版本>-<MC版本>.jar   ← 两段分别来自 gradle/libs.versions.toml 的 mod-version 与 minecraft
                                          （例：mod-version=6.25 + minecraft=1.21.11 → FO-6.25-1.21.11.jar）
 ```
 
@@ -226,7 +226,7 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
    PATCH  /repos/{o}/{r}/git/refs/heads/main {sha}          → 推进 main
 
 ② 归档 jar（文件名带①的短哈希）
-   fo/build/libs/FO-<版本>.jar  →  releases/FO-<版本>-<短哈希>.jar
+   build/libs/FO-<版本>.jar  →  releases/FO-<版本>-<短哈希>.jar
    同时在 releases/README.md 的版本清单表加一行
 
 ③ 建 Release（tag 由 GitHub 自动指向 target_commitish）
@@ -238,8 +238,8 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
           --data-binary @<jar路径>       ← 用 curl.exe 传二进制；附件名 = 构建产物名（FO-<mod版本>-<MC版本>.jar）
 ```
 
-**版本号**改 `fo/gradle/libs.versions.toml` 的 `mod-version`（不带 V），**MC 版本**改同文件的 `minecraft`，
-产物文件名（`FO-<mod版本>-<MC版本>.jar`）由 `fo/build.gradle.kts` 自动跟随，不要在别处写死版本串。
+**版本号**改 `gradle/libs.versions.toml` 的 `mod-version`（不带 V），**MC 版本**改同文件的 `minecraft`，
+产物文件名（`FO-<mod版本>-<MC版本>.jar`）由 `build.gradle.kts` 自动跟随，不要在别处写死版本串。
 
 > ⚠️ 上面 ② 的「把 jar 归档进 `releases/`」是 V5.x 时代的旧流程，**已废弃**：
 > 按 `AGENTS.md` 硬性规范 6，`releases/*.jar` 已被 `.gitignore` 拦截，jar 只作为 GitHub Release 附件分发。
@@ -262,7 +262,7 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
 
 | 项目 | 许可证 |
 |---|---|
-| **FO**（`fo/LICENSE`） | **CC0-1.0** |
+| **FO**（`LICENSE`） | **CC0-1.0** |
 | IceHack（鞘翅套件来源，`com.fo.addon.elytra`） | MIT |
 | [RustElytraClient](https://github.com/c4r0d/RustElytraClient)（参考实现） | **GPL-3.0** |
 
@@ -317,7 +317,7 @@ $env:JAVA_HOME = $jdk; $env:GRADLE_USER_HOME = "$ws\.gradle-home"
 & $gradle -p "$ws\FO\fo" build "-Dorg.gradle.java.home=$jdk" --console=plain
 
 # 4) 产物
-Get-ChildItem "$ws\FO\fo\build\libs\*.jar"
+Get-ChildItem "$ws\FO\build\libs\*.jar"
 ```
 
 ---
@@ -342,7 +342,7 @@ Get-ChildItem "$ws\FO\fo\build\libs\*.jar"
 
 ### 办法一：放宽 HTTP 超时（治标，但必须做）
 
-写 `$ws\.gradle-home\gradle.properties`（**用户级配置，不要动仓库里的 `fo/gradle.properties`**）：
+写 `$ws\.gradle-home\gradle.properties`（**用户级配置，不要动仓库里的 `gradle.properties`**）：
 
 ```properties
 org.gradle.jvmargs=-Xmx2G -Dfile.encoding=UTF-8

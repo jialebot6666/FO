@@ -53,8 +53,16 @@ dependencies {
     modCompileOnly(files("libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar"))
 
     // V6.8 起古城模块已全程自写（纯 Java），不再打包 libs/fo-ancient-blackbox.jar。
-    // 该黑盒里的 657 个类已被 ancient/ 下的自写实现替代；只剩两个 Windows DLL 还在用
-    // （群系验证，V6.9 自写群系采样后一并删除），已抽到 src/main/resources/natives/windows/。
+    // 该黑盒里的 657 个类已被 ancient/ 下的自写实现替代。
+    //
+    // ⚠️ 为什么 libs/ 与 natives/ 里的二进制必须入库（而不是改成 Maven 依赖）：
+    //   1. libs/baritone-api-fabric-1.21.11-SNAPSHOT.jar —— Baritone 未发布到任何公开 Maven 仓库，
+    //      只能以文件依赖引入；SNAPSHOT 也没有可锁定的版本号。
+    //   2. src/main/resources/natives/windows/*.dll —— CubiomesJNI 的原生库，且 JNI 导出符号是
+    //      Java_com_custom_addon_util_CubiomesJNI_*，与 com.custom.addon.util 包名硬绑定。
+    //      换成 Maven 坐标无法保留这个符号约定，改包名则链接失败。
+    // 这两类是「源码级依赖」，不是「构建产物」，与 releases/*.jar 性质不同，不要混淆。
+    // 见 docs/ci.md「仓库里为什么仍然有二进制文件」。
 
     // Seedfinding (世界种子/结构定位计算库，ElytraCollector 依赖)
     extraLibs("com.seedfinding:mc_biome:1.171.1") { isTransitive = false }

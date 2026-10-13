@@ -1,0 +1,76 @@
+# 所有 job 共用的构建环境：检出 + JDK + Gradle 缓存 + 配置缓存。
+# 抽成可复用 workflow，避免 CI / PR / Release 三处重复维护。
+name: fo-build-base
+
+on:
+  workflow_call:
+    inputs:
+      gradle-task:
+        description: 要执行的 Gradle 任务
+        type: string
+        default: build
+    outputs:
+      jar-name:
+        description: 构建产物文件名
+        value: ${{ jobs.build.outputs.jar-name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      jar-name: ${{ steps.pick.outputs.jar-name }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # JDK 版本来自 gradle/libs.versions.toml 的 versions.jdk，与 build.gradle.kts 的
+      # toolchain 一致——升 JDK 只改那一处，workflow 不硬编码版本串。
+      - name: 解析 JDK 版本
+        id: jdk
+        run: |
+          set -euo pipefail
+          v=$(grep -E '^jdk[[:space:]]*=' gradle/libs.versions.toml | head -1 | sed -E 's/.*=[[:space:]]*"(.*)"/\1/')
+          [ -n "$v" ] || { echo "::error::gradle/libs.versions.toml 里没有 versions.jdk"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "使用 JDK ${v}"
+
+      - name: 安装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.jdk.outputs.version }}
+
+      - name: 赋予 gradlew 执行权限
+        run: chmod +x gradlew
+
+      - name: Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 执行 Gradle 任务
+        run: ./gradlew ${{ inputs.gradle-task }} --stacktrace --no-daemon
+
+      # 只留正式产物，排除 sources / javadoc / mappings，避免 Release 里混进源码包。
+      - name: 收集产物
+        id: pick
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find build/libs -maxdepth 1 -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name '*-mappings.jar' \
+            -exec cp {} dist/ \;
+          ls -la dist/
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "::error::构建成功但没有产出 jar，检查 archives_base_name / base.version 配置"
+            exit 1
+          fi
+          echo "jar-name=$(basename "$(ls dist/*.jar | head -1)")" >> "$GITHUB_OUTPUT"
+
+      # 把 jar 传到磁盘而不是只存 Actions 缓存：后续发布 job 在同一台 runner 上直接用文件，
+      # 避免跨 job 传递二进制。
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: FO-jar
+          path: dist/*.jar
+          retention-days: 30
+          if-no-files-found: error

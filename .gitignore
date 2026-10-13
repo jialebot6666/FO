@@ -1,29 +1,50 @@
-# 系统临时目录
+# ===== Gradle =====
+.gradle/
+build/
+out/
+bin/
+classes/
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+*.launch
+.vscode/
+.settings/
+.classpath
+.project
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== Fabric / Minecraft 运行时 =====
+run/
+logs/
+
+# ===== 构建产物：一律走 GitHub Releases，绝不入库 =====
+# 见 docs/ci.md「为什么 jar 不进仓库」
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+!libs/*.jar
+
+# ===== 本地环境与工具产物 =====
+# 参考源码（Ying/LeavesHack 等外部项目源码，211MB）
+ref-src/
+# Agent 临时目录
 .tmp-tool-results/
 
-# 参考源码（Ying/LeavesHack 等外部项目源码，211MB，不入库）
-ref-src/
-
-# 构建产物 jar 一律走 GitHub Releases，不入库（历史 jar 保留在 git 历史中可回溯）
-releases/*.jar
-
-# 参考素材 / 历史会话产物（外部项目源码、jar、zip、nbt 存档，不入库）
+# ===== 参考素材 / 历史会话产物（外部项目源码、zip、nbt 存档）=====
 .novel-workflow/
-20260822.nbt
-20260822_noVia.nbt
-FO-项目源码包-V4.13.zip
-RustElytraClient-1.21.11-beta1.8-fireworkspeed1.5.jar
-RustElytraClient-1.21.11-beta1.8-patched.jar
-SlimefunHelper-1.21.11-1.1.7.1.jar
+work/
 icehack-v1/
 icehack2/
-misaka-review.zip
-misaka-v2.zip
-misaka-v2/
-misaka-v3.zip
-misaka-v3/
 misaka/
+misaka-v2/
+misaka-v3/
 rust-elytra/
-seedmapper-2.21.2-1.21.11.jar
-work/
-全部材料-用户上传与交付.zip
+*.zip
+# 根目录散落的 nbt 存档不入库，但古城结构数据是核心资源，必须保留
+/*.nbt

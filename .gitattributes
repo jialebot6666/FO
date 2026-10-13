@@ -1,0 +1,27 @@
+# 默认按文本处理，提交时统一转 LF（避免 Windows 检出后混入 CRLF）
+* text=auto eol=lf
+
+# 二进制，禁止行尾转换与差异计算
+*.jar binary
+*.dll binary
+*.nbt binary
+*.png binary
+*.zip binary
+
+# Windows 批处理必须 CRLF，否则在 cmd 下无法执行
+*.bat text eol=crlf
+gradlew.bat text eol=crlf
+*.cmd text eol=crlf
+
+# shell 脚本必须 LF，否则在 Linux/macOS 上无法执行
+gradlew text eol=lf
+*.sh text eol=lf
+
+# 工作流与文档固定 LF
+.github/workflows/*.yml text eol=lf
+*.md text eol=lf
+*.kts text eol=lf
+*.java text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.properties text eol=lf

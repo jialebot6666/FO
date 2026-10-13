@@ -26,13 +26,13 @@
       Set-Content .ghtoken -Value 'ghp_xxx' -Encoding ASCII -NoNewline
       powershell -NoProfile -ExecutionPolicy Bypass -File docs\scripts\gh-deliver.ps1 `
           -Version 6.25 `
-          -Files @('fo/gradle/libs.versions.toml','fo/src/main/java/com/fo/addon/....java') `
+          -Files @('gradle/libs.versions.toml','src/main/java/com/fo/addon/....java') `
           -CommitMessageFile rel\commit1.txt `
           -NotesFile rel\notes-6.25.md
       Remove-Item .ghtoken      # 用完删掉，并去 GitHub 吊销 token
 
   参数：
-      -Version            版本号，如 6.25（不带 V；须与 fo/gradle/libs.versions.toml 的 mod-version 一致）
+      -Version            版本号，如 6.25（不带 V；须与 gradle/libs.versions.toml 的 mod-version 一致）
       -Files              本次改动/新增的仓库相对路径（正斜杠）
       -CommitMessageFile  源码 commit 的完整说明（UTF-8 文件）
       -NotesFile          Release 更新介绍（UTF-8 文件；其中的 @@HASH@@ 会替换成源码 commit 短哈希）
@@ -106,7 +106,7 @@ Write-Host "commit1 = $($c1.sha)  (short $short)"
 # ---------- 阶段二：归档 jar ----------
 Write-Host "=== 阶段二：归档 jar ==="
 $jarName = "FO-$Version-$McVersion.jar"
-$srcJar  = Join-Path $ws "FO\fo\build\libs\FO-$Version-$McVersion.jar"
+$srcJar  = Join-Path $ws "FO\build\libs\FO-$Version-$McVersion.jar"
 if (-not (Test-Path $srcJar)) { throw "jar not found: $srcJar (mod-version / minecraft 对得上吗？)" }
 $dstJar  = Join-Path $ws "FO\releases\$jarName"
 Copy-Item $srcJar $dstJar -Force
