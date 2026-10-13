@@ -1,6 +1,7 @@
 # CI：push / PR 到 main 时自动编译打包，产物作为 Actions artifact 留存 30 天。
 #
-# 发版仍走手动命令（gh release create），见 docs/ci.md。
+# 发版仍走手动命令（gh release create），见
+# .github/skills/fo-development/references/build-and-release.md。
 name: CI
 
 on:

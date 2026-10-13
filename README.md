@@ -16,7 +16,8 @@ Meteor Client（Fabric）的全自动生存辅助插件，MC **1.21.11**，模�
 | FO 古城战利品搜索 | 附魔金苹果 / 迅捷潜行3 的古城箱子预测、战利品掷骰、Xaero 路径点联动、自动偷取（**半自动**，需手动开箱） |
 
 模块注册入口：`src/main/java/com/fo/addon/AddonTemplate.java`。
-开发规范与历史决策记录见 [`AGENTS.md`](AGENTS.md)。
+**开发规范、架构约定、构建与发版流程全部收敛在
+[`.github/skills/fo-development/SKILL.md`](.github/skills/fo-development/SKILL.md)**（含 `references/`）。
 
 ## 构建
 
@@ -44,9 +45,10 @@ Meteor Client（Fabric）的全自动生存辅助插件，MC **1.21.11**，模�
 ## 仓库结构与 CI
 
 仓库只有一个 CI 工作流（`.github/workflows/ci.yml`）：push / PR 时自动编译打包，
-产物作为 Actions artifact 留存 30 天。单测本地跑，发版走手动命令。详见 [`docs/ci.md`](docs/ci.md)。
-
-Windows 本地构建踩坑见 [`docs/windows-build.md`](docs/windows-build.md)。
+产物作为 Actions artifact 留存 30 天。单测本地跑，发版走手动命令。
+Windows 本地构建踩坑、CI 细节见
+[skill 的构建参考](.github/skills/fo-development/references/build-and-release.md)
+与 [Windows 构建指南](.github/skills/fo-development/references/windows-build.md)。
 
 版本归档清单见 [`releases/README.md`](releases/README.md)。
 
@@ -54,7 +56,8 @@ Windows 本地构建踩坑见 [`docs/windows-build.md`](docs/windows-build.md)�
 
 `*.jar` 不提交到 git（`gradle-wrapper.jar` 与 `libs/` 的源码级依赖除外），
 产物一律发布到 GitHub Releases。历史遗留的 110 个 jar 已从 git 历史中剥离。
-原因与白名单说明见 [`docs/ci.md`](docs/ci.md)。
+原因与白名单说明见
+[构建参考](.github/skills/fo-development/references/build-and-release.md)。
 
 ## License
 

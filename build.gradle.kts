@@ -72,7 +72,8 @@ dependencies {
     //      Java_com_custom_addon_util_CubiomesJNI_*，与 com.custom.addon.util 包名硬绑定。
     //      换成 Maven 坐标无法保留这个符号约定，改包名则链接失败。
     // 这两类是「源码级依赖」，不是「构建产物」，与 releases/*.jar 性质不同，不要混淆。
-    // 见 docs/ci.md「仓库里为什么仍然有二进制文件」。
+    // 见 .github/skills/fo-development/references/build-and-release.md
+    // 「仓库里为什么仍然有二进制文件」。
 
     // Seedfinding (世界种子/结构定位计算库，ElytraCollector 依赖)
     extraLibs("com.seedfinding:mc_biome:1.171.1") { isTransitive = false }

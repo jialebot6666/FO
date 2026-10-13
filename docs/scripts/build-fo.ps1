@@ -10,7 +10,7 @@
       FO_JDK     JDK 21 目录（默认 Minecraft 启动器自带的 java-runtime-delta）
       FO_GRADLE  gradle.bat 路径（默认 <工作区>\tools\gradle-9.2.0\bin\gradle.bat）
 
-  背景与坑详见 docs/windows-build.md。
+  背景与坑详见 .github/skills/fo-development/references/windows-build.md。
 #>
 param(
     [string]$Task = 'build',
@@ -26,13 +26,13 @@ $jdk = if ($env:FO_JDK) { $env:FO_JDK }
 $gradle = if ($env:FO_GRADLE) { $env:FO_GRADLE }
           else { Join-Path $ws 'tools\gradle-9.2.0\bin\gradle.bat' }
 
-$proj = Join-Path $ws 'FO\fo'
+$proj = Join-Path $ws 'FO'
 
 if (-not (Test-Path (Join-Path $jdk 'bin\javac.exe'))) {
-    throw "JDK not found (need one WITH javac.exe): $jdk`nSet FO_JDK or see docs/windows-build.md section 1."
+    throw "JDK not found (need one WITH javac.exe): $jdk`nSet FO_JDK or see .github/skills/fo-development/references/windows-build.md section 1."
 }
 if (-not (Test-Path $gradle)) {
-    throw "Gradle not found: $gradle`nSet FO_GRADLE or see docs/windows-build.md section 2."
+    throw "Gradle not found: $gradle`nSet FO_GRADLE or see .github/skills/fo-development/references/windows-build.md section 2."
 }
 if (-not (Test-Path (Join-Path $proj 'build.gradle.kts'))) {
     throw "FO project not found at: $proj`nSet FO_WS."
@@ -44,7 +44,8 @@ $env:GRADLE_USER_HOME = Join-Path $ws '.gradle-home'
 
 New-Item -ItemType Directory -Force (Join-Path $ws 'logs') | Out-Null
 
-# 注意：gradle.properties 里写死了 Linux 的 org.gradle.java.home，这里用命令行覆盖，不改那个文件
+# 仓库的 gradle.properties 不写死 org.gradle.java.home（写了会让 CI/其它机器失败），
+# 这里一律用命令行 -D 覆盖
 $gradleArgs = @(
     '-p', $proj,
     $Task,

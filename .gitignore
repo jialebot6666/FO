@@ -35,6 +35,7 @@ logs/
 ref-src/
 # Agent 临时目录
 .tmp-tool-results/
+.workbuddy/
 
 # ===== 参考素材 / 历史会话产物（外部项目源码、zip、nbt 存档）=====
 .novel-workflow/

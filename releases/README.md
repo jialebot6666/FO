@@ -9,7 +9,7 @@
   旧的 `releases/FO-V*.jar` **无法再用 `git show` 取回**——需要旧版本 jar 请去
   [Releases](https://github.com/wxh1024/FO/releases) 下载。
   该版本→commit 对照表仍完整保留在本文件下方，回溯代码不受影响。
-  详见 `docs/ci.md`「为什么 jar 不进仓库」。
+  详见 `.github/skills/fo-development/references/build-and-release.md`「为什么 jar 不进仓库」。
 - 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `./gradlew build` 全绿 →
   commit（信息含模块名+摘要）→ 打 tag（`<版本>`，**不带 V**）→ GitHub Release（附 `FO-<版本>-<MC版本>.jar` + 更新说明）→ 本文件加一行。
   推 tag 后 `release.yml` 会自动完成「校验 → 测试 → 构建 → 发 Release」。

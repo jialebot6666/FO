@@ -1,10 +1,12 @@
 # 在 Windows 上构建 / 发版 FO
 
-> 本文记录的是**在没有任何开发环境的 Windows 机器上（例如网吧）从零把 FO 构建出来并发布**的完整流程，
+> 记录的是**在几乎没有开发环境的 Windows 机器上（例如网吧）从零把 FO 构建出来并发布**的完整流程，
 > 包括实际踩过的坑。目标是换一台机器也能照着做，不用重新摸索。
 >
-> 首次冷启动实测耗时 **29 分 26 秒**（要下 Gradle + Loom + Minecraft + Yarn + Meteor + seedfinding），
+> 首次冷启动实测 **29 分 26 秒**（要下 Gradle + Loom + Minecraft + Yarn + Meteor + seedfinding），
 > 依赖缓存建好之后**每次约 6 秒**。
+>
+> ⚠️ 路径说明：Gradle 工程在**仓库根**，没有 `fo/` 子目录。下面命令里的 `<repo>` 就是仓库根目录。
 
 ---
 
@@ -67,7 +69,7 @@ curl: (56) Recv failure: Connection was reset
 **改用腾讯镜像**（实测 135,534,361 字节，完整）：
 
 ```powershell
-$ws = "C:\Users\<用户名>\Documents\deepseek-harness\default-workspace"
+$ws = "$env:USERPROFILE\Documents\fo-workspace"
 New-Item -ItemType Directory -Force "$ws\tools" | Out-Null
 
 curl.exe -L --retry 3 --retry-delay 3 --max-time 600 `
@@ -84,16 +86,11 @@ Expand-Archive "$ws\tools\gradle-9.2.0-bin.zip" -DestinationPath "$ws\tools" -Fo
 
 ---
 
-## 3. ⚠️ 坑 2：`gradle.properties` 里写死了 Linux 路径
+## 3. JDK 路径怎么传
 
-```properties
-# gradle.properties
-org.gradle.java.home=/home/user/jdks/jdk-21.0.12.1+1     # ← 这是另一个 agent 的 Linux 环境
-```
-
-Windows 上不处理这一行会**直接构建失败**（找不到那个 Java home）。
-
-**不要改这个文件**（会把另一个 Linux agent 的环境弄坏），用命令行覆盖：
+⚠️ **不要在仓库的 `gradle.properties` 里写 `org.gradle.java.home`**
+（2026-10 已从仓库移除；原先写死了另一个 agent 的 Linux 路径，会让 Windows / CI 构建失败）。
+用命令行覆盖：
 
 ```
 -Dorg.gradle.java.home="C:\Users\<用户名>\AppData\Roaming\.minecraft\runtime\java-runtime-delta"
@@ -107,23 +104,21 @@ Windows 上不处理这一行会**直接构建失败**（找不到那个 Java ho
 ## 4. 构建
 
 ```powershell
-$ws     = "C:\Users\<用户名>\Documents\deepseek-harness\default-workspace"
-$jdk    = "C:\Users\<用户名>\AppData\Roaming\.minecraft\runtime\java-runtime-delta"
+$ws     = "$env:USERPROFILE\Documents\fo-workspace"
+$repo   = "$ws\FO"                              # ← 仓库根，Gradle 工程在这里
+$jdk    = "$env:APPDATA\.minecraft\runtime\java-runtime-delta"
 $gradle = "$ws\tools\gradle-9.2.0\bin\gradle.bat"
 
 $env:JAVA_HOME        = $jdk
-$env:GRADLE_USER_HOME = "$ws\.gradle-home"     # 依赖缓存放工作区，别塞进 C:\Users 默认位置
+$env:GRADLE_USER_HOME = "$ws\.gradle-home"      # 依赖缓存放工作区，别塞进 C:\Users 默认位置
 
-& $gradle -p "$ws\FO\fo" build `
-    "-Dorg.gradle.java.home=$jdk" `
-    --console=plain
+& $gradle -p $repo build "-Dorg.gradle.java.home=$jdk" --console=plain
 ```
 
 产物：
 
 ```
-build\libs\FO-<mod版本>-<MC版本>.jar   ← 两段分别来自 gradle/libs.versions.toml 的 mod-version 与 minecraft
-                                         （例：mod-version=6.25 + minecraft=1.21.11 → FO-6.25-1.21.11.jar）
+<repo>\build\libs\FO-<mod版本>-<MC版本>.jar   ← 两段分别来自 gradle/libs.versions.toml 的 mod-version 与 minecraft
 ```
 
 ### ⚠️ 坑 3：Windows PowerShell 5.1 会把 stderr 当终止错误
@@ -139,7 +134,7 @@ $p = Start-Process -FilePath $gradle -ArgumentList $args -NoNewWindow -Wait -Pas
 Write-Host "exit = $($p.ExitCode)"
 ```
 
-现成脚本见 [`scripts/build-fo.ps1`](scripts/build-fo.ps1)。
+现成脚本见 [`docs/scripts/build-fo.ps1`](../../../docs/scripts/build-fo.ps1)。
 
 ### ⚠️ 坑 4：中文 `.ps1` 必须存成 UTF-8 **带 BOM**
 
@@ -165,7 +160,7 @@ Get-Content $path -Encoding UTF8
 `build` 会连带跑 JUnit 5。看结果：
 
 ```powershell
-Get-ChildItem "$ws\FO\fo\build\test-results\test" -Filter *.xml | ForEach-Object {
+Get-ChildItem "$repo\build\test-results\test" -Filter *.xml | ForEach-Object {
     [xml]$d = Get-Content $_.FullName -Encoding UTF8
     "{0,-46} tests={1} failures={2}" -f $d.testsuite.name, $d.testsuite.tests, $d.testsuite.failures
 }
@@ -178,7 +173,7 @@ Get-ChildItem "$ws\FO\fo\build\test-results\test" -Filter *.xml | ForEach-Object
 ## 6. 提交与发版：不用 git，走 GitHub REST API
 
 这台机器没装 git，所以直接用 HTTP API 建 commit / tag / Release。
-**产出的仍然是仓库里真实的 commit 和 tag**，`AGENTS.md` 的「每次改动建 commit」照样满足。
+**产出的仍然是仓库里真实的 commit 和 tag**，「每次改动建 commit」照样满足。
 
 ### ⚠️ 坑 5（最危险）：提交前必须比对远端，否则会覆盖别人的提交
 
@@ -207,7 +202,7 @@ function GitBlobSha([string]$path) {
 
 ### ⚠️ 坑 6：中文 JSON body 必须转成 UTF-8 字节
 
-PowerShell 5.1 的 `Invoke-RestMethod -Body "<string>"` 会按 Latin-1 发，中文全变问号：
+PowerShell 5.1 的 `Invoke-RestMethod -Body "<string>"` 会按Latin-1 发，中文全变问号：
 
 ```powershell
 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -215,7 +210,9 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
     -ContentType "application/json; charset=utf-8"
 ```
 
-### 发版流程（对应 `AGENTS.md` 铁律 6）
+### 发版流程
+
+完整流程与命名规范见 [build-and-release.md](build-and-release.md)。REST API 序列：
 
 ```
 ① 建源码 commit
@@ -225,84 +222,42 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
    POST   /repos/{o}/{r}/git/commits  {message, tree, parents:[head]}
    PATCH  /repos/{o}/{r}/git/refs/heads/main {sha}          → 推进 main
 
-② 归档 jar（文件名带①的短哈希）
-   build/libs/FO-<版本>.jar  →  releases/FO-<版本>-<短哈希>.jar
-   同时在 releases/README.md 的版本清单表加一行
-
-③ 建 Release（tag 由 GitHub 自动指向 target_commitish）
+② 建 Release（tag 由 GitHub 自动指向 target_commitish）
    POST   /repos/{o}/{r}/releases
           {tag_name:"<mod版本>", target_commitish:<commit>, name:"FO <mod版本>-<MC版本>",
            body:<更新介绍>, draft:false, prerelease:false}
-          ← tag 不带 V；标题形如 "FO 6.25-1.21.11"
+          ← tag 不带 V；标题形如 "FO 6.32-1.21.11"
    POST   https://uploads.github.com/repos/{o}/{r}/releases/{id}/assets?name=<jar名>
-          --data-binary @<jar路径>       ← 用 curl.exe 传二进制；附件名 = 构建产物名（FO-<mod版本>-<MC版本>.jar）
+          --data-binary @<jar路径>       ← 用 curl.exe 传二进制；附件名 = 构建产物名
+
+③ 在 releases/README.md 补一行版本记录
 ```
 
 **版本号**改 `gradle/libs.versions.toml` 的 `mod-version`（不带 V），**MC 版本**改同文件的 `minecraft`，
-产物文件名（`FO-<mod版本>-<MC版本>.jar`）由 `build.gradle.kts` 自动跟随，不要在别处写死版本串。
+产物文件名由 `build.gradle.kts` 自动跟随，不要在别处写死版本串。
 
-> ⚠️ 上面 ② 的「把 jar 归档进 `releases/`」是 V5.x 时代的旧流程，**已废弃**：
-> 按 `AGENTS.md` 硬性规范 6，`releases/*.jar` 已被 `.gitignore` 拦截，jar 只作为 GitHub Release 附件分发。
-
+> ⚠️ V5.x 时代曾把 jar 归档进 `releases/`，**已废弃**：`releases/*.jar` 已被 `.gitignore` 拦截，
+> jar 只作为 GitHub Release 附件分发。
+>
 > **纯文档改动不要发版**：没有新 jar 就不升版本、不建 Release，否则会污染版本历史
 > （会出现两个内容完全相同的 jar）。
 
-现成脚本见 [`scripts/gh-deliver.ps1`](scripts/gh-deliver.ps1)。
+现成脚本见 [`docs/scripts/gh-deliver.ps1`](../../../docs/scripts/gh-deliver.ps1)。
 
 ### Token
 
-需要一个能写 `jialebot6666/FO` 的 token（细粒度给 **Contents: Read and write** 就够）。
+需要一个能写目标仓库的 token（细粒度给 **Contents: Read and write** 就够）。
 
 - 别把它写进任何**要提交的文件**里；放到工作区下一个被忽略的临时文件（如 `.ghtoken`），**用完删掉**。
 - 用完记得去 GitHub 设置里**吊销**。
 
 ---
 
-## 7. 许可证：参考别的项目前先看 LICENSE
-
-| 项目 | 许可证 |
-|---|---|
-| **FO**（`LICENSE`） | **CC0-1.0** |
-| IceHack（鞘翅套件来源，`com.fo.addon.elytra`） | MIT |
-| [RustElytraClient](https://github.com/c4r0d/RustElytraClient)（参考实现） | **GPL-3.0** |
-
-**GPL-3.0 有传染性**：把它的代码抄进 CC0 的 FO，会让整个 FO 变成 GPL 衍生作品。
-
-> 参考它的**行为与思路**没问题（不受著作权保护），但**不要逐行复制它的代码**。
-> V5.2 参考它的四点（走过去再自己挖 / 背包满腾位 / 槽位差检测 / 火球重置超时）都是按 FO 自己的结构重写的。
-
----
-
-## 8. 前端汉化（`AGENTS.md` 铁律 3）
-
-Meteor 的 `EnumSetting` 下拉框、模块列表、HUD、聊天输出**都走枚举的 `toString()`**。
-所以会出现在界面上的枚举**必须覆写 `toString()` 返回中文**，否则玩家会看到 `BlocksPerSecond` 这种英文枚举名。
-
-```java
-public enum Unit {
-    BlocksPerSecond("格/秒"),
-    Kmh("公里/小时"),
-    BlocksPerTick("格/刻");
-
-    public final String label;
-
-    Unit(String label) { this.label = label; }
-
-    @Override
-    public String toString() { return label; }
-}
-```
-
-已有守护测试 `ElytraUiTextTest` 会遍历所有界面枚举，**发现没有中文的枚举会直接让构建失败**。
-
-同时注意：`.name()` 返回的是**枚举常量名（英文）**，界面上要用 `toString()`。
-
----
-
-## 9. 一分钟速查
+## 7. 一分钟速查
 
 ```powershell
-$ws     = "$env:USERPROFILE\Documents\deepseek-harness\default-workspace"
+$ws     = "$env:USERPROFILE\Documents\fo-workspace"
+$repo   = "$ws\FO"
 $jdk    = "$env:APPDATA\.minecraft\runtime\java-runtime-delta"
 $gradle = "$ws\tools\gradle-9.2.0\bin\gradle.bat"
 
@@ -314,15 +269,15 @@ Test-Path $gradle
 
 # 3) 构建（约 6 秒，冷启动约 30 分钟）
 $env:JAVA_HOME = $jdk; $env:GRADLE_USER_HOME = "$ws\.gradle-home"
-& $gradle -p "$ws\FO\fo" build "-Dorg.gradle.java.home=$jdk" --console=plain
+& $gradle -p $repo build "-Dorg.gradle.java.home=$jdk" --console=plain
 
 # 4) 产物
-Get-ChildItem "$ws\FO\build\libs\*.jar"
+Get-ChildItem "$repo\build\libs\*.jar"
 ```
 
 ---
 
-## 10. ⚠️ 依赖下载太慢：接国内镜像（实测把冷启动从「跑不完」压到 8 分 38 秒）
+## 8. ⚠️ 依赖下载太慢：接国内镜像（实测把冷启动从「跑不完」压到 8 分 38 秒）
 
 第 2 节讲了 Gradle 本体要换镜像，但**依赖**（Maven Central / Fabric / Meteor）默认还是直连，
 在慢线路上会 `SocketTimeoutException: Read timed out` 直接让构建失败——2026-10-12 实测就踩到了。
@@ -391,14 +346,14 @@ allprojects { p ->
 
 > 这是 Gradle 的**用户级 init 脚本**，放在 `GRADLE_USER_HOME` 下，不进仓库、不污染工作树，
 > 也不需要修改 `build.gradle.kts` 或 `settings.gradle.kts`。
-> `fabricmc` / `meteordev` 没有对应的国内镜像，保持原样即可。
+> `fabricmc` / `meteordev` / `seedfinding` 没有对应的国内镜像，保持原样即可。
 
 ### 效果
 
 | | 冷启动耗时 |
 |---|---|
 | 只做第 2 节（Gradle 本体换镜像） | 跑了 **40 分钟仍未完成**，最终 `Read timed out` 失败 |
-| 加第 10 节两条配置 | **8 分 38 秒**，`BUILD SUCCESSFUL` |
+| 加本节两条配置 | **8 分 38 秒**，`BUILD SUCCESSFUL` |
 
 ### 顺带：其它网络坑
 
