@@ -1,5 +1,6 @@
-# 主CI：push 到 main / PR 时自动跑「编译 + 单元测试」。
-# 与发布流程解耦——只有这里负责把关质量，发布只负责发版。
+# CI：push / PR 到 main 时自动编译打包，产物作为 Actions artifact 留存 30 天。
+#
+# 发版仍走手动命令（gh release create），见 docs/ci.md。
 name: CI
 
 on:
@@ -14,62 +15,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: 编译 + 单元测试
-    uses: ./.github/workflows/fo-build-base.yml
-    with:
-      gradle-task: build
-
-  # 测试报告单独作为 artifact 留档，出问题时能直接看断言而不必重跑 CI。
-  test-report:
-    name: 测试报告
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # JDK 版本同样从 libs.versions.toml 解析，与 fo-build-base 保持一致
-      - id: jdk
-        run: echo "version=$(grep -E '^jdk[[:space:]]*=' gradle/libs.versions.toml | head -1 | sed -E 's/.*=[[:space:]]*"(.*)"/\1/')" >> "$GITHUB_OUTPUT"
+      # JDK 从 libs.versions.toml 读，与 build.gradle.kts 的 toolchain 同源，升 JDK 只改那一处
+      - name: 解析 JDK 版本
+        id: jdk
+        run: |
+          v=$(grep -E '^jdk[[:space:]]*=' gradle/libs.versions.toml | head -1 | cut -d'"' -f2)
+          [ -n "$v" ] || { echo "::error::libs.versions.toml 里没有 versions.jdk"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "使用 JDK ${v}"
 
-      - uses: actions/setup-java@v4
+      - name: 安装 JDK
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ steps.jdk.outputs.version }}
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # --no-build-cache：确保是真跑一遍测试，而不是复用缓存里上一轮的结果。
-      - name: 运行单元测试
-        run: ./gradlew test --no-build-cache --stacktrace
+      - run: chmod +x gradlew
 
-      - name: 汇总测试结果
-        if: always()
+      # assemble 不触发 test，只验证「能编译、能打包」。单测本地 ./gradlew test 自检。
+      - name: 编译打包
+        run: ./gradlew assemble --stacktrace --no-daemon
+
+      - name: 收集产物
         run: |
           set -euo pipefail
-          report=build/reports/tests/test/index.html
-          if [ -f "$report" ]; then
-            echo "测试报告已生成：$report"
-            # 从 XML 汇总通过/失败数，失败时在日志里直接可见
-            python3 - <<'PY'
-            import glob, xml.etree.ElementTree as ET
-            tests = failures = errors = skipped = 0
-            for f in glob.glob('build/test-results/test/*.xml'):
-                r = ET.parse(f).getroot()
-                tests += int(r.get('tests', 0)); failures += int(r.get('failures', 0))
-                errors += int(r.get('errors', 0)); skipped += int(r.get('skipped', 0))
-            print(f"共 {tests} 个测试，失败 {failures}，错误 {errors}，跳过 {skipped}")
-            if failures or errors:
-                raise SystemExit(1)
-            PY
-          else
-            echo "::warning::未找到测试报告，确认 test 任务是否真的执行了"
-          fi
+          mkdir -p dist
+          find build/libs -maxdepth 1 -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name '*-mappings.jar' \
+            -exec cp {} dist/ \;
+          ls -la dist/
 
-      - name: 上传测试报告
-        if: always()
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: test-report
-          path: build/reports/tests/
-          retention-days: 14
-          if-no-files-found: warn
+          name: FO-jar
+          path: dist/*.jar
+          retention-days: 30
+          if-no-files-found: error

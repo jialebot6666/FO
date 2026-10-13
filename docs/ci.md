@@ -1,7 +1,6 @@
 # CI/CD 与仓库结构约定
 
-> 本文是**仓库结构与发布流程的权威说明**。工作流 `guard.yml` 会校验本文的存在与内容，
-> 改结构前先读这里。
+> 本文是**仓库结构与发布流程的权威说明**。改结构前先读这里。
 
 ## 目录结构
 
@@ -29,21 +28,29 @@ FO/                          ← 仓库根，Gradle 工程就在这里（不再�
 - 且那两份内容本身也是坏的：没有 `working-directory`（在仓库根跑 `./gradlew` 必然失败）、
   用了 Java 25（工程 toolchain 是 21）、`actions/checkout@v7` 这个版本并不存在。
 
-现在工程在根，workflow 统一在根执行，`guard.yml` 会阻止 `fo/` 和嵌套 `.github/` 复现。
+现在工程在根，workflow 统一在根执行，不需要任何 `working-directory`。
 
 ## 工作流一览
 
-| 文件 | 触发 | 职责 |
-|---|---|---|
-| `fo-build-base.yml` | 被调用 | 共用构建：检出 → JDK → Gradle 缓存 → 编译 → 收集 jar |
-| `ci.yml` | push/PR 到 main | 质量把关：编译 + 单元测试 + 测试报告留档 |
-| `release.yml` | 推 tag（如 `6.32`） | 发版：校验版本 → 构建 → 发到 GitHub Releases |
-| `guard.yml` | push/PR 到 main | 结构与二进制守门 |
+仓库只有**一个**工作流 `.github/workflows/ci.yml`：
 
-版本号、JDK 版本、产物文件名**全部**从 `gradle/libs.versions.toml` 解析，
-workflow 里不允许出现硬编码版本串（`guard.yml` 会检查）。升版本只改 toml 一处。
+| 触发 | 行为 |
+|---|---|
+| push 到 main / PR 到 main / 手动 | 解析 JDK → 装 Temurin → `./gradlew assemble` → 打包为 Actions artifact（`FO-jar`，留存 30 天） |
+
+产物可在 Actions 页面直接下载。**不在 CI 里跑单元测试**（`assemble` 不触发 `test`），
+单测交付前本地 `./gradlew test` 自检。
+
+**为什么不再拆成多个工作流**：拆成 `ci.yml` / `release.yml` / `fo-build-base.yml`
+后，每个文件都要重复「检出 → JDK → Gradle 缓存」的样板，版本号解析也容易各自漂移。
+合并成一个后，构建逻辑只有一份。
+
+JDK 与版本号**全部**从 `gradle/libs.versions.toml` 解析，workflow 里不出现硬编码
+版本串。升 JDK / 升版本都只改 toml 一处。
 
 ## 发版流程
+
+发版走手动命令（当前**没有**自动发版工作流）：
 
 ```bash
 # 1. 改 gradle/libs.versions.toml 的 mod-version（不带 V 前缀）
@@ -54,12 +61,19 @@ git tag 6.33
 git push origin main --tags
 ```
 
-推 tag 后 `release.yml` 自动：校验 tag 与 `mod-version` 一致 → 跑测试 → 构建 →
-发 GitHub Release（附件 `FO-<版本>-<MC版本>.jar`）。
+确认 main 的 CI 全绿后，再建 Release：
 
-tag 与 `mod-version` 不一致会**直接失败**，不会发出半成品 Release。
+```bash
+./gradlew assemble
+gh release create 6.33 build/libs/FO-6.33-1.21.11.jar \
+  --title "FO 6.33-1.21.11" --notes "<更新说明>"
+```
 
 最后在 `releases/README.md` 补一行版本记录。
+
+> 曾写过自动发版工作流（推 tag 触发 + 校验 tag 与 `mod-version` 一致），
+> 因发版频率低（约每月一次）、不想维护两套流程而删除。若将来发版变频繁，
+> 那段「tag 与版本号不一致就失败」的校验值得加回来。
 
 ## 为什么 jar 不进仓库
 
@@ -74,7 +88,8 @@ tag 与 `mod-version` 不一致会**直接失败**，不会发出半成品 Relea
 所以：产物只存在于 GitHub Releases，仓库里只留版本→commit→说明的清单。
 
 2026-10-13 已用 `git filter-repo` 把这 110 个 jar 从**全部历史提交**中剥离，
-并对 `.git` 做了 gc。`guard.yml` 会阻止复发。
+并对 `.git` 做了 gc（18 MB → 3.7 MB）。目前靠 `.gitignore` 的 `*.jar` 规则
+与白名单例外拦截复发。
 
 ## 仓库里为什么仍然有二进制文件
 
@@ -90,4 +105,4 @@ tag 与 `mod-version` 不一致会**直接失败**，不会发出半成品 Relea
 是 `AncientResourceSource` 从 jar 内直读的核心资源，必须入库。
 
 新增任何二进制前先回答：它是**构建产物**（→ 不入库，走 Releases）
-还是**源码级依赖**（→ 入库，但要在本表登记原因，否则 `guard.yml` 会拦截）。
+还是**源码级依赖**（→ 入库，但要在本表登记原因）。

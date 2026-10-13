@@ -43,8 +43,8 @@ Meteor Client（Fabric）的全自动生存辅助插件，MC **1.21.11**，模�
 
 ## 仓库结构与 CI
 
-Gradle 工程在**仓库根**目录。CI（编译+测试）、发版（tag 触发）、
-结构守门工作流的说明见 [`docs/ci.md`](docs/ci.md)。
+仓库只有一个 CI 工作流（`.github/workflows/ci.yml`）：push / PR 时自动编译打包，
+产物作为 Actions artifact 留存 30 天。单测本地跑，发版走手动命令。详见 [`docs/ci.md`](docs/ci.md)。
 
 Windows 本地构建踩坑见 [`docs/windows-build.md`](docs/windows-build.md)。
 
