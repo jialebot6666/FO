@@ -112,13 +112,14 @@ class FlightApproachLogicTest {
     // ===== 降落交接 =====
 
     @Test
-    void handoffToLandingAt80WithConfirmedElytra() {
-        // Ying: d8<=80 && au(已检查展示框) && !av(框里有鞘翅) → LANDING
-        assertTrue(FlightApproachLogic.shouldHandoffToLanding(80.0, true, false));
-        assertTrue(FlightApproachLogic.shouldHandoffToLanding(10.0, true, false));
-        assertFalse(FlightApproachLogic.shouldHandoffToLanding(80.1, true, false)); // 超过 80 不交接
-        assertFalse(FlightApproachLogic.shouldHandoffToLanding(50.0, false, false)); // 未检查展示框不交接
-        assertFalse(FlightApproachLogic.shouldHandoffToLanding(50.0, true, true));   // 框里没鞘翅不交接
+    void handoffToLandingAt3WithConfirmedElytra() {
+        // V6.34 回到 Ying 原版：距降落点 ≤3 格、已检查展示框、框里有鞘翅 → LANDING
+        assertTrue(FlightApproachLogic.shouldHandoffToLanding(3.0, true, false));
+        assertTrue(FlightApproachLogic.shouldHandoffToLanding(1.0, true, false));
+        assertFalse(FlightApproachLogic.shouldHandoffToLanding(3.1, true, false));  // 超过 3 格不交接
+        assertFalse(FlightApproachLogic.shouldHandoffToLanding(10.0, true, false));
+        assertFalse(FlightApproachLogic.shouldHandoffToLanding(2.0, false, false)); // 未检查展示框不交接
+        assertFalse(FlightApproachLogic.shouldHandoffToLanding(2.0, true, true));   // 框里没鞘翅不交接
     }
 
     // ===== 状态重置 =====

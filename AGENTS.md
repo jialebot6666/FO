@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.33`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.33-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.34`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.34-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -203,30 +203,35 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     用全量附魔、`enchant_randomly` 的标签不展开嵌套；修正后 113 箱里 21 箱的物品清单会不同。
     对照验证时可用 `AncientEnchantData.SourceMode.REFERENCE_COMPAT` 复刻它的偏差。
 - 6.2 已删除 6.0 的 icehack-2 鞘翅套件（自动鞘翅飞行/自动不祥宝库/实时平均速度 三模块 + HUD），当前无 elytra 套件
-- ✅ 6.33 已完成：**鞘翅采集（ElytraCollector）巡航改为 pitch40 式**——俯仰曲线 + 按需补烟花 + 自动调界。
-  - 起因：4.46 给巡航爬升加了「每 2 秒定时烧一发烟花」，4.48 又把爬升角从 54.77 锁成「起飞拉升角」(45°)、
-    并把「巡航爬升角度」隐藏成僵尸设置；用户实机对比后认为不如以前的飞法。
-  - ⚠️ **术语澄清（重要）**：用户说的「P40 / pitch40」**不是 40 度角**，而是 **Meteor `ElytraFly` 的 `Pitch40` 模式**。
-    该模式本体**完全不烧烟花**（`ElytraFly` 里 `useFireworks` 在该模式下 `.visible(false)`），只做
-    `player.setXRot(pitch)`：以 **5.45°/tick** 把俯仰拉到 **-54.77**，随即以 **0.90°/tick** 缓压回 **+37.72**
-    （「快拉慢压」）。**FO 的 54.77/37.72 就是照抄它的常数，默认界 180/220 也一模一样**。
-  - 保高度的两个机制来自参考实现 `miles352/meteor-stashhunting-addon` 的 `Pitch40Util`：
-    ① **auto-firework**：只在 `velocity.y < -0.05` 且未到上界时**补一发**（冷却 10 tick），不是定时烧；
-    ② **auto-adjust-bounds**：区间跟着爬升顶点上抬（上界 = 当前 Y - 5，下界 = 上界 - gap）。
-  - 本次改动：① 恢复「巡航爬升角度」可调（默认 54.77），巡航爬升不再借用「起飞拉升角度」；
-    ② 新增「爬升抬头速度」(5.45) /「滑翔下压速度」(0.90)，巡航俯仰改为逐 tick 推进的曲线；
-    ③ 烟花由「定时」改「按需」：新增「巡航按需补烟花」(默认开) +「补烟花速度阈值」(-0.05) +「补烟花冷却」(10 tick)，
-    **只在爬升段真的掉速时补一发**，滑翔段一颗都不烧；④ 新增「自动调界」(默认开) +「调界高度间隔」(60)。
-  - 纯逻辑（可单测）：`utils/CruisePitchLogic`（曲线）、`utils/CruiseBoundsLogic`（区间）、
-    `utils/CruiseApexDetector`（顶点检测）；`FlightFireworkLogic` 增 `shouldTopUpOnDemand`。
-    ⚠️ 顶点检测必须按**垂直速度符号翻转**判，不能按「是否处于爬升段」——滞回区间到上界时就翻滑翔段了，
-    真正的最高点还在上界之上（惯性继续上冲），用爬升段判会整个漏掉。
-    ⚠️ 垂直速度用「上一 tick 的 Y 差」算（不依赖 `getVelocity` 的映射），且必须在所有分支之前统一采样，
-    否则某个分支提前 return 会让下个 tick 算出跨多 tick 的假速度、误触发补烟花。
-  - 测试：新增 23 个（`CruisePitchLogicTest` 7 / `CruiseBoundsLogicTest` 5 / `CruiseApexDetectorTest` 5 /
-    `FlightFireworkLogicTest` +6），`cd fo && gradle build` 共 **395 测试全绿**。
-  - ⚠️ 已知取舍：开启「自动调界」后「最低/最高高度」只作为**初始**区间，实际区间会随顶点上抬——
-    这是对齐 Pitch40Util 的刻意行为；关掉开关即回到固定区间（原行为）。
+- ⚠️ 6.33 是一次**走错路的改动**（同日发布、当天即被 6.34 取代，**请勿使用 6.33**）：
+  当时依据 Meteor 的 `Pitch40` 模式与参考实现 `miles352/meteor-stashhunting-addon` 的 `Pitch40Util`，
+  把巡航改成「快拉慢压俯仰曲线 (5.45/0.90) + 按需补烟花 + 自动调界」。错在两点：
+  ① Pitch40Util 的 auto-firework / auto-bounds 是那个 addon **额外加的**，不属于飞法本身；
+  ② 用户要的「P40」是 **Ying 原版的飞法**，而 Ying 原版巡航段**一颗烟花都不烧**。
+- ✅ 6.34 已完成：**鞘翅采集巡航与进降落距离完全回到 Ying 原版**（用户提供 Ying 源码逐行核对后确认）。
+  - ⚠️ **术语澄清（重要）**：用户说的「P40 / pitch40」= **Ying 原版那套飞法**（角度数值即彗星/Meteor 的
+    54.77 / 37.72），**不是 40 度角**，也**不是** Pitch40Util 那套。
+  - Ying 原版巡航段（`com.door.hunt` 的 `ElytraCollectorModule`，L837~866）：
+    ```
+    float pitch = climbing ? -54.77f : 37.72f;
+    rotateTo(yaw, pitch);              // 由「俯仰速度」(默认 10 度/tick) 限速 → 对称过渡
+    mc.options.forwardKey.setPressed(true);
+    // ← 巡航段没有任何 useFirework()
+    ```
+    全模块 `useFirework()` 仅 3 处：**起飞段** + **无鞘翅紧急拉升**。**巡航段零烟花、零调界。**
+    Ying 的 `min-height 180 / max-height 220 / rise-height 230 / pitch-speed 10 / firework-interval 2.0`
+    与 FO 默认值完全一致——FO 本就是它的直接移植。
+  - 6.34 改动：① 巡航俯仰回到 `rotateTo(yaw, climbing ? -巡航爬升角度 : 巡航滑翔角度)`；
+    ② 删除 6.33 新增的 7 个设置（爬升抬头速度 / 滑翔下压速度 / 自动调界 / 调界高度间隔 / 巡航按需补烟花 /
+    补烟花速度阈值 / 补烟花冷却）与 3 个纯逻辑类 + 3 个测试类；
+    ③ `FlightApproachLogic.LANDING_HANDOFF_DISTANCE` 80 → **3**（Ying 原版就是 3）；
+    ④ 「巡航爬升角度」保持**可见可调**（默认 54.77）——4.48 把它隐藏是纯粹的退步，不回退这一点。
+  - ⚠️ **与「撞墙死掉」的关系（重要，别搞混）**：用户反馈的「采集完鞘翅立马起飞 → 撞墙 → 死掉」，其修复在
+    `relaunchAfterShip()`（已降落且离降落点 > 2.5 格 → 先走回降落点 `LEAVE_SHIP` 修正起飞方向再起飞），
+    **与 `LANDING_HANDOFF_DISTANCE` 无关**；6.34 保留该修复不动。将来若又出现撞墙，优先查这里而非降落距离。
+  - ⚠️ 4.48 新增的「接近防撞塔 (`FlightApproachLogic`)」「安全复飞 (`FlightEscapeLogic`)」「低Y退出关 KillAura」
+    属降落 / 安全侧，**不在本次回退范围内**，保持原样。
+  - 测试：删除 23 个（6.33 新增的），`cd fo && gradle build` 共 **372 测试全绿**（0 failures / 0 errors）。
 
 ## 硬性规范（每次改动必须执行）
 

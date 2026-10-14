@@ -8,8 +8,8 @@ package com.fo.addon.utils;
 public class FlightApproachLogic {
     /** 介入距离：距降落点 ≤200 格才开始预测 */
     public static final double TRIGGER_DISTANCE = 200.0;
-    /** 降落交接距离：距降落点 ≤80 格且已确认鞘翅 → 转 LANDING */
-    public static final double LANDING_HANDOFF_DISTANCE = 80.0;
+    /** 降落交接距离：距降落点 ≤3 格且已确认鞘翅 → 转 LANDING（V6.34 回到 Ying 原版的 3 格） */
+    public static final double LANDING_HANDOFF_DISTANCE = 3.0;
     /** 安全高度 = 降落点 Y + 30 */
     public static final double SAFE_MARGIN_ABOVE_TARGET = 30.0;
     /** 可直接接近的余量：预测高度 ≥ 安全高度 + 8 才算安全 */
@@ -82,7 +82,7 @@ public class FlightApproachLogic {
         return predictedY < safeY + 3.0 && hDist > 95.0;
     }
 
-    /** 距≤80、已确认展示框、框里有鞘翅 → 交接降落（对齐 Ying LANDING_HANDOFF_DISTANCE 分支） */
+    /** 距≤3 格、已确认展示框、框里有鞘翅 → 交接降落（与 Ying 原版一致） */
     public static boolean shouldHandoffToLanding(double hDist, boolean frameChecked, boolean frameEmpty) {
         return hDist <= LANDING_HANDOFF_DISTANCE && frameChecked && !frameEmpty;
     }
