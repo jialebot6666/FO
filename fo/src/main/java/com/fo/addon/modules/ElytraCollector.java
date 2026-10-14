@@ -1,6 +1,9 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.utils.CruiseApexDetector;
+import com.fo.addon.utils.CruiseBoundsLogic;
+import com.fo.addon.utils.CruisePitchLogic;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
@@ -126,7 +129,7 @@ public class ElytraCollector extends Module {
 
     private final Setting<Integer> minHeight = sgFlight.add(new IntSetting.Builder()
         .name("最低高度")
-        .description("飞行中低于此高度时触发爬升.")
+        .description("飞行中低于此高度时触发爬升。开启「自动调界」后本项只作为初始下界，实际区间会随爬升顶点自动上抬。")
         .defaultValue(180)
         .range(100, 300)
         .sliderRange(120, 260)
@@ -135,7 +138,7 @@ public class ElytraCollector extends Module {
 
     private final Setting<Integer> maxHeight = sgFlight.add(new IntSetting.Builder()
         .name("最高高度")
-        .description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 min-height 组成滞回区间).")
+        .description("飞行中高于此高度时停止爬升、转为平缓下滑 (与最低高度组成滞回区间)。开启「自动调界」后本项只作为初始上界，实际区间会随爬升顶点自动上抬。")
         .defaultValue(220)
         .range(120, 320)
         .sliderRange(140, 300)
@@ -153,7 +156,7 @@ public class ElytraCollector extends Module {
 
     private final Setting<Double> pitchSpeed = sgFlight.add(new DoubleSetting.Builder()
         .name("俯仰速度")
-        .description("飞行 (pitch40) 时上下转动视角 (pitch) 的速度 (度/tick).")
+        .description("起飞、下落、降落恢复这些阶段转动俯仰角 (pitch) 的速度 (度/tick)。巡航段的抬头/下压速度由下面的「爬升抬头速度」「滑翔下压速度」单独控制。")
         .defaultValue(10.0)
         .min(1)
         .sliderMax(45)
@@ -196,22 +199,88 @@ public class ElytraCollector extends Module {
         .build()
     );
 
+    // V6.33：恢复可调（对齐 Meteor Pitch40）。4.48 把它隐藏成「僵尸设置」、巡航爬升改借用
+    //   「起飞拉升角度」，这次改回用本项作为俯仰曲线的抬头目标。
     private final Setting<Double> cruiseClimbPitch = sgFlight.add(new DoubleSetting.Builder()
         .name("巡航爬升角度")
-        .description("长距离巡航到最低高度后使用的抬头角度（度）。")
+        .description("巡航爬升段抬头到的目标角度（度）。爬升段会以「爬升抬头速度」快速拉到这里，再由滑翔段以「滑翔下压速度」缓慢压回滑翔角。")
         .defaultValue(54.77)
         .range(5.0, 80.0)
         .sliderRange(5.0, 80.0)
-        .visible(() -> false) // V4.48 对齐 Ying：巡航爬升实际使用「起飞拉升角度」(45°)，本设置已不接入飞行逻辑（Ying 中同为被 UI 移除的僵尸设置）
         .build()
     );
 
     private final Setting<Double> cruiseGlidePitch = sgFlight.add(new DoubleSetting.Builder()
         .name("巡航滑翔角度")
-        .description("达到最高高度后使用的向下滑翔角度（度）。滑翔阶段不使用烟花，降到最低高度后重新爬升。")
+        .description("爬升到顶后向下滑翔的角度（度）。滑翔段会从抬头角以「滑翔下压速度」缓慢压到这里。")
         .defaultValue(37.72)
         .range(0.0, 70.0)
         .sliderRange(0.0, 70.0)
+        .build()
+    );
+
+    // V6.33：对齐 Meteor Pitch40 的「快拉慢压」——抬头快、下压慢，爬升是一段抛物线而不是固定斜线。
+    private final Setting<Double> pitchUpSpeed = sgFlight.add(new DoubleSetting.Builder()
+        .name("爬升抬头速度")
+        .description("爬升段把俯仰角拉向「巡航爬升角度」的速度 (度/tick)。越大拉得越猛。")
+        .defaultValue(5.45)
+        .range(0.5, 20.0)
+        .sliderRange(1.0, 12.0)
+        .build()
+    );
+
+    private final Setting<Double> pitchDownSpeed = sgFlight.add(new DoubleSetting.Builder()
+        .name("滑翔下压速度")
+        .description("滑翔段把俯仰角压回「巡航滑翔角度」的速度 (度/tick)。越小压得越慢、滞空越久。")
+        .defaultValue(0.90)
+        .range(0.1, 5.0)
+        .sliderRange(0.5, 3.0)
+        .build()
+    );
+
+    // V6.33：对齐 Pitch40Util 的 auto-adjust-bounds——区间跟着爬升顶点上抬，才能「不掉高度、还持续攀升」。
+    private final Setting<Boolean> autoBoundAdjust = sgFlight.add(new BoolSetting.Builder()
+        .name("自动调界")
+        .description("巡航时把高度区间跟着爬升顶点自动上抬（区间重置到当前高度下方）。关闭则严格按「最低高度/最高高度」的固定区间飞。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> boundGap = sgFlight.add(new DoubleSetting.Builder()
+        .name("调界高度间隔")
+        .description("自动调界时上下界的间隔（格）。区间 = [上界 - 本值, 上界]。")
+        .defaultValue(60.0)
+        .range(20.0, 120.0)
+        .sliderRange(30.0, 100.0)
+        .visible(autoBoundAdjust::get)
+        .build()
+    );
+
+    // V6.33：对齐 Pitch40Util 的 auto-firework——巡航不再按时间定时烧烟花，只在真的掉速时补一发。
+    private final Setting<Boolean> cruiseAutoFirework = sgFlight.add(new BoolSetting.Builder()
+        .name("巡航按需补烟花")
+        .description("巡航爬升段只在垂直速度掉到阈值以下时补一个烟花，而不是每隔固定时间烧一个；滑翔段一个都不烧。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> fireworkVelocityThreshold = sgFlight.add(new DoubleSetting.Builder()
+        .name("补烟花速度阈值")
+        .description("垂直速度低于本值（格/tick，负值代表开始下沉）才补烟花。")
+        .defaultValue(-0.05)
+        .range(-1.0, 0.5)
+        .sliderRange(-0.5, 0.1)
+        .visible(cruiseAutoFirework::get)
+        .build()
+    );
+
+    private final Setting<Integer> fireworkCooldownTicks = sgFlight.add(new IntSetting.Builder()
+        .name("补烟花冷却")
+        .description("两次按需补烟花之间的最短间隔 (tick)。")
+        .defaultValue(10)
+        .range(0, 100)
+        .sliderRange(0, 60)
+        .visible(cruiseAutoFirework::get)
         .build()
     );
 
@@ -364,6 +433,14 @@ public class ElytraCollector extends Module {
     private int lastGotoTick = 0;
     private long worldSeed = 0L;
     private boolean climbing = false;
+
+    // ========== 巡航俯仰曲线 + 自动调界（V6.33，对齐 Meteor Pitch40 / Pitch40Util） ==========
+    private float cruisePitch = 37.72f;          // 当前俯仰角（逐 tick 推进，不是"直接设目标"）
+    private double cruiseUpper = 220.0;          // 运行期巡航上界（自动调界时随爬升顶点上抬）
+    private double cruiseLower = 180.0;          // 运行期巡航下界
+    private final CruiseApexDetector cruiseApex = new CruiseApexDetector();
+    private int cruiseFireworkCooldown = 0;      // 按需补烟花的剩余冷却 tick
+    private double cruiseLastY = Double.NaN;     // 上一 tick 的 Y（用于算垂直速度，避免依赖 getVelocity 映射）
     private boolean headFound = false;
     private BlockPos exactHead = null;
     private int nearTicks = 0;
@@ -764,6 +841,19 @@ public class ElytraCollector extends Module {
         }
     }
 
+    /**
+     * 重置巡航俯仰曲线 + 高度区间（换目标 / 重新起飞时调用）。
+     * 区间初值取「最高高度 / 最低高度」这两个设置；开启自动调界后它们会随爬升顶点上抬。
+     */
+    private void resetCruiseState() {
+        cruisePitch = (float) cruiseGlidePitch.get().doubleValue();
+        cruiseUpper = maxHeight.get();
+        cruiseLower = minHeight.get();
+        cruiseApex.reset();
+        cruiseFireworkCooldown = 0;
+        cruiseLastY = Double.NaN;
+    }
+
     private void beginFlyToTarget() {
         if (targetIndex >= ships.size()) {
             completeTask("全部末地城已处理，任务完成.");
@@ -772,6 +862,7 @@ public class ElytraCollector extends Module {
         current = ships.get(targetIndex);
         waypoints = ShipWaypoints.from(current.headPos, current.facing);
         climbing = false;
+        resetCruiseState();
         headFound = false;
         frameAirChecked = false;
         frameAirEmpty = false;
@@ -940,6 +1031,13 @@ public class ElytraCollector extends Module {
             return;
         }
 
+        // 垂直速度（用上一 tick 的 Y 差，不依赖 getVelocity 的映射）：
+        // 放在所有分支之前统一采样，避免某个分支提前 return 导致下个 tick 算出跨多 tick 的假速度
+        double nowY = mc.player.getY();
+        if (Double.isNaN(cruiseLastY)) cruiseLastY = nowY;
+        double verticalSpeed = nowY - cruiseLastY;
+        cruiseLastY = nowY;
+
         BlockPos lp = waypoints.landing;
 
         // 未确认龙头：进入种子区域后检测龙头，每 5 秒再检测一次，检测 8 次仍没有就直接走
@@ -1043,24 +1141,55 @@ public class ElytraCollector extends Module {
         // 预测会撞就朝船拉升，距 ≤80 且已确认鞘翅则交接降落
         if (onApproachSafety()) return;
 
-        // 高度保持滞回飞行
+        // 高度保持：滞回区间 +「自动调界」（对齐 Meteor Pitch40 的 bounds 与 Pitch40Util 的 auto-adjust-bounds）
         float yaw = yawTowards(lp);
-        double y = mc.player.getY();
-        if (climbing) {
-            if (y >= maxHeight.get()) climbing = false;
-        } else {
-            if (y <= minHeight.get()) climbing = true;
-        }
-        // V4.48 对齐 Ying：巡航爬升使用「起飞拉升角度」(45°)，cruiseClimbPitch 已隐藏为僵尸设置
-        float pitch = climbing ? -(float) takeoffPitch.get().doubleValue() : (float) cruiseGlidePitch.get().doubleValue();
+        double y = nowY;
 
-        rotateTo(yaw, pitch);
+        double upperBound = autoBoundAdjust.get() ? cruiseUpper : maxHeight.get();
+        double lowerBound = autoBoundAdjust.get() ? cruiseLower : minHeight.get();
+
+        if (autoBoundAdjust.get()) {
+            boolean changed = false;
+            // ① 掉到下界以下 10 格 → 说明在持续下沉，把区间重置到当前位置（这样还能爬回来）
+            if (CruiseBoundsLogic.shouldResetOnFall(y, lowerBound, CruiseBoundsLogic.FALL_MARGIN)) {
+                changed = true;
+            }
+            // ② 到达上升顶点（垂直速度由正转负）→ 把区间上抬，实现「不掉高度、还持续攀升」
+            if (cruiseApex.update(verticalSpeed)) {
+                changed = true;
+            }
+            if (changed) {
+                cruiseUpper = CruiseBoundsLogic.upperFrom(y);
+                cruiseLower = CruiseBoundsLogic.lowerFrom(cruiseUpper, boundGap.get());
+                upperBound = cruiseUpper;
+                lowerBound = cruiseLower;
+            }
+        } else {
+            cruiseApex.reset();
+        }
+
+        if (climbing) {
+            if (y >= upperBound) climbing = false;
+        } else {
+            if (y <= lowerBound) climbing = true;
+        }
+
+        // 俯仰曲线「快拉慢压」（对齐 Meteor Pitch40）：爬升段快速抬头到「巡航爬升角度」，
+        // 滑翔段再缓慢压回「巡航滑翔角度」。爬升因此是一段抛物线而不是固定斜线。
+        cruisePitch = CruisePitchLogic.step(cruisePitch, climbing,
+            cruiseClimbPitch.get(), cruiseGlidePitch.get(),
+            pitchUpSpeed.get(), pitchDownSpeed.get());
+        mc.player.setYaw(stepAngle(mc.player.getYaw(), yaw, yawSpeed.get().floatValue()));
+        mc.player.setPitch(cruisePitch);
         mc.options.forwardKey.setPressed(true);
 
-        // 对齐 Ying：巡航爬升阶段按间隔使用烟花加速 (防掉速)，滑翔/下滑阶段不烧烟花 (省消耗)
-        if (FlightFireworkLogic.shouldUseFirework(climbing, false, stateTick, lastFireworkTick, (int) Math.max(1, Math.round(fireworkInterval.get() * 20)))) {
+        // 巡航「按需补烟花」（对齐 Pitch40Util 的 auto-firework）：只在爬升段真的掉速时补一发，
+        // 不再按固定时间间隔烧（旧版每 2 秒一发，长距离巡航会白烧掉大量烟花）。
+        if (cruiseFireworkCooldown > 0) cruiseFireworkCooldown--;
+        if (FlightFireworkLogic.shouldTopUpOnDemand(cruiseAutoFirework.get(), climbing,
+                verticalSpeed, fireworkVelocityThreshold.get(), y, upperBound, cruiseFireworkCooldown)) {
             useFirework();
-            lastFireworkTick = stateTick;
+            cruiseFireworkCooldown = fireworkCooldownTicks.get();
         }
 
         // 先飞到降落点上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船

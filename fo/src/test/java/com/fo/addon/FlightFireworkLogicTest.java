@@ -54,4 +54,52 @@ class FlightFireworkLogicTest {
         assertFalse(FlightFireworkLogic.shouldUseFirework(false, true, 10, 0, 20));
         assertFalse(FlightFireworkLogic.shouldUseFirework(false, true, 20, 20, 20));
     }
+
+    // ===== 巡航「按需补烟花」（对齐 Pitch40Util auto-firework） =====
+
+    private static final double THRESHOLD = -0.05;
+    private static final double UPPER = 220.0;
+
+    @Test
+    void onDemandTopsUpWhenFallingWithVelocity() {
+        // 爬升段、速度已掉到阈值以下、未到上界、冷却已过 → 补一发
+        assertTrue(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.10, THRESHOLD, 200.0, UPPER, 0));
+        assertTrue(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.90, THRESHOLD, 150.0, UPPER, 0));
+    }
+
+    @Test
+    void onDemandKeepsQuietWhileStillClimbing() {
+        // 还在正常爬升（速度为正）→ 一个都不烧，这正是「省烟花」的关键
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, 0.40, THRESHOLD, 200.0, UPPER, 0));
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, 0.00, THRESHOLD, 200.0, UPPER, 0));
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.05, THRESHOLD, 200.0, UPPER, 0));
+    }
+
+    @Test
+    void onDemandNeverFiresWhileGliding() {
+        // 滑翔段速度恒为负，若不限制会被判定成「一直在掉速」而烧光烟花
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, false, -1.20, THRESHOLD, 200.0, UPPER, 0));
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, false, -0.30, THRESHOLD, 150.0, UPPER, 0));
+    }
+
+    @Test
+    void onDemandRespectsCooldown() {
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, 200.0, UPPER, 1));
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, 200.0, UPPER, 10));
+        assertTrue(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, 200.0, UPPER, 0));
+    }
+
+    @Test
+    void onDemandStopsAtUpperBound() {
+        // 已到/超过上界：该转滑翔了，不再补烟花
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, UPPER, UPPER, 0));
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, UPPER + 10, UPPER, 0));
+        assertTrue(FlightFireworkLogic.shouldTopUpOnDemand(true, true, -0.5, THRESHOLD, UPPER - 1, UPPER, 0));
+    }
+
+    @Test
+    void onDemandHonoursTheToggle() {
+        // 关掉「巡航按需补烟花」→ 再满足条件也不烧
+        assertFalse(FlightFireworkLogic.shouldTopUpOnDemand(false, true, -0.9, THRESHOLD, 150.0, UPPER, 0));
+    }
 }

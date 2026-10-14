@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.32`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.32-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.33`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.33-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -203,6 +203,30 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     用全量附魔、`enchant_randomly` 的标签不展开嵌套；修正后 113 箱里 21 箱的物品清单会不同。
     对照验证时可用 `AncientEnchantData.SourceMode.REFERENCE_COMPAT` 复刻它的偏差。
 - 6.2 已删除 6.0 的 icehack-2 鞘翅套件（自动鞘翅飞行/自动不祥宝库/实时平均速度 三模块 + HUD），当前无 elytra 套件
+- ✅ 6.33 已完成：**鞘翅采集（ElytraCollector）巡航改为 pitch40 式**——俯仰曲线 + 按需补烟花 + 自动调界。
+  - 起因：4.46 给巡航爬升加了「每 2 秒定时烧一发烟花」，4.48 又把爬升角从 54.77 锁成「起飞拉升角」(45°)、
+    并把「巡航爬升角度」隐藏成僵尸设置；用户实机对比后认为不如以前的飞法。
+  - ⚠️ **术语澄清（重要）**：用户说的「P40 / pitch40」**不是 40 度角**，而是 **Meteor `ElytraFly` 的 `Pitch40` 模式**。
+    该模式本体**完全不烧烟花**（`ElytraFly` 里 `useFireworks` 在该模式下 `.visible(false)`），只做
+    `player.setXRot(pitch)`：以 **5.45°/tick** 把俯仰拉到 **-54.77**，随即以 **0.90°/tick** 缓压回 **+37.72**
+    （「快拉慢压」）。**FO 的 54.77/37.72 就是照抄它的常数，默认界 180/220 也一模一样**。
+  - 保高度的两个机制来自参考实现 `miles352/meteor-stashhunting-addon` 的 `Pitch40Util`：
+    ① **auto-firework**：只在 `velocity.y < -0.05` 且未到上界时**补一发**（冷却 10 tick），不是定时烧；
+    ② **auto-adjust-bounds**：区间跟着爬升顶点上抬（上界 = 当前 Y - 5，下界 = 上界 - gap）。
+  - 本次改动：① 恢复「巡航爬升角度」可调（默认 54.77），巡航爬升不再借用「起飞拉升角度」；
+    ② 新增「爬升抬头速度」(5.45) /「滑翔下压速度」(0.90)，巡航俯仰改为逐 tick 推进的曲线；
+    ③ 烟花由「定时」改「按需」：新增「巡航按需补烟花」(默认开) +「补烟花速度阈值」(-0.05) +「补烟花冷却」(10 tick)，
+    **只在爬升段真的掉速时补一发**，滑翔段一颗都不烧；④ 新增「自动调界」(默认开) +「调界高度间隔」(60)。
+  - 纯逻辑（可单测）：`utils/CruisePitchLogic`（曲线）、`utils/CruiseBoundsLogic`（区间）、
+    `utils/CruiseApexDetector`（顶点检测）；`FlightFireworkLogic` 增 `shouldTopUpOnDemand`。
+    ⚠️ 顶点检测必须按**垂直速度符号翻转**判，不能按「是否处于爬升段」——滞回区间到上界时就翻滑翔段了，
+    真正的最高点还在上界之上（惯性继续上冲），用爬升段判会整个漏掉。
+    ⚠️ 垂直速度用「上一 tick 的 Y 差」算（不依赖 `getVelocity` 的映射），且必须在所有分支之前统一采样，
+    否则某个分支提前 return 会让下个 tick 算出跨多 tick 的假速度、误触发补烟花。
+  - 测试：新增 23 个（`CruisePitchLogicTest` 7 / `CruiseBoundsLogicTest` 5 / `CruiseApexDetectorTest` 5 /
+    `FlightFireworkLogicTest` +6），`cd fo && gradle build` 共 **395 测试全绿**。
+  - ⚠️ 已知取舍：开启「自动调界」后「最低/最高高度」只作为**初始**区间，实际区间会随顶点上抬——
+    这是对齐 Pitch40Util 的刻意行为；关掉开关即回到固定区间（原行为）。
 
 ## 硬性规范（每次改动必须执行）
 
