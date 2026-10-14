@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.34`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.34-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.35`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.35-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -232,6 +232,23 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - ⚠️ 4.48 新增的「接近防撞塔 (`FlightApproachLogic`)」「安全复飞 (`FlightEscapeLogic`)」「低Y退出关 KillAura」
     属降落 / 安全侧，**不在本次回退范围内**，保持原样。
   - 测试：删除 23 个（6.33 新增的），`cd fo && gradle build` 共 **372 测试全绿**（0 failures / 0 errors）。
+- ✅ 6.35 已完成：**「起飞前先回降落点」开放为可配设置**（用户要求，先讨论后实施）。
+  - 背景核实：FO 里 `horizontalDistance(waypoints.landing) > 2.5` 有**两处**——`relaunchAfterShip()`
+    （采集完成后起飞）与 `leaveShipNow()`（跳过没鞘翅的船）。⚠️ **Ying 原版只有后者**
+    （`leaveShipNow` L1178）；`relaunchAfterShip()`（Ying L1152-1163）是**直接 `state = RISING` 起飞**。
+    所以「采集完立马起飞撞墙死掉」的修复是 **FO 在 4.45 自己加的**，并不属于「对齐 Ying」。
+  - 新增设置（默认分组）：`起飞前先回降落点`（Bool，默认**开**=保留修复）
+    + `回降落点判定距离`（Double，默认 **2.5** 格，范围 0~20 / 滑条 0~10，可见性跟随开关）。
+    两处共用同一个值；距离用**严格大于**判定（正好等于阈值 = 已在降落点，直接起飞）。
+  - **刻意不动**（用户拍板）：`LEAVE_SHIP` 步骤的到位判定仍是 `reached(waypoints.landing.down(4), 2.5)`
+    —— 它是**另一个量**（参考点是降落点下方 4 格的甲板站立点）；超时行为也不变
+    （`relaunchAfterReturn=true` 采集完成超时 → 停止任务；`false` 跳过船超时 → 原地起飞）。
+  - 纯逻辑：`ReturnPathLogic.shouldReturnBeforeTakeoff(...)` + `DEFAULT_RETURN_DISTANCE = 2.5`；
+    模块侧收敛为 `wantsReturnToLanding()` 单点判定（两处调用）。
+  - 测试：新增 7 个（开关关 / 未落地 / 无目标点 / 小于等于大于阈值 / 阈值 0 与 10 / 默认值 2.5），
+    共 **379 测试全绿**。
+  - ⚠️ 用法提醒：判定距离调大会让回位走更远，**30 秒超时可能不够而触发「停止任务」**；
+    超时阈值这次刻意没做成设置（用户确认），需要时再提。
 
 ## 硬性规范（每次改动必须执行）
 

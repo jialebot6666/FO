@@ -59,4 +59,56 @@ class ReturnPathLogicTest {
         assertEquals(20, ReturnPathLogic.REPATH_INTERVAL);
         assertEquals(600, ReturnPathLogic.TIMEOUT_TICKS);
     }
+
+    @Test
+    void defaultReturnDistanceMatchesYing() {
+        // Ying leaveShipNow 用的就是 2.5 格
+        assertEquals(2.5, ReturnPathLogic.DEFAULT_RETURN_DISTANCE, 1e-9);
+    }
+
+    // ===== shouldReturnBeforeTakeoff（起飞前先回降落点，防原地起飞撞墙）=====
+
+    @Test
+    void returnsWhenGroundedFarFromLanding() {
+        assertTrue(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 3.0, 2.5));
+        assertTrue(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 50.0, 2.5));
+    }
+
+    @Test
+    void doesNotReturnWhenWithinThreshold() {
+        // 严格大于才回：正好等于阈值算"已在降落点"，直接起飞
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 2.5, 2.5));
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 2.4, 2.5));
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 0.0, 2.5));
+    }
+
+    @Test
+    void switchOffRestoresYingBehaviour() {
+        // 关掉开关 = Ying 采集完成路径的原行为：不管多远都直接起飞
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(false, true, true, 100.0, 2.5));
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(false, true, true, 3.0, 0.0));
+    }
+
+    @Test
+    void doesNotReturnWhenNotGrounded() {
+        // 在空中本来就不需要走回去（直接起飞离开即可）
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, false, true, 100.0, 2.5));
+    }
+
+    @Test
+    void doesNotReturnWithoutWaypoints() {
+        // 起飞前触发的存储会话可能还没有当前船 → 没有降落点可比，直接起飞
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, false, 0.0, 2.5));
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, false, 100.0, 2.5));
+    }
+
+    @Test
+    void thresholdIsConfigurable() {
+        // 阈值 0：只要不在降落点上就回去
+        assertTrue(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 0.1, 0.0));
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 0.0, 0.0));
+        // 阈值调到 10：10 格以内就直接起飞
+        assertFalse(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 10.0, 10.0));
+        assertTrue(ReturnPathLogic.shouldReturnBeforeTakeoff(true, true, true, 10.1, 10.0));
+    }
 }

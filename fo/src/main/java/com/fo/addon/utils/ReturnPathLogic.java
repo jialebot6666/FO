@@ -29,4 +29,30 @@ public final class ReturnPathLogic {
     public static boolean timedOut(int stateTick) {
         return stateTick > TIMEOUT_TICKS;
     }
+
+    /** 「起飞前先回降落点」的默认判定距离（格）：与 Ying `leaveShipNow` 的 2.5 一致。 */
+    public static final double DEFAULT_RETURN_DISTANCE = 2.5;
+
+    /**
+     * 起飞前是否该先回降落点（防原地起飞撞墙）：
+     * 开关已开 + 已落地 + 有目标点 + 离降落点距离 **大于** 阈值。
+     *
+     * <p>⚠️ 背景：Ying 原版只在「跳过没鞘翅的船」路径有这个判定，**采集完成后是直接起飞的**；
+     * FO 在 4.45 把判定也加到了采集完成路径，用于修「采集完立马起飞撞墙死掉」。所以关掉开关
+     * 等于回到 Ying 采集完成路径的原行为（有撞墙风险）。
+     *
+     * @param switchOn          「起飞前先回降落点」开关
+     * @param onGround          玩家是否在地面（空中本来就不需要走回去）
+     * @param hasWaypoints      是否有当前船的目标点（起飞前触发的存储会话可能还没有船）
+     * @param distanceToLanding 到降落点的水平距离（{@code hasWaypoints=false} 时不参与判定）
+     * @param threshold         判定距离（格）
+     */
+    public static boolean shouldReturnBeforeTakeoff(boolean switchOn, boolean onGround,
+                                                    boolean hasWaypoints, double distanceToLanding,
+                                                    double threshold) {
+        if (!switchOn) return false;
+        if (!onGround) return false;
+        if (!hasWaypoints) return false;
+        return distanceToLanding > threshold;
+    }
 }

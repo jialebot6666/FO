@@ -215,6 +215,26 @@ public class ElytraCollector extends Module {
         .build()
     );
 
+    // V6.35：起飞前先回降落点（防原地起飞撞墙）。Ying 原版只在「跳过没鞘翅的船」路径有这个判定、
+    //   采集完成后是直接起飞的；FO 4.45 把判定也加到了采集完成路径（修「采集完立马起飞撞墙死掉」）。
+    //   这里把它对外开放：默认开（保留修复），关掉即回到 Ying 采集完成路径的原行为。
+    private final Setting<Boolean> returnBeforeTakeoff = sgGeneral.add(new BoolSetting.Builder()
+        .name("起飞前先回降落点")
+        .description("已落地但不在降落点时，先走回降落点修正起飞方向再起飞（防原地起飞撞墙）。关闭则直接原地起飞。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> returnBeforeTakeoffDistance = sgGeneral.add(new DoubleSetting.Builder()
+        .name("回降落点判定距离")
+        .description("离降落点超过这个距离（格）就先走回去再起飞；小于等于它就直接起飞。")
+        .defaultValue(ReturnPathLogic.DEFAULT_RETURN_DISTANCE)
+        .range(0.0, 20.0)
+        .sliderRange(0.0, 10.0)
+        .visible(returnBeforeTakeoff::get)
+        .build()
+    );
+
     private final Setting<Boolean> ignoreVisited = sgGeneral.add(new BoolSetting.Builder()
         .name("忽略已访问记录")
         .description("开启后重新扫描所有预测末地船，不使用旧的“已访问船”列表。适合旧版本记录异常时临时恢复搜索。")
@@ -1626,6 +1646,17 @@ supplyScanStart = 0;
         }
     }
 
+    /**
+     * 起飞前是否该先走回降落点（防原地起飞撞墙）。开关与判定距离都可配（V6.35）。
+     * 注意：Ying 原版只有「跳过没鞘翅的船」路径有这层判定；「采集完成后起飞」路径是 FO 4.45 补的。
+     */
+    private boolean wantsReturnToLanding() {
+        double dist = waypoints != null ? horizontalDistance(waypoints.landing) : 0;
+        return ReturnPathLogic.shouldReturnBeforeTakeoff(
+            returnBeforeTakeoff.get(), mc.player.isOnGround(), waypoints != null,
+            dist, returnBeforeTakeoffDistance.get());
+    }
+
     private void relaunchAfterShip() {
         ships.clear();
         targetIndex = 0;
@@ -1634,9 +1665,11 @@ supplyScanStart = 0;
         takeoffFacing = current != null ? current.facing : null;
         firstFireworkDone = false;
         landingRecover = false;
-        // 对齐 Ying t()：已降落且不在起飞点 → 先回降落点 (LEAVE_SHIP) 修正起飞方向再起飞，防止原地起飞撞墙
-        relaunchAfterReturn = true;
-        if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
+        // 已降落且不在起飞点 → 先回降落点 (LEAVE_SHIP) 修正起飞方向再起飞，防止原地起飞撞墙
+        // V6.35：开关 / 判定距离可配（Ying 原版这条路径是直接起飞，这层保护是 FO 4.45 补的）
+        boolean needReturn = wantsReturnToLanding();
+        relaunchAfterReturn = needReturn;
+        if (needReturn) {
             info("采集完成：先回降落点修正起飞方向后再起飞.");
             state = State.COLLECTING;
             collectStep = CollectStep.LEAVE_SHIP;
@@ -1664,7 +1697,7 @@ supplyScanStart = 0;
         relaunchAfterReturn = false; // 跳过船场景：回降落点超时仍原地起飞离开 (原行为)
         releaseForward();
         launchSearch();
-        if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
+        if (wantsReturnToLanding()) {
             // 已降落：先走到降落点 (甲板站立点) 修正起飞方向
             info("已降落：先回降落点修正起飞方向后再离开.");
             state = State.COLLECTING;
