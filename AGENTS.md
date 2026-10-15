@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.35`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.35-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.36`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.36-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -249,6 +249,26 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     共 **379 测试全绿**。
   - ⚠️ 用法提醒：判定距离调大会让回位走更远，**30 秒超时可能不够而触发「停止任务」**；
     超时阈值这次刻意没做成设置（用户确认），需要时再提。
+- ✅ 6.36 已完成：**删除 4.48 新增的「接近防撞塔」与「安全复飞」，这块完全回到 Ying 原版**
+  （用户实机反馈「没有鞘翅的船会降落→起飞→回原地反复循环」后定位）。
+  - 根因：`onFlying()` 里 **`if (onApproachSafety()) return;` 排在 `if (frameAirEmpty) { … leaveShipNow(); }` 之前**；
+    而 `onApproachSafety()` 的 `shouldIntervene(hDist, mode)` = `hDist <= 200 || mode != NORMAL` ——
+    **只要进入 200 格接近区就接管并 return**，于是「跳过该船」那段**永远执行不到**（船就在 200 格内）；
+    同时它唯一的降落出口 `shouldHandoffToLanding()` 要求「框里有鞘翅」，空框时同样出不去 →
+    只剩 `CLIMB ⇄ REAPPROACH` 振荡（表现出来就是"降落 ⇄ 起飞"），原地死循环，
+    且该船永远进不了黑名单（`addBlacklist` 只在 `leaveShipNow` 里）。
+  - ⚠️ Ying 对照：Ying 是「检查展示框 → **直接** `if (frameAirEmpty) { 跳过 }`」中间没有任何拦截；
+    `onLanding` 与 Ying **逐行一致**（只差 1.21.1→1.21.11 的 `isFallFlying()`→`isGliding()` 改名）。
+    即「防撞塔 / 安全复飞」是 4.48 独有的 FO 增量 → 本次全部移除。
+  - 改动：① 删 `onApproachSafety()` / `onSafeEscape()` 两个方法及调用点；
+    ② 删 `approachState` / `escapeState` 字段与重置点（onActivate、stopTask）；
+    ③ 删 `utils/FlightApproachLogic`、`utils/FlightEscapeLogic` 与两个测试类；
+    ④ 降落交接条件回到 Ying 的 3 格字面量。
+  - ⚠️ **刻意保留的 1 处差异（已告知用户）**：降落交接条件保留了 FO 的
+    `!climbing && frameAirChecked && !frameAirEmpty` 三个守卫（Ying 只有 `headFound && hDist <= 3`）。
+    理由：`frameAirChecked` 防止"还没确认框里有没有鞘翅就降落"，是安全冗余；用户如要求可再去掉。
+  - ⚠️ **未动**（已告知）：「低Y退出」FO 是断开服务器 + 关 FOKillAura，Ying 只是停任务 —— 属安全网，保持现状。
+  - 测试：删除 24 个（两个测试类），共 **355 测试全绿**。
 
 ## 硬性规范（每次改动必须执行）
 
