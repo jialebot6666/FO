@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.36`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.36-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.37`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.37-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -267,8 +267,27 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - ⚠️ **刻意保留的 1 处差异（已告知用户）**：降落交接条件保留了 FO 的
     `!climbing && frameAirChecked && !frameAirEmpty` 三个守卫（Ying 只有 `headFound && hDist <= 3`）。
     理由：`frameAirChecked` 防止"还没确认框里有没有鞘翅就降落"，是安全冗余；用户如要求可再去掉。
-  - ⚠️ **未动**（已告知）：「低Y退出」FO 是断开服务器 + 关 FOKillAura，Ying 只是停任务 —— 属安全网，保持现状。
+  - ⚠️ 「低Y退出」当时未动（FO 断开服务器 + 关 FOKillAura，Ying 只是停任务）——已于 **6.37 统一收敛**，见下。
   - 测试：删除 24 个（两个测试类），共 **355 测试全绿**。
+- ✅ 6.37 已完成：**「停游戏」下线保护统一收敛**（用户要求：「低Y逻辑要停游戏！补给失败也要停游戏！」）
+  - 新增私有 helper `emergencyLogout(warningMsg, disconnectReason, stopReason)`，固定顺序：
+    **警告 → 关 FOKillAura → `disconnect()` 断开服务器退回主菜单 → `stopTask()` → `toggle()` 关闭本模块本身**。
+    关本模块是用户本轮追加的要求（让角色下线瞬间不再残留任何采集器动作）。
+  - 接入的 **5 个触发点**：
+    ① 低Y（`onTick`，`lowYExit` + `lowYThreshold`）；
+    ② **物资不足**（末影箱遍历完仍缺，原 `stopTask("物资不足 …")`）；
+    ③ **背包无空位、无法补货**（原 `stopTask("背包无空位放潜影盒，无法补货 …")`）；
+    ④ **末影箱已满、无法归还潜影盒**（原 `stopTask("末影箱已满，无法归还潜影盒 …")`）；
+    ⑤ 末影箱与背包均无可用潜影盒（原本已下线，本次改为走同一 helper，行为一致）。
+  - ⚠️ **刻意未改 1 处**：`背包无空位放潜影盒，无法存鞘翅` 仍是纯 `stopTask`——
+    用户确认覆盖范围是「补给失败」，**存货失败不算补给失败**，故不下线。如要一并下线，说一声即可。
+  - ⚠️ **务必不要按「对齐 Ying」回退**：Ying 原版低Y分支只有 `stopTask`（其源码注释写着
+    「只停止任务，绝不关闭游戏」），本节的断开服务器 + 关模块是 **FO 刻意的安全增强、且是用户明确要求**。
+  - ⚠️ 现有 `disconnect()` 用的是 `mc.player.networkHandler.getConnection().disconnect(...)`
+    （断连 → 退回主菜单，客户端仍在跑）；`AutoLog` 模块用的是另一种写法
+    `mc.player.networkHandler.onDisconnect(new DisconnectS2CPacket(...))`。本节沿用前者。
+  - 测试：无新增（这两个分支都是 Minecraft 客户端强耦合的副作用路径，纯逻辑无法覆盖），
+    `cd fo && gradle build --no-daemon` 共 **355 测试全绿**（0 failures / 0 errors）。
 
 ## 硬性规范（每次改动必须执行）
 

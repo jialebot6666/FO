@@ -804,15 +804,15 @@ public class ElytraCollector extends Module {
             if (mc.player == null || mc.world == null) return;
             stateTick++;
 
-            // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动退出游戏 (断开服务器)
+            // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动下线 (断开服务器 + 关杀戮光环 + 关本模块)
             if (state != State.IDLE && state != State.DONE
                 && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
-                warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
-                // V4.48 对齐 Ying LowYSafetyLogout：低Y退出时顺带关闭 FOKillAura
-                FOKillAura ka = Modules.get().get(FOKillAura.class);
-                if (ka != null && ka.isActive()) ka.toggle();
-                disconnect("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
-                stopTask("低高度自动退出游戏.");
+                // V4.24: 不显示 Y 坐标
+                // V6.37: 统一走 emergencyLogout —— 除下线外还关掉 FOKillAura 与本模块本身（用户要求）
+                emergencyLogout(
+                    "当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.",
+                    "FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护",
+                    "低高度自动退出游戏.");
                 return;
             }
 
@@ -1357,6 +1357,23 @@ public class ElytraCollector extends Module {
         mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
     }
 
+    /**
+     * 紧急下线保护（用户要求：低Y、补给失败都要「停游戏」）。
+     * 顺序：警告 → 关掉 FO 杀戮光环 → 断开服务器退回主菜单 → 停止任务 → 关闭本模块本身。
+     * 关本模块是为了让角色在下线瞬间不再残留任何采集器动作。
+     *
+     * ⚠️ Ying 原版的低Y分支只有 stopTask（其源码注释写着「只停止任务，绝不关闭游戏」），
+     *    这里的下线是 FO 刻意的安全增强、且是用户明确要求的行为，**不要**按「对齐 Ying」回退掉。
+     */
+    private void emergencyLogout(String warningMsg, String disconnectReason, String stopReason) {
+        warning(warningMsg);
+        FOKillAura ka = Modules.get().get(FOKillAura.class);
+        if (ka != null && ka.isActive()) ka.toggle();
+        disconnect(disconnectReason);
+        stopTask(stopReason);
+        if (isActive()) toggle();
+    }
+
     private void stopTask(String reason) {
         info(reason);
         searchCancelled = true;
@@ -1741,12 +1758,17 @@ supplyScanStart = 0;
         if (pickStep == 3) {
             if (!moveIdle()) return;
             pickStep = 0;
-            // 补货意图：背包无空位 = 拿不了物资，和"物资不足"同性质，直接停止 (避免每艘船循环跳过补货)
+            // 补货意图：背包无空位 = 拿不了物资，和"物资不足"同性质 (避免每艘船循环跳过补货)
+            // V6.37: 补给失败按用户要求切「停游戏」——下线保护
             if (boxPurposeSupply) {
-                stopTask("背包无空位放潜影盒，无法补货，停止任务.");
+                emergencyLogout(
+                    "背包无空位放潜影盒，无法补货，自动下线保护.",
+                    "FO 鞘翅采集: 背包无空位，无法补货，自动下线保护",
+                    "背包无空位，无法补货，已自动下线.");
                 return;
             }
             // 存鞘翅意图：背包 0 空位 = 鞘翅也捡不起来，任务已卡死，直接停止 (避免每艘船循环跳过)
+            // (存货失败不是「补给失败」，保持只停任务，不下线)
             stopTask("背包无空位放潜影盒，无法存鞘翅，停止任务.");
             return;
         }
@@ -1756,7 +1778,11 @@ supplyScanStart = 0;
         if (boxInventorySlot != -1) {
             int screenSlot = invSlotToScreen(rows, boxInventorySlot);
             if (firstEmptyContainerSlot(sh, rows) == -1) {
-                stopTask("末影箱已满，无法归还潜影盒，停止任务.");
+                // 末影箱已满 → 潜影盒无处归还，存取链断：按用户要求切「停游戏」——下线保护
+                emergencyLogout(
+                    "末影箱已满，无法归还潜影盒，自动下线保护.",
+                    "FO 鞘翅采集: 末影箱已满，无法归还潜影盒，自动下线保护",
+                    "末影箱已满，无法归还潜影盒，已自动下线.");
                 return;
             }
             click(SlotActionType.QUICK_MOVE, screenSlot);
@@ -1822,9 +1848,11 @@ supplyScanStart = 0;
             }
             // 末影箱全是满盒、背包也没有可用鞘翅盒/空盒 (只剩补给盒或满盒)：
             // 按用户要求自动下线保护——既不能把鞘翅塞进补给盒，也不能让鞘翅烂在背包
-            info("末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.");
-            disconnect("FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护");
-            stopTask("末影箱与背包均无可用潜影盒，已自动下线.");
+            // V6.37: 统一走 emergencyLogout (关杀戮光环 + 断开服务器 + 关本模块)
+            emergencyLogout(
+                "末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.",
+                "FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护",
+                "末影箱与背包均无可用潜影盒，已自动下线.");
             return;
         }
         if (resupplyNeeded) {
@@ -1837,7 +1865,11 @@ supplyScanStart = 0;
             // 遍历到末影箱最后一位后才收尾：即使中途已经拿齐，也要继续向后遍历
             if (supplyScanStart > containerLast(rows)) {
                 if (anyDeficit()) {
-                    stopTask("物资不足 (末影箱内已遍历完所有潜影盒)，停止任务.");
+                    // 补给失败 (物资不足)：按用户要求与低Y一样「停游戏」——下线保护
+                    emergencyLogout(
+                        "物资不足 (末影箱内已遍历完所有潜影盒)，自动下线保护.",
+                        "FO 鞘翅采集: 物资不足 (末影箱内已无所需物资)，自动下线保护",
+                        "物资不足，已自动下线.");
                     return;
                 }
                 info("存储: 补货遍历完成.");
