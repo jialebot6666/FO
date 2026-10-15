@@ -116,7 +116,7 @@ public class AutoTree extends Module {
         event.cancel();
         if (!treePos.contains(event.blockPos)) {
             treePos.add(event.blockPos);
-            info("已登记种植位 (" + event.blockPos.getX() + ", " + event.blockPos.getY() + ", " + event.blockPos.getZ() + ")，手持树苗后自动种植；再点一次取消.");
+            info("已登记种植位，手持树苗后自动种植；再点一次取消.");
         } else {
             treePos.remove(event.blockPos);
             info("已取消种植位.");
