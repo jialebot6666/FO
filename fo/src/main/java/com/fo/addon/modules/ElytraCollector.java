@@ -4,10 +4,6 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
-import com.fo.addon.utils.FlightFireworkLogic;
-import com.fo.addon.utils.ReturnPathLogic;
-import com.fo.addon.utils.SearchExpansionLogic;
-import com.fo.addon.utils.ShipFilterLogic;
 import com.fo.addon.utils.TrashDefaults;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
 import com.seedfinding.mccore.rand.ChunkRand;
@@ -185,61 +181,6 @@ public class ElytraCollector extends Module {
         .build()
     );
 
-    private final Setting<Double> takeoffPitch = sgFlight.add(new DoubleSetting.Builder()
-        .name("起飞拉升角度")
-        .description("首次起飞以及滑翔降到最低高度后的重新爬升角度（度）。达到最高高度后自动切换滑翔。")
-        .defaultValue(45.0)
-        .range(5.0, 80.0)
-        .sliderRange(5.0, 80.0)
-        .build()
-    );
-
-    // V6.34：恢复到 Ying 原版的 54.77（4.48 曾把它隐藏、巡航爬升改借用「起飞拉升角度」）。
-    private final Setting<Double> cruiseClimbPitch = sgFlight.add(new DoubleSetting.Builder()
-        .name("巡航爬升角度")
-        .description("巡航爬升段抬头到的角度（度）。默认 54.77，即 Ying 原版 / 彗星 pitch40 的角度。")
-        .defaultValue(54.77)
-        .range(5.0, 80.0)
-        .sliderRange(5.0, 80.0)
-        .build()
-    );
-
-    private final Setting<Double> cruiseGlidePitch = sgFlight.add(new DoubleSetting.Builder()
-        .name("巡航滑翔角度")
-        .description("爬升到顶后向下滑翔的角度（度）。默认 37.72，即 Ying 原版 / 彗星 pitch40 的角度。")
-        .defaultValue(37.72)
-        .range(0.0, 70.0)
-        .sliderRange(0.0, 70.0)
-        .build()
-    );
-
-    // V6.35：起飞前先回降落点（防原地起飞撞墙）。Ying 原版只在「跳过没鞘翅的船」路径有这个判定、
-    //   采集完成后是直接起飞的；FO 4.45 把判定也加到了采集完成路径（修「采集完立马起飞撞墙死掉」）。
-    //   这里把它对外开放：默认开（保留修复），关掉即回到 Ying 采集完成路径的原行为。
-    private final Setting<Boolean> returnBeforeTakeoff = sgGeneral.add(new BoolSetting.Builder()
-        .name("起飞前先回降落点")
-        .description("已落地但不在降落点时，先走回降落点修正起飞方向再起飞（防原地起飞撞墙）。关闭则直接原地起飞。")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Double> returnBeforeTakeoffDistance = sgGeneral.add(new DoubleSetting.Builder()
-        .name("回降落点判定距离")
-        .description("离降落点超过这个距离（格）就先走回去再起飞；小于等于它就直接起飞。")
-        .defaultValue(ReturnPathLogic.DEFAULT_RETURN_DISTANCE)
-        .range(0.0, 20.0)
-        .sliderRange(0.0, 10.0)
-        .visible(returnBeforeTakeoff::get)
-        .build()
-    );
-
-    private final Setting<Boolean> ignoreVisited = sgGeneral.add(new BoolSetting.Builder()
-        .name("忽略已访问记录")
-        .description("开启后重新扫描所有预测末地船，不使用旧的“已访问船”列表。适合旧版本记录异常时临时恢复搜索。")
-        .defaultValue(false)
-        .build()
-    );
-
     private final Setting<List<String>> blacklist = sgGeneral.add(new StringListSetting.Builder()
         .name("黑名单")
         .description("黑名单：已经去过的船 (x,z)，搜索时会自动跳过. 自动维护.")
@@ -394,7 +335,6 @@ public class ElytraCollector extends Module {
     private boolean frameHadElytra = false; // 到达展示框时框里是否有鞘翅 (打掉后框会变空，不能据此判定没鞘翅)
     private boolean frameAirChecked = false; // 龙头确认后是否已在空中检查过展示框内容
     private boolean frameAirEmpty = false;   // 空中检查结果：展示框里没有鞘翅
-    private boolean relaunchAfterReturn = false; // LEAVE_SHIP 由 relaunchAfterShip 触发（采集完成回起飞点）时为 true；超时停止，绝不原地起飞
     private int frameAirScanTicks = 0;       // 空中找展示框实体的累计扫描 tick
     private boolean pickupSessionDone = false; // 每艘船捡到鞘翅后只触发一次船旁存储会话 (防缺口未补齐时原地无限重启)
     private boolean firstFireworkDone = false;
@@ -606,50 +546,42 @@ public class ElytraCollector extends Module {
             int pz = (int) Math.floor(mc.player.getZ());
 
             int spacing = endCity.getSpacing();
-            int spacingBlocks = spacing * 16;
-            int baseRegionRange = SearchExpansionLogic.ringCount(searchRange.get(), spacingBlocks);
-            int maxRegionRange = SearchExpansionLogic.maxRing(spacingBlocks, baseRegionRange);
+            int range = searchRange.get() + searchExtends * 500;
+            int regionRange = (range / (spacing * 16)) + 1;
             int prx = Math.floorDiv(px >> 4, spacing);
             int prz = Math.floorDiv(pz >> 4, spacing);
 
             List<ShipTarget> found = new ArrayList<>();
-            int[] stats = new int[4]; // [0]=有船 [1]=可构造 [2]=排除(黑名单/已访问/会话) [3]=单点异常
 
-            // 初始方形扫描
-            for (int drx = -baseRegionRange; drx <= baseRegionRange; drx++) {
+            for (int drx = -regionRange; drx <= regionRange; drx++) {
                 if (searchCancelled || generation != searchGeneration) return;
-                for (int drz = -baseRegionRange; drz <= baseRegionRange; drz++) {
-                    ShipTarget t = scanShipCell(endCity, generator, rand, biomeSource, terrainGen, worldSeed, prx, prz, drx, drz, stats);
-                    if (t != null) found.add(t);
-                }
-            }
+                for (int drz = -regionRange; drz <= regionRange; drz++) {
+                    int rx = prx + drx;
+                    int rz = prz + drz;
+                    CPos city = endCity.getInRegion(worldSeed, rx, rz, rand);
+                    if (city == null) continue;
+                    // 与 miku ElytraFinder 完全一致：seedfinding 生物群系判定 (末地中山/高岛)
+                    if (!endCity.canSpawn(city, biomeSource)) continue;
+                    // 与 miku ElytraFinder 完全一致：seedfinding 地形高度判定 (min(getHeightInGround) ≥ 60)
+                    if (!endCity.canGenerate(city, terrainGen)) continue;
 
-            if (searchCancelled || generation != searchGeneration) return;
-
-            // 空结果 → 环形外扩 (对齐 Ying ElytraSearchFallback: square → ring 只扫新环带，不重扫旧区，上限 50000 格)
-            int expandedRange = searchRange.get();
-            if (found.isEmpty()) {
-                for (int ring = baseRegionRange + 1; ring <= maxRegionRange; ring++) {
-                    if (searchCancelled || generation != searchGeneration) return;
-                    int before = found.size();
-                    for (int drx = -ring; drx <= ring; drx++) {
-                        for (int drz = -ring; drz <= ring; drz++) {
-                            if (!SearchExpansionLogic.isRingBoundary(drx, drz, ring)) continue;
-                            ShipTarget t = scanShipCell(endCity, generator, rand, biomeSource, terrainGen, worldSeed, prx, prz, drx, drz, stats);
-                            if (t != null) found.add(t);
+                    generator.generate(terrainGen, city.getX(), city.getZ(), rand);
+                    boolean hasShip = generator.hasShip();
+                    if (hasShip) {
+                        ShipTarget t = extractShip(generator, city);
+                        if (t != null && !isBlacklisted(t.headPos) && !sessionSkip.contains(blacklistKey(t.headPos))) {
+                            found.add(t);
+                            if (debugSetting.get()) {
+                                debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + t.facing
+                                    + " E=" + String.format("%.4f", endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
+                            }
                         }
                     }
-                    expandedRange = ring * spacingBlocks;
-                    if (found.size() > before) break;
+                    generator.reset();
                 }
             }
 
             if (searchCancelled || generation != searchGeneration) return;
-
-            // 日志对齐 Ying 搜船回退口径
-            info("搜船回退: 基准=(" + px + "," + pz + "), 初始范围=" + searchRange.get() + ", 实际扩展范围=" + expandedRange
-                + ", 有船=" + stats[0] + ", 可构造=" + stats[1] + ", 排除=" + stats[2] + ", 恢复候选=" + found.size()
-                + ", 单点异常=" + stats[3] + ".");
 
             // 方向过滤：按玩家所在位置的方位过滤 (北/南/东/西 独立开关，可只搜单方向)
             {
@@ -677,10 +609,16 @@ public class ElytraCollector extends Module {
                 }
             }
 
-            info("找到 " + ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + expandedRange + ").");
+            info("找到 " + ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ").");
             if (ships.isEmpty()) {
-                searchExtends = 0;
-                completeTask("范围内没有末地船，任务完成.");
+                if (searchExtends < 10) {
+                    searchExtends++;
+                    info("范围内没有末地船，扩大范围 +" + (searchExtends * 500) + " 格重新搜索...");
+                    launchSearch();
+                } else {
+                    searchExtends = 0;
+                    completeTask("范围内没有末地船，任务完成.");
+                }
             } else {
                 searchExtends = 0;
                 if (state == State.SEARCHING) {
@@ -695,50 +633,6 @@ public class ElytraCollector extends Module {
                 state = State.IDLE;
                 btnOff();
             }
-        }
-    }
-
-    /**
-     * 扫描单个末地城单元格 (对齐 Ying ElytraSearchFallback.scanCell)：
-     * 单点异常跳过继续 (不中断整个搜索)，黑名单/已访问/本会话跳过按 ShipFilterLogic 判定。
-     * stats[0]=有船 [1]=可构造 [2]=排除 [3]=单点异常
-     */
-    private ShipTarget scanShipCell(EndCity endCity, EndCityGenerator generator, ChunkRand rand,
-                                    EndBiomeSource biomeSource, EndTerrainGenerator terrainGen,
-                                    long seed, int prx, int prz, int drx, int drz, int[] stats) {
-        int rx = prx + drx;
-        int rz = prz + drz;
-        CPos city = endCity.getInRegion(seed, rx, rz, rand);
-        if (city == null) return null;
-        // 与 miku ElytraFinder 完全一致：seedfinding 生物群系判定 (末地中山/高岛)
-        if (!endCity.canSpawn(city, biomeSource)) return null;
-        // 与 miku ElytraFinder 完全一致：seedfinding 地形高度判定 (min(getHeightInGround) ≥ 60)
-        if (!endCity.canGenerate(city, terrainGen)) return null;
-        try {
-            generator.generate(terrainGen, city.getX(), city.getZ(), rand);
-            boolean hasShip = generator.hasShip();
-            if (!hasShip) return null;
-            stats[0]++;
-            ShipTarget t = extractShip(generator, city);
-            if (t == null) return null;
-            stats[1]++;
-            // ③ 忽略已访问记录：开启时跳过黑名单过滤，重新扫描所有预测船
-            if (!ShipFilterLogic.shouldIncludeShip(ignoreVisited.get(), isBlacklisted(t.headPos), sessionSkip.contains(blacklistKey(t.headPos)))) {
-                stats[2]++;
-                return null;
-            }
-            if (debugSetting.get()) {
-                debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + t.facing
-                    + " E=" + String.format("%.4f", endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
-            }
-            return t;
-        } catch (Exception e) {
-            // 单点异常：跳过该城继续扫 (对齐 Ying scanCell 的 catch，不中断整个搜索)
-            stats[3]++;
-            if (debugSetting.get()) debugLog("单点异常跳过: city=(" + city.getX() + "," + city.getZ() + ") " + e.getMessage());
-            return null;
-        } finally {
-            generator.reset();
         }
     }
 
@@ -804,15 +698,12 @@ public class ElytraCollector extends Module {
             if (mc.player == null || mc.world == null) return;
             stateTick++;
 
-            // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动下线 (断开服务器 + 关杀戮光环 + 关本模块)
+            // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动退出游戏 (断开服务器)
             if (state != State.IDLE && state != State.DONE
                 && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
-                // V4.24: 不显示 Y 坐标
-                // V6.37: 统一走 emergencyLogout —— 除下线外还关掉 FOKillAura 与本模块本身（用户要求）
-                emergencyLogout(
-                    "当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.",
-                    "FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护",
-                    "低高度自动退出游戏.");
+                warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
+                disconnect("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
+                stopTask("低高度自动退出游戏.");
                 return;
             }
 
@@ -865,7 +756,7 @@ public class ElytraCollector extends Module {
                 rotateFastTo(recoveryYaw, mc.player.getPitch());
             } else {
                 // 阶段 1: pitch40 模式 (平滑转向 + 平缓下滑)，不用急速俯冲
-                rotateTo(yawTowards(waypoints.landing), cruiseGlidePitch.get().floatValue());
+                rotateTo(yawTowards(waypoints.landing), 37.72f);
             }
         } else if (takeoffFacing != null) {
             faceDirection(takeoffFacing);
@@ -873,7 +764,7 @@ public class ElytraCollector extends Module {
 
         // 降落恢复: 阶段 0 抬头爬升 (到降落点上方 25 格)；阶段 1 pitch40 模式下滑 (pitch 由 rotateTo 控制)；正常起飞抬头爬升
         if (!(landingRecover && recoverStage == 1)) {
-            mc.player.setPitch(-(float) takeoffPitch.get().doubleValue());
+            mc.player.setPitch(-45f);
         }
         mc.options.forwardKey.setPressed(true);
 
@@ -1048,8 +939,6 @@ public class ElytraCollector extends Module {
         }
 
         // 高度保持滞回飞行
-        // V6.34：完全回到 Ying 原版——巡航段**不烧烟花**，俯仰过渡由「俯仰速度」限速（对称），
-        //   区间严格按「最低高度/最高高度」，没有任何自动调界。
         float yaw = yawTowards(lp);
         double y = mc.player.getY();
         if (climbing) {
@@ -1057,20 +946,17 @@ public class ElytraCollector extends Module {
         } else {
             if (y <= minHeight.get()) climbing = true;
         }
-        float pitch = climbing
-            ? -(float) cruiseClimbPitch.get().doubleValue()
-            : (float) cruiseGlidePitch.get().doubleValue();
+        float pitch = climbing ? -54.77f : 37.72f;
 
         rotateTo(yaw, pitch);
         mc.options.forwardKey.setPressed(true);
 
         // 先飞到降落点正上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
-        // V6.34：进降落距离回到 Ying 原版的 3 格（4.48 曾改成 80，与原版不一致）
         if (frameAirEmpty) {
             if (mc.player.getY() < maxHeight.get()) {
                 climbing = true;
-                // 紧急拉升：必须用烟花加速，否则速度掉光会坠落 (与 RISING 共用放烟花间隔)
-                if (FlightFireworkLogic.shouldUseFirework(climbing, true, stateTick, lastFireworkTick, (int) Math.max(1, Math.round(fireworkInterval.get() * 20)))) {
+                // 拉升时也要用烟花加速，否则速度掉光会坠落 (与 RISING 共用放烟花间隔)
+                if (stateTick - lastFireworkTick >= Math.max(1, Math.round(fireworkInterval.get() * 20))) {
                     useFirework();
                     lastFireworkTick = stateTick;
                 }
@@ -1078,12 +964,12 @@ public class ElytraCollector extends Module {
                 leaveShipNow();
                 return;
             }
-        } else if (headFound && !climbing && frameAirChecked && !frameAirEmpty
-            && horizontalDistance(lp) <= 3) {
+        } else if (headFound && horizontalDistance(lp) <= 3) {
             state = State.LANDING;
             stateTick = 0;
         }
     }
+
     // ========== 与独立 PullUp 模块的协调 ==========
     // 拉升前中止存储会话：容器界面开着时玩家被冻结无法拉升，先关界面/停寻路/复位再拉升 (不影响任务，拉升完继续)
     // 供 PullUp 模块在强制拉升开始时调用
@@ -1289,14 +1175,10 @@ public class ElytraCollector extends Module {
             case EXIT_P1 -> {
                 if (reached(waypoints.p1, 2.5)) {
                     advance(CollectStep.EXIT_LANDING);
-                } else if (ReturnPathLogic.timedOut(stateTick)) {
+                } else if (stateTick > 600) {
                     // 走回降落点超时 (StorageReturn 语义：30s 走不到也继续，不卡死)
                     warning("走回降落点超时 (30s)，跳过该步骤继续.");
                     advance(CollectStep.EXIT_LANDING);
-                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
-                    // 每 20 tick 或寻路失败时重发 moveTo (对齐 Ying StorageReturn REPATH_INTERVAL 语义)
-                    PathManagers.get().moveTo(waypoints.p1, false);
-                    lastGotoTick = stateTick;
                 }
             }
             case EXIT_LANDING -> {
@@ -1304,13 +1186,11 @@ public class ElytraCollector extends Module {
                     addBlacklist(current.headPos);
                     info("该船完成，加入黑名单.");
                     finishShip();
-                } else if (ReturnPathLogic.timedOut(stateTick)) {
-                    // 对齐 Ying StorageReturn 超时语义：回不到起飞点宁可停止任务，也不原地起飞撞墙
-                    warning("回不到降落点 (30s)，停止任务.");
-                    stopTask("回不到起飞点 (30s)，FO 鞘翅采集任务停止.");
-                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
-                    PathManagers.get().moveTo(waypoints.landing.down(4), false);
-                    lastGotoTick = stateTick;
+                } else if (stateTick > 600) {
+                    // 回不到降落点：直接完成该船 (黑名单跳过)，绝不卡死
+                    warning("回不到降落点 (30s)，该船加入黑名单跳过.");
+                    addBlacklist(current.headPos);
+                    finishShip();
                 }
             }
             case LEAVE_SHIP -> {
@@ -1320,21 +1200,12 @@ public class ElytraCollector extends Module {
                     info("已回到降落点，起飞离开.");
                     state = State.RISING;
                     stateTick = 0;
-                } else if (ReturnPathLogic.timedOut(stateTick)) {
-                    if (relaunchAfterReturn) {
-                        // 采集完成回起飞点超时：宁可停止任务，也不原地起飞撞墙 (对齐 Ying StorageReturn)
-                        warning("回降落点超时 (30s)，停止任务.");
-                        stopTask("回不到起飞点 (30s)，FO 鞘翅采集任务停止.");
-                    } else {
-                        // 展示框没鞘翅跳过船：回降落点超时原地起飞离开 (原行为)
-                        warning("回降落点超时 (30s)，原地起飞离开.");
-                        releaseForward();
-                        state = State.RISING;
-                        stateTick = 0;
-                    }
-                } else if (ReturnPathLogic.shouldRepath(stateTick, lastGotoTick, PathManagers.get().isPathing())) {
-                    PathManagers.get().moveTo(waypoints.landing.down(4), false);
-                    lastGotoTick = stateTick;
+                } else if (stateTick > 600) {
+                    // 回降落点超时：原地起飞 (方向已由 takeoffFacing 修正)
+                    warning("回降落点超时 (30s)，原地起飞离开.");
+                    releaseForward();
+                    state = State.RISING;
+                    stateTick = 0;
                 }
             }
         }
@@ -1355,23 +1226,6 @@ public class ElytraCollector extends Module {
     private void disconnect(String reason) {
         if (mc.player == null || mc.player.networkHandler == null) return;
         mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
-    }
-
-    /**
-     * 紧急下线保护（用户要求：低Y、补给失败都要「停游戏」）。
-     * 顺序：警告 → 关掉 FO 杀戮光环 → 断开服务器退回主菜单 → 停止任务 → 关闭本模块本身。
-     * 关本模块是为了让角色在下线瞬间不再残留任何采集器动作。
-     *
-     * ⚠️ Ying 原版的低Y分支只有 stopTask（其源码注释写着「只停止任务，绝不关闭游戏」），
-     *    这里的下线是 FO 刻意的安全增强、且是用户明确要求的行为，**不要**按「对齐 Ying」回退掉。
-     */
-    private void emergencyLogout(String warningMsg, String disconnectReason, String stopReason) {
-        warning(warningMsg);
-        FOKillAura ka = Modules.get().get(FOKillAura.class);
-        if (ka != null && ka.isActive()) ka.toggle();
-        disconnect(disconnectReason);
-        stopTask(stopReason);
-        if (isActive()) toggle();
     }
 
     private void stopTask(String reason) {
@@ -1461,17 +1315,6 @@ supplyScanStart = 0;
         }
     }
 
-    /**
-     * 起飞前是否该先走回降落点（防原地起飞撞墙）。开关与判定距离都可配（V6.35）。
-     * 注意：Ying 原版只有「跳过没鞘翅的船」路径有这层判定；「采集完成后起飞」路径是 FO 4.45 补的。
-     */
-    private boolean wantsReturnToLanding() {
-        double dist = waypoints != null ? horizontalDistance(waypoints.landing) : 0;
-        return ReturnPathLogic.shouldReturnBeforeTakeoff(
-            returnBeforeTakeoff.get(), mc.player.isOnGround(), waypoints != null,
-            dist, returnBeforeTakeoffDistance.get());
-    }
-
     private void relaunchAfterShip() {
         ships.clear();
         targetIndex = 0;
@@ -1480,21 +1323,8 @@ supplyScanStart = 0;
         takeoffFacing = current != null ? current.facing : null;
         firstFireworkDone = false;
         landingRecover = false;
-        // 已降落且不在起飞点 → 先回降落点 (LEAVE_SHIP) 修正起飞方向再起飞，防止原地起飞撞墙
-        // V6.35：开关 / 判定距离可配（Ying 原版这条路径是直接起飞，这层保护是 FO 4.45 补的）
-        boolean needReturn = wantsReturnToLanding();
-        relaunchAfterReturn = needReturn;
-        if (needReturn) {
-            info("采集完成：先回降落点修正起飞方向后再起飞.");
-            state = State.COLLECTING;
-            collectStep = CollectStep.LEAVE_SHIP;
-            stateTick = 0;
-            lastGotoTick = 0;
-            beginCollectStep();
-        } else {
-            state = State.RISING;
-            stateTick = 0;
-        }
+        state = State.RISING;
+        stateTick = 0;
         launchSearch();
     }
 
@@ -1509,10 +1339,9 @@ supplyScanStart = 0;
         takeoffFacing = current.facing;
         firstFireworkDone = false;
         landingRecover = false;
-        relaunchAfterReturn = false; // 跳过船场景：回降落点超时仍原地起飞离开 (原行为)
         releaseForward();
         launchSearch();
-        if (wantsReturnToLanding()) {
+        if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
             // 已降落：先走到降落点 (甲板站立点) 修正起飞方向
             info("已降落：先回降落点修正起飞方向后再离开.");
             state = State.COLLECTING;
@@ -1758,17 +1587,12 @@ supplyScanStart = 0;
         if (pickStep == 3) {
             if (!moveIdle()) return;
             pickStep = 0;
-            // 补货意图：背包无空位 = 拿不了物资，和"物资不足"同性质 (避免每艘船循环跳过补货)
-            // V6.37: 补给失败按用户要求切「停游戏」——下线保护
+            // 补货意图：背包无空位 = 拿不了物资，和"物资不足"同性质，直接停止 (避免每艘船循环跳过补货)
             if (boxPurposeSupply) {
-                emergencyLogout(
-                    "背包无空位放潜影盒，无法补货，自动下线保护.",
-                    "FO 鞘翅采集: 背包无空位，无法补货，自动下线保护",
-                    "背包无空位，无法补货，已自动下线.");
+                stopTask("背包无空位放潜影盒，无法补货，停止任务.");
                 return;
             }
             // 存鞘翅意图：背包 0 空位 = 鞘翅也捡不起来，任务已卡死，直接停止 (避免每艘船循环跳过)
-            // (存货失败不是「补给失败」，保持只停任务，不下线)
             stopTask("背包无空位放潜影盒，无法存鞘翅，停止任务.");
             return;
         }
@@ -1778,11 +1602,7 @@ supplyScanStart = 0;
         if (boxInventorySlot != -1) {
             int screenSlot = invSlotToScreen(rows, boxInventorySlot);
             if (firstEmptyContainerSlot(sh, rows) == -1) {
-                // 末影箱已满 → 潜影盒无处归还，存取链断：按用户要求切「停游戏」——下线保护
-                emergencyLogout(
-                    "末影箱已满，无法归还潜影盒，自动下线保护.",
-                    "FO 鞘翅采集: 末影箱已满，无法归还潜影盒，自动下线保护",
-                    "末影箱已满，无法归还潜影盒，已自动下线.");
+                stopTask("末影箱已满，无法归还潜影盒，停止任务.");
                 return;
             }
             click(SlotActionType.QUICK_MOVE, screenSlot);
@@ -1848,11 +1668,9 @@ supplyScanStart = 0;
             }
             // 末影箱全是满盒、背包也没有可用鞘翅盒/空盒 (只剩补给盒或满盒)：
             // 按用户要求自动下线保护——既不能把鞘翅塞进补给盒，也不能让鞘翅烂在背包
-            // V6.37: 统一走 emergencyLogout (关杀戮光环 + 断开服务器 + 关本模块)
-            emergencyLogout(
-                "末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.",
-                "FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护",
-                "末影箱与背包均无可用潜影盒，已自动下线.");
+            info("末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.");
+            disconnect("FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护");
+            stopTask("末影箱与背包均无可用潜影盒，已自动下线.");
             return;
         }
         if (resupplyNeeded) {
@@ -1865,11 +1683,7 @@ supplyScanStart = 0;
             // 遍历到末影箱最后一位后才收尾：即使中途已经拿齐，也要继续向后遍历
             if (supplyScanStart > containerLast(rows)) {
                 if (anyDeficit()) {
-                    // 补给失败 (物资不足)：按用户要求与低Y一样「停游戏」——下线保护
-                    emergencyLogout(
-                        "物资不足 (末影箱内已遍历完所有潜影盒)，自动下线保护.",
-                        "FO 鞘翅采集: 物资不足 (末影箱内已无所需物资)，自动下线保护",
-                        "物资不足，已自动下线.");
+                    stopTask("物资不足 (末影箱内已遍历完所有潜影盒)，停止任务.");
                     return;
                 }
                 info("存储: 补货遍历完成.");
