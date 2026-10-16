@@ -702,8 +702,7 @@ public class ElytraCollector extends Module {
             if (state != State.IDLE && state != State.DONE
                 && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
                 warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
-                disconnect("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
-                stopTask("低高度自动退出游戏.");
+                emergencyExit("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
                 return;
             }
 
@@ -1216,6 +1215,15 @@ public class ElytraCollector extends Module {
         mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
     }
 
+    // 6.41: 自动下线保护统一出口——断开服务器 + 停任务 + 关闭模块本身。
+    // 必须关闭模块：只 disconnect+stopTask 会让模块残留激活，重连后鞘翅采集还亮着、
+    // 联动的自动扔垃圾也残留开启（用户实测：关掉后 onTick 仍在扔垃圾）。
+    private void emergencyExit(String reason) {
+        disconnect(reason);
+        stopTask(reason);
+        if (isActive()) toggle();   // onDeactivate → 联动回滚关闭自动扔垃圾，干净恢复
+    }
+
     private void stopTask(String reason) {
         info(reason);
         searchCancelled = true;
@@ -1657,8 +1665,7 @@ supplyScanStart = 0;
             // 末影箱全是满盒、背包也没有可用鞘翅盒/空盒 (只剩补给盒或满盒)：
             // 按用户要求自动下线保护——既不能把鞘翅塞进补给盒，也不能让鞘翅烂在背包
             info("末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.");
-            disconnect("FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护");
-            stopTask("末影箱与背包均无可用潜影盒，已自动下线.");
+            emergencyExit("FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护");
             return;
         }
         if (resupplyNeeded) {

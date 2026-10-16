@@ -232,6 +232,7 @@ public class AutoTrash extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        if (!isActive()) return;   // 6.41: 事件订阅残留兜底——掉线重连后 UI 已关闭仍触发过 onTick，未激活绝不扔垃圾
         if (mc.player == null || mc.world == null) return;
 
         // 防误丢：只在无界面时扫背包 —— 槽位映射（SlotUtils.indexToId）按玩家背包设计，
