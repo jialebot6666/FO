@@ -265,7 +265,7 @@ public class ElytraCollector extends Module {
     private final Setting<Integer> lowYThreshold = sgStorage.add(new IntSetting.Builder()
         .name("低Y阈值")
         .description("低于此 Y 自动退出游戏.")
-        .defaultValue(-20)
+        .defaultValue(30)   // 6.41: -20→30。船底最低≈45 不误伤；低于30=已掉出结构/坠落，尽早退出保装备
         .range(-64, 100)
         .sliderRange(-64, 64)
         .build()
