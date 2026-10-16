@@ -24,11 +24,14 @@ import net.minecraft.block.SaplingBlock;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -172,11 +175,11 @@ public class AutoTree extends Module {
             );
 
             if (action == TreeLogic.Action.BONEMEAL) {
-                clickBlockBoneMeal(pos.up(), Direction.DOWN, boneMeal.slot());
+                bonemealSapling(pos.up(), boneMeal.slot());
                 done++;
                 lastUseMs = System.currentTimeMillis();
             } else if (action == TreeLogic.Action.PLANT) {
-                BlockUtils.place(pos.up(), sapling, true, 0, true, false);
+                plantSapling(pos);
                 done++;
                 lastUseMs = System.currentTimeMillis();
             }
@@ -192,24 +195,97 @@ public class AutoTree extends Module {
     }
 
     /**
-     * 对树苗使用骨粉：静默转向后右键点击（催熟）。
-     * 必须在旋转回调内完成「切骨粉 → 右键 → 切回」，否则回调执行时槽位已变：
-     * ① swap 必须传 true 记录原槽位，swapBack 才能切回树苗（之前传 false 导致永远停在骨粉）
-     * ② swap/点击/swapBack 全部在回调里同步执行，保证点击瞬间手里就是骨粉
+     * 对树苗使用骨粉（6.42：全面对齐 LeavesHack）。
+     * 与原版一致：① 找树苗「可见侧面」点击（getClickSide），不再点地面；
+     * ② 同步瞬转——直接发 PlayerMoveC2SPacket.LookAndOnGround 服务端视角包，
+     *    不经 Meteor 异步旋转回调（回调易被其他模块抢旋转吞掉，表现为「偶尔才催熟一下」）。
+     * 顺序：切骨粉 → 瞬转 → 挥臂 → 右键树苗侧面 → 转回 → 切回树苗。
      */
-    private void clickBlockBoneMeal(BlockPos pos, Direction side, int boneMealSlot) {
+    private void bonemealSapling(BlockPos saplingPos, int boneMealSlot) {
+        Direction side = getClickSide(saplingPos);
         Vec3d point = new Vec3d(
-            pos.getX() + 0.5 + side.getVector().getX() * 0.5,
-            pos.getY() + 0.5 + side.getVector().getY() * 0.5,
-            pos.getZ() + 0.5 + side.getVector().getZ() * 0.5
+            saplingPos.getX() + 0.5 + side.getVector().getX() * 0.5,
+            saplingPos.getY() + 0.5 + side.getVector().getY() * 0.5,
+            saplingPos.getZ() + 0.5 + side.getVector().getZ() * 0.5
         );
-        Rotations.rotate(Rotations.getYaw(point), Rotations.getPitch(point), 100, () -> {
-            InvUtils.swap(boneMealSlot, true);
-            mc.player.swingHand(Hand.MAIN_HAND);
-            BlockHitResult result = new BlockHitResult(point, side, pos, false);
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, result);
-            InvUtils.swapBack();
-        });
+        InvUtils.swap(boneMealSlot, true);
+        snapLook(point);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        BlockHitResult result = new BlockHitResult(point, side, saplingPos, false);
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, result);
+        snapBack();
+        InvUtils.swapBack();
+    }
+
+    /**
+     * 放置树苗（6.42：对齐 LeavesHack placeBlock(pos.up(), DOWN, true)）。
+     * 等价于「手持树苗点击地面方块上表面」，树苗落到 pos.up()。
+     */
+    private void plantSapling(BlockPos groundPos) {
+        Direction side = Direction.UP;
+        Vec3d point = new Vec3d(
+            groundPos.getX() + 0.5 + side.getVector().getX() * 0.5,
+            groundPos.getY() + 0.5 + side.getVector().getY() * 0.5,
+            groundPos.getZ() + 0.5 + side.getVector().getZ() * 0.5
+        );
+        snapLook(point);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        BlockHitResult result = new BlockHitResult(point, side, groundPos, false);
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, result);
+        snapBack();
+    }
+
+    // ========== 同步瞬转（对齐 LeavesHack Rotation.snapAt/snapBack）==========
+    // 只发服务端视角包，客户端视角不动——不存在异步回调被吞的问题。
+    private void snapLook(Vec3d point) {
+        sendLookPacket((float) Rotations.getYaw(point), (float) Rotations.getPitch(point));
+    }
+
+    private void sendLookPacket(float yaw, float pitch) {
+        mc.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
+            yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
+    }
+
+    private void snapBack() {
+        sendLookPacket(mc.player.getYaw(), mc.player.getPitch());
+    }
+
+    // ========== 可见侧面查找（对齐 LeavesHack BlockUtil.getClickSide / canSee）==========
+    private Direction getClickSide(BlockPos pos) {
+        Direction side = null;
+        double range = 100;
+        for (Direction i : Direction.values()) {
+            if (!canSee(pos, i)) continue;
+            double d = Math.sqrt(mc.player.getEyePos().squaredDistanceTo(pos.offset(i).toCenterPos()));
+            if (d > range) continue;
+            side = i;
+            range = d;
+        }
+        if (side != null) return side;
+        // 无可见面时退回最近面（原版走 isGrimDirection 分支，这里简化取距离最近）
+        side = Direction.UP;
+        double best = Double.MAX_VALUE;
+        for (Direction i : Direction.values()) {
+            double d = mc.player.getEyePos().squaredDistanceTo(pos.offset(i).toCenterPos());
+            if (d < best) {
+                best = d;
+                side = i;
+            }
+        }
+        return side;
+    }
+
+    private boolean canSee(BlockPos pos, Direction side) {
+        Vec3d test = pos.toCenterPos().add(
+            side.getVector().getX() * 0.5,
+            side.getVector().getY() * 0.5,
+            side.getVector().getZ() * 0.5);
+        HitResult result = mc.world.raycast(new RaycastContext(
+            mc.player.getEyePos(), test,
+            RaycastContext.ShapeType.COLLIDER,
+            RaycastContext.FluidHandling.NONE,
+            mc.player));
+        return result == null || result.getType() == HitResult.Type.MISS;
     }
 
     private static boolean isSaplingItem(ItemStack stack) {
