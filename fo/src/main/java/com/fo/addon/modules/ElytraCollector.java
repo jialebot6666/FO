@@ -1261,9 +1261,9 @@ public class ElytraCollector extends Module {
     }
 
     private void maybeStartSession() {
-        // 存鞘翅触发条件：只要背包里有未穿戴鞘翅就存 (用户要求"取得一个鞘翅就自动存入潜影盒"，
-        // 不再等背包快满，防止鞘翅攒在背包里、也避免和补货抢空间)
-        dumpNeeded = countElytraMain() > 0;
+        // 存鞘翅触发条件：背包可用空格 ≤ 阈值才存 (对齐 Ying 原版 freeSlots <= dump-free-slots。
+        // 曾改为"背包里有鞘翅就存"：每艘船都在起飞前挖盒存储，玩家位置被带离降落点，起飞朝船体撞墙，已回退)
+        dumpNeeded = freeSlots() <= freeSlotDump.get();
         resupplyNeeded = anyDeficit();
         if (dumpNeeded || resupplyNeeded) {
             info("存储会话: 存鞘翅=" + dumpNeeded + ", 补货=" + resupplyNeeded);
