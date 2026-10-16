@@ -1,7 +1,7 @@
 [versions]
 # 版本号一律不带 V 前缀（V6.25 之前的写法已废弃，见 AGENTS.md「命名规范」）。
 # 构建产物名 = FO-<mod-version>-<minecraft>，如 6.25 + 1.21.11 -> FO-6.25-1.21.11.jar
-mod-version = "6.42"
+mod-version = "6.6"
 
 # Fabric (https://fabricmc.net/develop)
 jdk = "21"
