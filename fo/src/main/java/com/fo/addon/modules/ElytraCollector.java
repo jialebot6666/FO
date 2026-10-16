@@ -1175,23 +1175,16 @@ public class ElytraCollector extends Module {
             case EXIT_P1 -> {
                 if (reached(waypoints.p1, 2.5)) {
                     advance(CollectStep.EXIT_LANDING);
-                } else if (stateTick > 600) {
-                    // 走回降落点超时 (StorageReturn 语义：30s 走不到也继续，不卡死)
-                    warning("走回降落点超时 (30s)，跳过该步骤继续.");
-                    advance(CollectStep.EXIT_LANDING);
                 }
+                // 对齐 Ying：无超时跳步，一直走到 p1 才进入下一阶段 (曾加 30s 超时跳过 → 没回点就起飞撞墙，已删)
             }
             case EXIT_LANDING -> {
                 if (reached(waypoints.landing, 2.5)) {
                     addBlacklist(current.headPos);
                     info("该船完成，加入黑名单.");
                     finishShip();
-                } else if (stateTick > 600) {
-                    // 回不到降落点：直接完成该船 (黑名单跳过)，绝不卡死
-                    warning("回不到降落点 (30s)，该船加入黑名单跳过.");
-                    addBlacklist(current.headPos);
-                    finishShip();
                 }
+                // 对齐 Ying：无超时跳步，回不到降落点就一直走 (曾加 30s 超时直接完成 → 在错误位置起飞撞墙，已删)
             }
             case LEAVE_SHIP -> {
                 // 已回降落点：修正起飞方向后起飞离开
@@ -1200,13 +1193,8 @@ public class ElytraCollector extends Module {
                     info("已回到降落点，起飞离开.");
                     state = State.RISING;
                     stateTick = 0;
-                } else if (stateTick > 600) {
-                    // 回降落点超时：原地起飞 (方向已由 takeoffFacing 修正)
-                    warning("回降落点超时 (30s)，原地起飞离开.");
-                    releaseForward();
-                    state = State.RISING;
-                    stateTick = 0;
                 }
+                // 对齐 Ying：无超时跳步，一直走到降落点才起飞 (曾加 30s 超时原地起飞 → 位置不在降落点撞墙，已删)
             }
         }
     }
