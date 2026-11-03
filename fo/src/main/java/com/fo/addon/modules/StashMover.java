@@ -39,6 +39,8 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.ShulkerBoxScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -148,8 +150,9 @@ public class StashMover extends Module {
         WALK_STORE, UNLOAD, SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
+    /** 三号模式 1 号搬运端的阶段（V6.7p3 重排：校正 → 补货 → 投珍珠 → 取货/存货 → 私信）。 */
     private enum TrioState {
-        LOOT, UNLOAD, RESTOCK, THROW, VERIFY, SEND, WAIT_TELEPORT, STUCK
+        SETTLE, RESTOCK, THROW, LOOT, UNLOAD, SEND, WAIT_TELEPORT, STUCK
     }
 
     // ==================== 设置 ====================
@@ -594,7 +597,15 @@ public class StashMover extends Module {
     private boolean sneakHeld;
 
     // 三号模式
-    private TrioState trioState = TrioState.LOOT;
+    private TrioState trioState = TrioState.SETTLE;
+    /** 投掷子步骤：0=开始/检珍珠 1=校正站位 2=开活板门 3=潜行走近 4=投掷 5=退回 6=校验 */
+    private int throwSub;
+    private int throwRetries;
+    private BlockPos throwSafeSpot;
+    private int stallTicks;
+    private int walkTicks;
+    private double lastWalkX;
+    private double lastWalkZ;
     private StashMoveLogic.Zone trioZone = StashMoveLogic.Zone.UNKNOWN;
     private long teleportWaitStart;
     private Vec3d lastPos;
@@ -651,13 +662,18 @@ public class StashMover extends Module {
         lastProgressTick = 0;
 
         moverState = MoverState.LOOT;
-        trioState = TrioState.LOOT;
+        trioState = TrioState.SETTLE;
         trioZone = StashMoveLogic.Zone.UNKNOWN;
+        throwSub = 0;
+        throwRetries = 0;
+        throwSafeSpot = null;
+        stallTicks = 0;
+        walkTicks = 0;
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
             trioZone = initialZone();
-            trioState = trioZone == StashMoveLogic.Zone.STORE ? TrioState.UNLOAD : TrioState.LOOT;
+            trioState = TrioState.SETTLE;
         }
     }
 
@@ -1123,18 +1139,18 @@ public class StashMover extends Module {
                 enterStuck("请先设置待搬运箱与存储箱坐标");
                 return;
             }
-            trioState = trioZone == StashMoveLogic.Zone.STORE ? TrioState.UNLOAD : TrioState.LOOT;
+            trioState = TrioState.SETTLE;
         }
         if (trioState != TrioState.STUCK && tick - lastProgressTick > 2400) {
             enterStuck("长时间没有进展（2 分钟无有效动作）");
             return;
         }
         switch (trioState) {
-            case LOOT -> trioLoot();
-            case UNLOAD -> trioUnload();
+            case SETTLE -> trioSettle();
             case RESTOCK -> trioRestock();
             case THROW -> trioThrow();
-            case VERIFY -> trioVerify();
+            case LOOT -> trioLoot();
+            case UNLOAD -> trioUnload();
             case SEND -> trioSend();
             case WAIT_TELEPORT -> trioWaitTeleport();
             case STUCK -> tickStuck();
@@ -1144,7 +1160,7 @@ public class StashMover extends Module {
     private void trioLoot() {
         if (inventoryFull()) {
             closeScreen();
-            trioState = TrioState.RESTOCK;
+            trioState = TrioState.SEND;   // V6.7p3：取货完成 → 发私信拉珍珠
             return;
         }
         if (containerOpen()) {
@@ -1176,7 +1192,7 @@ public class StashMover extends Module {
             if (!hasItemsToUnload()) {
                 if (unloadedSomething) StashStats.get().addTrip();
                 unloadedSomething = false;
-                trioState = TrioState.RESTOCK;
+                trioState = TrioState.SEND;   // V6.7p3：存货完成 → 发私信拉珍珠
                 return;
             }
             if (!(mc.world.getBlockState(store).getBlock() instanceof ChestBlock)) {
@@ -1200,7 +1216,7 @@ public class StashMover extends Module {
             closeScreen();
             if (unloadedSomething) StashStats.get().addTrip();
             unloadedSomething = false;
-            trioState = TrioState.RESTOCK;
+            trioState = TrioState.SEND;   // V6.7p3：存货完成 → 发私信拉珍珠
             return;
         }
         unloadedSomething = true;
@@ -1279,57 +1295,217 @@ public class StashMover extends Module {
         }
     }
 
+    /** 当前所在区的活板门坐标。 */
+    private BlockPos trioTrapdoor() {
+        return trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
+    }
+
+    /**
+     * ① 校正站位（V6.7p3，用户口径）：被拉过来后先走离气泡柱/活板门，
+     * 站到最近的实心安全格，确认没踩在水柱或活板门上。
+     */
+    private void trioSettle() {
+        BlockPos stand = trioTrapdoor();
+        if (stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置" + trioZone + "的活板门位置");
+            return;
+        }
+        if (settlePosition(stand)) {
+            trioState = TrioState.RESTOCK;
+            cooldown = 5;
+        }
+    }
+
+    /**
+     * 玩家若站在活板门/水格/水里，走到最近的实心安全格。
+     *
+     * @return true = 已站好（并记下“原位”，投完退回这里）
+     */
+    private boolean settlePosition(BlockPos trapdoorPos) {
+        if (mc.player == null) return false;
+        BlockPos feet = mc.player.getBlockPos();
+        BlockPos water = trapdoorPos.down(1);
+        // 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
+        if (feet.getSquaredDistance(trapdoorPos) > 9) {
+            BlockPos far = pearlStandSpot(trapdoorPos);
+            if (far != null && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveToPrecise(far);
+            }
+            return false;
+        }
+        boolean unsafe = feet.equals(trapdoorPos)
+            || feet.equals(water)
+            || mc.player.isTouchingWater()
+            || mc.world.getBlockState(feet.down()).getBlock() instanceof TrapdoorBlock
+            || !mc.world.getBlockState(feet.down()).getFluidState().isEmpty();
+        if (!unsafe) {
+            throwSafeSpot = feet;
+            return true;
+        }
+        BlockPos spot = pearlStandSpot(trapdoorPos);
+        if (spot == null) {
+            // 四周没有可站的实心格：只能原地小心处理
+            throwSafeSpot = feet;
+            return true;
+        }
+        if (feet.getSquaredDistance(spot) <= 2.25) {
+            throwSafeSpot = mc.player.getBlockPos();
+            return true;
+        }
+        if (!PathManagers.get().isPathing()) {
+            PathManagers.get().moveToPrecise(spot);
+        }
+        return false;
+    }
+
+    /**
+     * 投掷子流程（V6.7p3）：检珍珠 → 校正站位 → 开活板门 → 潜行走近 → 投掷 → 退回 → 校验（失败重试 3 次）。
+     */
     private void trioThrow() {
-        BlockPos stand = trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
+        BlockPos stand = trioTrapdoor();
         if (stand.equals(BlockPos.ORIGIN)) {
             enterStuck("请先设置" + trioZone + "的活板门位置");
             return;
         }
         BlockPos water = stand.down(1);
-        // ① 先检测气泡柱里有没有自己的珍珠：有就不再投（省珍珠，也避免二次投放触发）
-        if (ownPearlInColumn(water)) {
-            debugMsg("气泡柱里已有自己的珍珠，跳过投掷");
-            trioState = TrioState.SEND;
-            cooldown = 5;
-            return;
-        }
-        // ② 站到活板门旁边的实心格（不踩气泡柱）+ 确认活板门已打开
-        if (!prepareThrowPosition(stand)) return;
-        int slot = findPearlHotbarSlot();
-        if (slot < 0) {
-            int inv = findPearlIndexMainInventory();
-            if (inv >= 0) {
-                InvUtils.move().from(inv).toHotbar(mc.player.getInventory().getSelectedSlot());
-                cooldown = 5;
-                return;
+
+        switch (throwSub) {
+            case 0 -> {
+                if (ownPearlInColumn(water)) {
+                    debugMsg("气泡柱里已有自己的珍珠，跳过投掷");
+                    finishTrioThrow();
+                    return;
+                }
+                throwRetries = 0;
+                throwSub = 1;
             }
-            enterStuck("快捷栏里没有末影珍珠");
-            return;
+            case 1 -> {
+                if (settlePosition(stand)) throwSub = 2;
+            }
+            case 2 -> {
+                if (trapdoorIsOpenOrAbsent(stand)) {
+                    throwSub = 3;
+                    walkTicks = 0;
+                    stallTicks = 0;
+                    lastWalkX = mc.player.getX();
+                    lastWalkZ = mc.player.getZ();
+                } else {
+                    BlockClicker.clickBlockFacingPlayer(stand, true, Hand.MAIN_HAND);
+                    cooldown = 10;
+                }
+            }
+            case 3 -> {
+                if (walkToColumnCenter(stand)) {
+                    throwSub = 4;
+                    cooldown = 2;
+                }
+            }
+            case 4 -> {
+                int slot = findPearlHotbarSlot();
+                if (slot < 0) {
+                    int inv = findPearlIndexMainInventory();
+                    if (inv >= 0) {
+                        InvUtils.move().from(inv).toHotbar(mc.player.getInventory().getSelectedSlot());
+                        cooldown = 5;
+                        return;
+                    }
+                    enterStuck("快捷栏里没有末影珍珠");
+                    return;
+                }
+                sneakForThrow();
+                doThrowPearl(slot, Vec3d.ofCenter(water));
+                throwSub = 5;
+                cooldown = 5;
+            }
+            case 5 -> {
+                if (backOffToSafe()) {
+                    throwSub = 6;
+                    verifyStartTick = tick;
+                }
+            }
+            case 6 -> {
+                if (ownPearlInColumn(water)) {
+                    lastPearlThrowTick = tick;
+                    finishTrioThrow();
+                } else if (tick - verifyStartTick > 60) {
+                    throwRetries++;
+                    if (throwRetries >= 3) {
+                        enterStuck("投掷珍珠 3 次失败（气泡柱里没有检测到自己的珍珠）");
+                    } else {
+                        debugMsg("投掷校验失败，第 " + throwRetries + " 次重试");
+                        throwSub = 2;
+                        cooldown = 10;
+                    }
+                }
+            }
         }
-        // ③ 按住 shift、视线看向气泡柱中心投掷，投完立刻按 S 后退
-        sneakForThrow();
-        doThrowPearl(slot, Vec3d.ofCenter(water));
-        throwAttempts++;
-        verifyStartTick = tick;
-        trioState = TrioState.VERIFY;
     }
 
-    private void trioVerify() {
-        BlockPos stand = trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
-        if (ownPearlInColumn(stand.down(1))) {
-            lastPearlThrowTick = tick;
-            trioState = TrioState.SEND;
-            cooldown = 10;
-            return;
+    /** 投掷流程收尾：松键、回到“取货/存货”阶段。 */
+    private void finishTrioThrow() {
+        releaseSneak();
+        releaseForward();
+        throwSub = 0;
+        throwRetries = 0;
+        trioState = trioZone == StashMoveLogic.Zone.STORE ? TrioState.UNLOAD : TrioState.LOOT;
+        cooldown = 5;
+        progress();
+    }
+
+    /** 活板门是否已打开（方块不是活板门时按“无需打开”处理，避免死循环点击）。 */
+    private boolean trapdoorIsOpenOrAbsent(BlockPos pos) {
+        var state = mc.world.getBlockState(pos);
+        if (!(state.getBlock() instanceof TrapdoorBlock)) return true;
+        return state.get(TrapdoorBlock.OPEN);
+    }
+
+    /**
+     * ③ 按住 shift + pitch 90，朝气泡柱中心按前进键，直到走不动。
+     *
+     * <p>停滞判定：连续 3 tick 水平位移 &lt; 0.05 格；另加 30 tick 上限保护。
+     *
+     * @return true = 已经到边缘/走不动，可以投掷
+     */
+    private boolean walkToColumnCenter(BlockPos trapdoorPos) {
+        sneakForThrow();
+        Vec3d center = Vec3d.ofCenter(trapdoorPos.down(1));
+        double dx = center.x - mc.player.getX();
+        double dz = center.z - mc.player.getZ();
+        mc.player.setYaw((float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
+        mc.player.setPitch(90f);
+        mc.options.forwardKey.setPressed(true);
+        forwardHeld = true;
+        walkTicks++;
+
+        boolean stalled = StashMoveLogic.isStalled(lastWalkX, lastWalkZ, mc.player.getX(), mc.player.getZ(), 0.05);
+        lastWalkX = mc.player.getX();
+        lastWalkZ = mc.player.getZ();
+        if (stallTicks == 0) {
+            stallTicks = 1;
+            return false;
         }
-        if (tick - verifyStartTick > 60) {
-            if (throwAttempts >= 3) {
-                enterStuck("投掷珍珠失败（水柱里没有检测到自己的珍珠）");
-            } else {
-                trioState = TrioState.THROW;
-                cooldown = 20;
-            }
+        stallTicks = stalled ? stallTicks + 1 : 1;
+
+        if (stallTicks >= 3 || walkTicks >= 30) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            walkTicks = 0;
+            stallTicks = 0;
+            return true;
         }
+        return false;
+    }
+
+    /** ④ 松开 shift、按 S 退离气泡柱，回到投掷前的原位。 */
+    private boolean backOffToSafe() {
+        releaseSneak();
+        if (backoffTicks > 0) return false;   // 投完已在按 S 后退，等它走完
+        if (throwSafeSpot == null) return true;
+        if (mc.player.getBlockPos().getSquaredDistance(throwSafeSpot) <= 4) return true;
+        if (!PathManagers.get().isPathing()) {
+            PathManagers.get().moveToPrecise(throwSafeSpot);
+        }
+        return false;
     }
 
     private void trioSend() {
@@ -1351,7 +1527,9 @@ public class StashMover extends Module {
             blacklist.clear();
             chestQueue.clear();
             queueIndex = 0;
-            trioState = trioZone == StashMoveLogic.Zone.STORE ? TrioState.UNLOAD : TrioState.LOOT;
+            throwSub = 0;
+            throwRetries = 0;
+            trioState = TrioState.SETTLE;   // V6.7p3：到位后先走离气泡柱再干活
             info("已到达" + trioZone);
             progress();
             return;
@@ -1588,8 +1766,15 @@ public class StashMover extends Module {
         closeScreen();
         mc.player.getInventory().setSelectedSlot(hotbarSlot);
 
-        float[] yp = FacingLogic.yawPitchTo(aim.x, aim.y, aim.z,
-            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
+        double hd = Math.hypot(aim.x - mc.player.getX(), aim.z - mc.player.getZ());
+        float[] yp;
+        if (hd <= 0.5) {
+            // 已经站在气泡柱正上方：pitch 90 垂直向下投
+            yp = new float[]{mc.player.getYaw(), 90f};
+        } else {
+            yp = FacingLogic.yawPitchTo(aim.x, aim.y, aim.z,
+                mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
+        }
         RotationManager.getInstance().register(new Rotation(yp[0], yp[1]).setPriority(10));
         mc.player.setYaw(yp[0]);
         mc.player.setPitch(yp[1]);
@@ -1698,8 +1883,24 @@ public class StashMover extends Module {
         return false;
     }
 
+    /**
+     * 当前打开的容器（V6.7p3：同时支持箱子类与<b>放下的潜影盒</b>）。
+     *
+     * <p>放下的潜影盒界面是 {@link ShulkerBoxScreenHandler}，旧实现只认
+     * {@link GenericContainerScreenHandler}，导致「珍珠箱 = 潜影盒」时永远判定“没打开箱子”、
+     * 补货逻辑一直不执行。这里统一返回容器 handler，拿不到返回 null。
+     */
+    private ScreenHandler containerHandler() {
+        if (mc.player == null) return null;
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        if (handler == null || handler == mc.player.playerScreenHandler) return null;
+        if (StashMoveLogic.isSupportedContainer(handler instanceof GenericContainerScreenHandler,
+            handler instanceof ShulkerBoxScreenHandler)) return handler;
+        return null;
+    }
+
     private boolean containerOpen() {
-        return mc.player != null && mc.player.currentScreenHandler instanceof GenericContainerScreenHandler;
+        return containerHandler() != null;
     }
 
     private void closeScreen() {
@@ -1711,13 +1912,15 @@ public class StashMover extends Module {
     }
 
     private void clickSlot(int slot, SlotActionType type, int button) {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return;
         mc.interactionManager.clickSlot(handler.syncId, slot, button, type, mc.player);
     }
 
     /** 容器区（非玩家背包）拿物品：拿一摞就返回 true；已空返回 false。 */
     private boolean takeFromContainer() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
         int size = handler.slots.size();
         for (int i = 0; i < size - 36; i++) {
             ItemStack stack = handler.getSlot(i).getStack();
@@ -1751,7 +1954,8 @@ public class StashMover extends Module {
     }
 
     private boolean containerIsFull() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
         int size = handler.slots.size();
         for (int i = 0; i < size - 36; i++) {
             if (handler.getSlot(i).getStack().isEmpty()) return false;
@@ -1760,7 +1964,8 @@ public class StashMover extends Module {
     }
 
     private boolean containerEmpty() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return false;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
         int size = handler.slots.size();
         for (int i = 0; i < size - 36; i++) {
             if (!handler.getSlot(i).getStack().isEmpty()) return false;
@@ -1769,7 +1974,8 @@ public class StashMover extends Module {
     }
 
     private int findInventorySlotToUnload() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return -1;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
         int size = handler.slots.size();
         for (int i = size - 36; i < size; i++) {
             ItemStack stack = handler.getSlot(i).getStack();
@@ -1799,7 +2005,8 @@ public class StashMover extends Module {
     }
 
     private int findPearlSlotInContainer() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return -1;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
         int size = handler.slots.size();
         for (int i = 0; i < size - 36; i++) {
             if (handler.getSlot(i).getStack().isOf(Items.ENDER_PEARL)) return i;
@@ -1808,7 +2015,8 @@ public class StashMover extends Module {
     }
 
     private int findPearlSlotInInventory() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return -1;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
         int size = handler.slots.size();
         for (int i = size - 36; i < size; i++) {
             if (handler.getSlot(i).getStack().isOf(Items.ENDER_PEARL)) return i;
@@ -1817,7 +2025,8 @@ public class StashMover extends Module {
     }
 
     private int findEmptyInventorySlot() {
-        if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return -1;
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
         int size = handler.slots.size();
         for (int i = size - 36; i < size; i++) {
             if (handler.getSlot(i).getStack().isEmpty()) return i;

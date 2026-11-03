@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p2`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p2-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p3`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p3-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -345,6 +345,22 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - ⚠️ 注意：柱里没珍珠时仍然是「先投（充值回程票）再发拉我N」——这是刻意顺序，
     否则被拉走后本区没有可释放的珍珠，下一趟回不来。
   - 寻路统一加 `isPathing()` 守卫，避免每 tick 重置 Baritone 目标。
+- ✅ 6.7p3 已修复：**三号模式补珍珠不补 + 投掷流程按用户口径重做**。
+  - ① **容器识别支持潜影盒**（用户场景：珍珠箱是「放下的潜影盒」，珍珠一组组散放在里面）：
+    `containerHandler()` 同时认 `GenericContainerScreenHandler`（箱子/木桶/漏斗/发射器）与
+    `ShulkerBoxScreenHandler`；纯逻辑 `StashMoveLogic.isSupportedContainer(...)` 可单测。
+    旧实现只认前者 → 潜影盒界面永远判定“没打开箱子”，补货逻辑从不执行——这就是「不补珍珠」的根因。
+  - ② **三号状态机重排**（用户口径：投珍珠 → 取货/存货 → 才发私信）：
+    `SETTLE（校正站位）→ RESTOCK（补货）→ THROW（投掷子流程）→ LOOT/UNLOAD → SEND → WAIT_TELEPORT`；
+    到达新区域与模块启动都从 SETTLE 开始。
+  - ③ **投掷子流程 5 步**（THROW 内部 `throwSub` 0~6）：
+    0 检气泡柱（已有自己的珍珠直接跳过）；1 校正站位（不在气泡柱/活板门上，远离时先寻路回来）；
+    2 检查活板门，关着就用 BlockClicker 点开；3 按住 shift + pitch 90 朝柱心按前进键，
+    `isStalled` 连续 3 tick 位移 <0.05 格 = 走不动（30 tick 上限）；4 投掷（正上方 ≤0.5 格时
+    pitch 90 垂直向下，否则 `FacingLogic.yawPitchTo` 瞄准柱心）；5 松 shift + 按 S 退回原位；
+    6 校验柱内自有珍珠，失败重试整个流程最多 3 次 → 报警暂停。
+  - ⚠️ 用户明确要求：**双号模式本轮不改**，先只修三号模式（容器识别是公共函数，双号顺带支持潜影盒）。
+  - 测试：新增 2 个（容器识别 / 走不动判定），全仓 **50 套件 400 测试全绿**。
 
 ## 硬性规范（每次改动必须执行）
 1. **每次改动完成后，都必须创建一个对应的 Git commit**，以便后续追踪和回滚。

@@ -112,4 +112,26 @@ class StashMoveLogicTest {
     void 空ID不卸() {
         assertFalse(StashMoveLogic.shouldUnload(null, false));
     }
+
+    // ==================== 容器识别 / 停滞判定（V6.7p3） ====================
+
+    @Test
+    void 箱子与潜影盒都算容器() {
+        assertTrue(StashMoveLogic.isSupportedContainer(true, false));
+        assertTrue(StashMoveLogic.isSupportedContainer(false, true));
+        assertTrue(StashMoveLogic.isSupportedContainer(true, true));
+        assertFalse(StashMoveLogic.isSupportedContainer(false, false));
+    }
+
+    @Test
+    void 走不动判定() {
+        // 位移 0.01 格（被边沿挡住，几乎不动）→ 停滞
+        assertTrue(StashMoveLogic.isStalled(0, 0, 0.01, 0, 0.05));
+        // 位移 0.06 格（还在走）→ 不算
+        assertFalse(StashMoveLogic.isStalled(0, 0, 0.06, 0, 0.05));
+        // 位移 1 格 → 不算
+        assertFalse(StashMoveLogic.isStalled(0, 0, 1, 0, 0.05));
+        // 斜向位移 0.04/0.02（合计约 0.045）→ 仍算停滞
+        assertTrue(StashMoveLogic.isStalled(0, 0, 0.04, 0.02, 0.05));
+    }
 }

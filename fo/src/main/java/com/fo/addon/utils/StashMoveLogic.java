@@ -63,8 +63,7 @@ public final class StashMoveLogic {
     }
 
     /**
-     * 卸货过滤（V6.7p1 修复）：哪些物品允许存进存储箱。
-     *
+     * 卸货过滤（V6.7p1 修复）：哪些物品允许存进存储箱。     *
      * <ul>
      *   <li>末影珍珠<b>永远不入库</b>——三号模式的珍珠是随身携带的“回程票”，
      *       双号模式万一还珍珠失败也不能把它存掉；</li>
@@ -89,5 +88,25 @@ public final class StashMoveLogic {
         // 顺时针 (x,z) → (-z, x)；逆时针 → (z, -x)
         if (left) return new int[]{-facingZ, facingX};
         return new int[]{facingZ, -facingX};
+    }
+
+    /**
+     * 支持的容器界面类型（V6.7p3）：箱子类（含木桶/漏斗/发射器）与<b>放下的潜影盒</b>。
+     *
+     * <p>放下的潜影盒界面是 ShulkerBoxScreenHandler，旧实现只认 GenericContainerScreenHandler，
+     * 导致「珍珠箱 = 潜影盒」时永远判定“没打开箱子”、补货逻辑不执行。
+     */
+    public static boolean isSupportedContainer(boolean genericContainer, boolean shulkerBox) {
+        return genericContainer || shulkerBox;
+    }
+
+    /**
+     * 前进是否已“走不动”（用于潜行走到气泡柱边沿的判定）：
+     * 本 tick 水平位移小于 minMove 即算停滞。
+     */
+    public static boolean isStalled(double prevX, double prevZ, double nowX, double nowZ, double minMove) {
+        double dx = nowX - prevX;
+        double dz = nowZ - prevZ;
+        return dx * dx + dz * dz < minMove * minMove;
     }
 }
