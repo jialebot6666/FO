@@ -612,6 +612,10 @@ public class StashMover extends Module {
     private int walkTicks;
     private int walkPhase;
     private int escapeTicks;
+    /** 脱困目标格（每 20 tick 重算，玩家在水里浮沉时目标会变）。 */
+    private BlockPos escapeTarget;
+    /** 每个区第一次找到的安全站位（缓存后复用，避免每次传送过来都重新搜一遍）。 */
+    private final java.util.Map<StashMoveLogic.Zone, BlockPos> zoneSafeSpot = new java.util.HashMap<>();
     private int restockRetries;
     private long nextPearlCheckTick;
     private double lastWalkX;
@@ -685,6 +689,8 @@ public class StashMover extends Module {
         walkTicks = 0;
         walkPhase = 0;
         escapeTicks = 0;
+        escapeTarget = null;
+        zoneSafeSpot.clear();
         restockRetries = 0;
         nextPearlCheckTick = 0;
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
@@ -1373,29 +1379,52 @@ public class StashMover extends Module {
                 cooldown = 10;
                 return false;
             }
-            BlockPos escape = pearlStandSpot(trapdoorPos);
+            // 每 20 tick 重新找一次（玩家在水里会上下浮，目标格会变）；
+            // 优先用本区上次找到的安全格（结构没变就一直有效，省得每次重搜）
+            if (escapeTarget == null || tick % 20 == 0) {
+                BlockPos cached = zoneSafeSpot.get(trioZone);
+                escapeTarget = (cached != null && isStandable(cached)) ? cached : pearlStandSpot(trapdoorPos);
+            }
+            BlockPos escape = escapeTarget;
             if (escape == null) {
-                // 四周无处可站：不再静默放行，报警等手动处理
+                dumpStandSpotFailure(trapdoorPos);
+                // 兜底：真的没有可站格时，先按住 shift + 后退贴离水柱（不再直接停下等人）
+                if (escapeTicks < 40) {
+                    sneakForThrow();
+                    mc.options.backKey.setPressed(true);
+                    escapeTicks++;
+                    if (escapeTicks == 1) debugMsg("脱困：没找到可站格，先潜行后退离开水柱");
+                    return false;
+                }
                 releaseMovementKeys();
                 enterStuck("气泡柱周围找不到可站的实心格，请手动站到旁边");
                 return false;
             }
-            // 手动脱困：朝安全格方向游/走（水里同时按跳）
+            // 手动脱困：朝安全格方向游/走（水里或目标在上方时同时按跳）
             Vec3d c = Vec3d.ofCenter(escape);
             mc.player.setYaw((float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0));
             mc.options.forwardKey.setPressed(true);
             forwardHeld = true;
-            if (mc.player.isTouchingWater()) mc.options.jumpKey.setPressed(true);
-            escapeTicks++;
-            if (escapeTicks > 60) {
-                releaseMovementKeys();
-                enterStuck("无法脱离气泡柱，请手动处理");
+            if (mc.player.isTouchingWater() || escape.getY() > feet.getY()) {
+                mc.options.jumpKey.setPressed(true);
             }
-            debugMsg("脱困中：正在离开气泡柱 (" + escapeTicks + "/60)");
+            escapeTicks++;
+            if (escapeTicks > 120) {
+                releaseMovementKeys();
+                dumpStandSpotFailure(trapdoorPos);
+                enterStuck("无法脱离气泡柱（120 tick 未脱困），请手动处理");
+            }
+            if (debug.get() && escapeTicks % 20 == 1) {
+                debugMsg("脱困中：目标=" + escape.toShortString() + " (" + escapeTicks + "/120)");
+            }
             return false;
         }
         escapeTicks = 0;
-        mc.options.jumpKey.setPressed(false);
+        escapeTarget = null;
+        if (mc.options != null) {
+            mc.options.jumpKey.setPressed(false);
+            mc.options.backKey.setPressed(false);
+        }
 
         // ② 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
         if (feet.getSquaredDistance(trapdoorPos) > 9) {
@@ -1889,32 +1918,69 @@ public class StashMover extends Module {
      * 取离玩家最近的一个；找不到返回 null。
      */
     private BlockPos pearlStandSpot(BlockPos trapdoorPos) {
+        if (mc.world == null || trapdoorPos == null) return null;
         BlockPos playerPos = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
-        BlockPos best = null;
-        double bestD = Double.MAX_VALUE;
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    BlockPos p = trapdoorPos.add(dx, dy, dz);
-                    if (p.equals(trapdoorPos) || p.equals(water)) continue;
-                    if (!isStandable(p)) continue;
-                    double d = p.getSquaredDistance(playerPos);
-                    if (d < bestD) {
-                        bestD = d;
-                        best = p;
+        // V6.7p6：由近到远逐圈扫（半径 1→4），找到最近一圈就停；Y 范围放到 -2..3，
+        // 岸在水柱上一层/下一层都能找到（原来只扫 ±2 格、Y±1，珍珠房稍宽一点就一律判“没有实心格”）
+        for (int r = 1; r <= 4; r++) {
+            BlockPos best = null;
+            double bestD = Double.MAX_VALUE;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;   // 只扫本圈
+                    for (int dy = -2; dy <= 3; dy++) {
+                        BlockPos p = trapdoorPos.add(dx, dy, dz);
+                        if (p.equals(trapdoorPos) || p.equals(water)) continue;
+                        if (!isStandable(p)) continue;
+                        double d = p.getSquaredDistance(playerPos);
+                        if (d < bestD) {
+                            bestD = d;
+                            best = p;
+                        }
                     }
                 }
             }
+            if (best != null) {
+                zoneSafeSpot.put(trioZone, best);
+                return best;
+            }
         }
-        return best;
+        return null;
     }
 
-    /** 该格能不能站：脚下非空气且不是流体，身体两格空气。 */
+    /**
+     * 该格能不能站人（V6.7p6 改用碰撞箱判定）。
+     *
+     * <p>原来用 {@code isAir()} 判空，凡是「非空气但无碰撞」的方块（草、雪层、藤蔓、告示牌、
+     * 按钮、打开的活板门……）一律被判成“站不了”，于是明明旁边就是能站的地面也报
+     * 「找不到可站的实心格」。现在改成：本格与头顶无碰撞即可通行，脚下方块有碰撞且不含流体。
+     */
     private boolean isStandable(BlockPos p) {
+        if (!mc.world.getBlockState(p).getCollisionShape(mc.world, p).isEmpty()) return false;
+        if (!mc.world.getBlockState(p.up()).getCollisionShape(mc.world, p.up()).isEmpty()) return false;
         var below = mc.world.getBlockState(p.down());
-        if (below.isAir() || !below.getFluidState().isEmpty()) return false;
-        return mc.world.getBlockState(p).isAir() && mc.world.getBlockState(p.up()).isAir();
+        if (below.getCollisionShape(mc.world, p.down()).isEmpty()) return false;
+        return below.getFluidState().isEmpty();
+    }
+
+    /** 找不到安全格时把玩家/活板门周边的实际方块打到调试输出，方便定位结构问题。 */
+    private void dumpStandSpotFailure(BlockPos trapdoorPos) {
+        if (!debug.get() || mc.world == null || mc.player == null) return;
+        BlockPos feet = mc.player.getBlockPos();
+        BlockPos water = trapdoorPos.down(1);
+        debugMsg("[脱困] 找不到可站格｜玩家格=" + feet.toShortString()
+            + " 自身=" + blockName(feet)
+            + " 脚下=" + blockName(feet.down())
+            + " 水中=" + mc.player.isTouchingWater()
+            + "｜活板门=" + trapdoorPos.toShortString()
+            + " 打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
+            + " 水格=" + blockName(water));
+    }
+
+    private String blockName(BlockPos p) {
+        if (mc.world == null) return "?";
+        return net.minecraft.registry.Registries.BLOCK.getId(mc.world.getBlockState(p).getBlock()).getPath();
     }
 
     /**
