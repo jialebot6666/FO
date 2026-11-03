@@ -101,6 +101,13 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 投掷后是否还需要继续后退：离气泡柱中心的水平距离小于安全距离就要继续退。
+     */
+    public static boolean needMoreBackoff(double distanceToColumn, double safeDistance) {
+        return distanceToColumn < safeDistance;
+    }
+
+    /**
      * 前进是否已“走不动”（用于潜行走到气泡柱边沿的判定）：
      * 本 tick 水平位移小于 minMove 即算停滞。
      */

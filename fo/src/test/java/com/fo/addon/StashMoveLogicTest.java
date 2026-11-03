@@ -134,4 +134,14 @@ class StashMoveLogicTest {
         // 斜向位移 0.04/0.02（合计约 0.045）→ 仍算停滞
         assertTrue(StashMoveLogic.isStalled(0, 0, 0.04, 0.02, 0.05));
     }
+
+    @Test
+    void 后退距离判定() {
+        // 离气泡柱中心不到 2.5 格 → 继续退
+        assertTrue(StashMoveLogic.needMoreBackoff(1.0, 2.5));
+        assertTrue(StashMoveLogic.needMoreBackoff(2.49, 2.5));
+        // 已经 2.5 格及以上 → 可以停
+        assertFalse(StashMoveLogic.needMoreBackoff(2.5, 2.5));
+        assertFalse(StashMoveLogic.needMoreBackoff(4.0, 2.5));
+    }
 }

@@ -604,6 +604,10 @@ public class StashMover extends Module {
     private BlockPos throwSafeSpot;
     private int stallTicks;
     private int walkTicks;
+    private int walkPhase;
+    private int escapeTicks;
+    private int restockRetries;
+    private long nextPearlCheckTick;
     private double lastWalkX;
     private double lastWalkZ;
     private StashMoveLogic.Zone trioZone = StashMoveLogic.Zone.UNKNOWN;
@@ -669,6 +673,10 @@ public class StashMover extends Module {
         throwSafeSpot = null;
         stallTicks = 0;
         walkTicks = 0;
+        walkPhase = 0;
+        escapeTicks = 0;
+        restockRetries = 0;
+        nextPearlCheckTick = 0;
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
@@ -1145,6 +1153,29 @@ public class StashMover extends Module {
             enterStuck("长时间没有进展（2 分钟无有效动作）");
             return;
         }
+
+        // V6.7p4：取货/存货期间每 5 秒确认一次本区珍珠还在（被踩掉就回去重投）
+        if ((trioState == TrioState.LOOT || trioState == TrioState.UNLOAD)
+            && tick >= nextPearlCheckTick) {
+            nextPearlCheckTick = tick + 100;
+            if (!ownPearlInColumn(trioTrapdoor().down(1))) {
+                closeScreen();
+                releaseMovementKeys();
+                info("检测到本区珍珠消失（可能踩到气泡柱），重新投掷");
+                throwSub = 0;
+                throwRetries = 0;
+                trioState = TrioState.THROW;
+                return;
+            }
+        }
+
+        // V6.7p4：干活期间出现位置突跳 = 意外传送（踩到珍珠被拉走），停下来等人工确认
+        if ((trioState == TrioState.LOOT || trioState == TrioState.UNLOAD) && lastPos != null
+            && StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, mc.player.getX(), mc.player.getZ(), 32)) {
+            enterStuck("检测到意外传送（可能踩到气泡柱），请手动检查");
+            return;
+        }
+
         switch (trioState) {
             case SETTLE -> trioSettle();
             case RESTOCK -> trioRestock();
@@ -1234,20 +1265,17 @@ public class StashMover extends Module {
             trioState = TrioState.THROW;
             return;
         }
-        // 珍珠箱离得太远（不在本区）时先用剩余珍珠，耗尽了再报警
+        // V6.7p4：取消 64 格距离闸——珍珠不够就寻路过去补（走不过去由看门狗报警）
         double distSq = mc.player.getBlockPos().getSquaredDistance(chestPos);
-        if (!containerOpen() && distSq > 64 * 64) {
-            if (have > 0) {
-                debugMsg("珍珠箱不在附近，先用剩余 " + have + " 颗珍珠");
-                trioState = TrioState.THROW;
-            } else {
-                enterStuck("珍珠耗尽且珍珠箱不在附近");
-            }
-            return;
-        }
         if (!containerOpen()) {
+            // 开新容器前先关掉可能残留的界面，避免读到别的容器
+            if (mc.currentScreen != null) {
+                closeScreen();
+                cooldown = 5;
+                return;
+            }
             if (distSq > 400) {
-                PathManagers.get().moveTo(chestPos, true);
+                if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(chestPos, true);
                 return;
             }
             openChestAt(chestPos);
@@ -1260,7 +1288,20 @@ public class StashMover extends Module {
             restockChestSlot = findPearlSlotInContainer();
             restockInvSlot = findPearlSlotInInventory();
             if (restockChestSlot < 0) {
+                // V6.7p4：诊断 + 空读重试（排除槽位同步延迟 / 开错容器）
+                var handler = containerHandler();
+                debugMsg("[补珍珠] 界面=" + (handler == null ? "null" : handler.getClass().getSimpleName())
+                    + " 槽位=" + (handler == null ? 0 : handler.slots.size())
+                    + " 找到珍珠槽位=" + restockChestSlot);
                 closeScreen();
+                restockStepsLeft = 0;
+                if (restockRetries < 2) {
+                    restockRetries++;
+                    debugMsg("珍珠箱里没读到珍珠，第 " + restockRetries + " 次重开确认");
+                    cooldown = 20;
+                    return;
+                }
+                restockRetries = 0;
                 if (have > 0) {
                     info("珍珠箱里没有珍珠了，先用剩余 " + have + " 颗");
                     trioState = TrioState.THROW;
@@ -1269,6 +1310,7 @@ public class StashMover extends Module {
                 }
                 return;
             }
+            restockRetries = 0;
             if (restockInvSlot < 0) restockInvSlot = findEmptyInventorySlot();
             if (restockInvSlot < 0) {
                 closeScreen();
@@ -1325,7 +1367,45 @@ public class StashMover extends Module {
         if (mc.player == null) return false;
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
-        // 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
+
+        // ① 先脱困（V6.7p4）：被活板门压住 / 泡在气泡柱里时，必须先开活板门再往外挪
+        boolean insideTrapdoor = feet.equals(trapdoorPos)
+            || mc.world.getBlockState(feet).getBlock() instanceof TrapdoorBlock
+            || mc.world.getBlockState(feet.down()).getBlock() instanceof TrapdoorBlock;
+        boolean inWater = mc.player.isTouchingWater() || feet.equals(water)
+            || !mc.world.getBlockState(feet.down()).getFluidState().isEmpty();
+        if (insideTrapdoor || inWater) {
+            if (!trapdoorIsOpenOrAbsent(trapdoorPos)) {
+                debugMsg("脱困：先打开活板门");
+                BlockClicker.clickBlockFacingPlayer(trapdoorPos, true, Hand.MAIN_HAND);
+                cooldown = 10;
+                return false;
+            }
+            BlockPos escape = pearlStandSpot(trapdoorPos);
+            if (escape == null) {
+                // 四周无处可站：不再静默放行，报警等手动处理
+                releaseMovementKeys();
+                enterStuck("气泡柱周围找不到可站的实心格，请手动站到旁边");
+                return false;
+            }
+            // 手动脱困：朝安全格方向游/走（水里同时按跳）
+            Vec3d c = Vec3d.ofCenter(escape);
+            mc.player.setYaw((float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0));
+            mc.options.forwardKey.setPressed(true);
+            forwardHeld = true;
+            if (mc.player.isTouchingWater()) mc.options.jumpKey.setPressed(true);
+            escapeTicks++;
+            if (escapeTicks > 60) {
+                releaseMovementKeys();
+                enterStuck("无法脱离气泡柱，请手动处理");
+            }
+            debugMsg("脱困中：正在离开气泡柱 (" + escapeTicks + "/60)");
+            return false;
+        }
+        escapeTicks = 0;
+        mc.options.jumpKey.setPressed(false);
+
+        // ② 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
         if (feet.getSquaredDistance(trapdoorPos) > 9) {
             BlockPos far = pearlStandSpot(trapdoorPos);
             if (far != null && !PathManagers.get().isPathing()) {
@@ -1333,29 +1413,8 @@ public class StashMover extends Module {
             }
             return false;
         }
-        boolean unsafe = feet.equals(trapdoorPos)
-            || feet.equals(water)
-            || mc.player.isTouchingWater()
-            || mc.world.getBlockState(feet.down()).getBlock() instanceof TrapdoorBlock
-            || !mc.world.getBlockState(feet.down()).getFluidState().isEmpty();
-        if (!unsafe) {
-            throwSafeSpot = feet;
-            return true;
-        }
-        BlockPos spot = pearlStandSpot(trapdoorPos);
-        if (spot == null) {
-            // 四周没有可站的实心格：只能原地小心处理
-            throwSafeSpot = feet;
-            return true;
-        }
-        if (feet.getSquaredDistance(spot) <= 2.25) {
-            throwSafeSpot = mc.player.getBlockPos();
-            return true;
-        }
-        if (!PathManagers.get().isPathing()) {
-            PathManagers.get().moveToPrecise(spot);
-        }
-        return false;
+        throwSafeSpot = feet;
+        return true;
     }
 
     /**
@@ -1395,8 +1454,13 @@ public class StashMover extends Module {
                 }
             }
             case 3 -> {
-                if (walkToColumnCenter(stand)) {
+                int r = walkToColumnCenter(stand);
+                if (r == 1) {
                     throwSub = 4;
+                    cooldown = 2;
+                } else if (r == 2) {
+                    debugMsg("走近时踩进气泡柱，先退开再重试");
+                    throwSub = 5;
                     cooldown = 2;
                 }
             }
@@ -1466,15 +1530,24 @@ public class StashMover extends Module {
      *
      * @return true = 已经到边缘/走不动，可以投掷
      */
-    private boolean walkToColumnCenter(BlockPos trapdoorPos) {
+    private int walkToColumnCenter(BlockPos trapdoorPos) {
         sneakForThrow();
         Vec3d center = Vec3d.ofCenter(trapdoorPos.down(1));
-        double dx = center.x - mc.player.getX();
-        double dz = center.z - mc.player.getZ();
-        mc.player.setYaw((float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
+        mc.player.setYaw((float) (Math.toDegrees(Math.atan2(center.z - mc.player.getZ(), center.x - mc.player.getX())) - 90.0));
         mc.player.setPitch(90f);
-        mc.options.forwardKey.setPressed(true);
-        forwardHeld = true;
+
+        // 踩进气泡柱了：立刻停手，交给后退阶段（V6.7p4）
+        if (mc.player.isTouchingWater()) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            return 2;
+        }
+
+        // 慢速点按：每 3 tick 只按 1 tick，走一小步就重新判定（原来每 tick 按住容易冲过头）
+        walkPhase = (walkPhase + 1) % 3;
+        boolean press = walkPhase == 0;
+        mc.options.forwardKey.setPressed(press);
+        forwardHeld = press;
         walkTicks++;
 
         boolean stalled = StashMoveLogic.isStalled(lastWalkX, lastWalkZ, mc.player.getX(), mc.player.getZ(), 0.05);
@@ -1482,24 +1555,47 @@ public class StashMover extends Module {
         lastWalkZ = mc.player.getZ();
         if (stallTicks == 0) {
             stallTicks = 1;
-            return false;
+            return 0;
         }
         stallTicks = stalled ? stallTicks + 1 : 1;
 
-        if (stallTicks >= 3 || walkTicks >= 30) {
+        if (stallTicks >= 3 || walkTicks >= 45) {
             mc.options.forwardKey.setPressed(false);
             forwardHeld = false;
             walkTicks = 0;
             stallTicks = 0;
-            return true;
+            return 1;
         }
-        return false;
+        return 0;
     }
 
-    /** ④ 松开 shift、按 S 退离气泡柱，回到投掷前的原位。 */
+    /** ④ 松开 shift、按 S 退离气泡柱（退到离柱心 ≥2.5 格），再回到投掷前的原位。 */
     private boolean backOffToSafe() {
         releaseSneak();
-        if (backoffTicks > 0) return false;   // 投完已在按 S 后退，等它走完
+        BlockPos water = trioTrapdoor().down(1);
+        Vec3d center = Vec3d.ofCenter(water);
+        double dist = Math.hypot(center.x - mc.player.getX(), center.z - mc.player.getZ());
+
+        if (StashMoveLogic.needMoreBackoff(dist, 2.5)) {
+            // 还没退够：继续按 S（tick 处理器会在 backoffTicks 归零时松开）
+            if (backoffTicks <= 0) {
+                backoffTicks = 20;
+                progress();
+            }
+            if (mc.player.isTouchingWater()) {
+                // 在水里按 S 退不快，改用跳+后退
+                mc.options.jumpKey.setPressed(true);
+            }
+            return false;
+        }
+
+        // 退够了：立刻松键，避免继续退过头
+        if (mc.options != null) {
+            mc.options.backKey.setPressed(false);
+            mc.options.jumpKey.setPressed(false);
+        }
+        backoffTicks = 0;
+
         if (throwSafeSpot == null) return true;
         if (mc.player.getBlockPos().getSquaredDistance(throwSafeSpot) <= 4) return true;
         if (!PathManagers.get().isPathing()) {
@@ -1509,6 +1605,14 @@ public class StashMover extends Module {
     }
 
     private void trioSend() {
+        // V6.7p4：发私信前再确认一次本区珍珠还在（被踩掉就不要发，回去重投）
+        if (!ownPearlInColumn(trioTrapdoor().down(1))) {
+            info("发私信前发现本区珍珠不在了，回去重投");
+            throwSub = 0;
+            throwRetries = 0;
+            trioState = TrioState.THROW;
+            return;
+        }
         String target = trioZone == StashMoveLogic.Zone.SOURCE ? peerStore.get().trim() : peerSource.get().trim();
         if (target.isEmpty()) {
             enterStuck(trioZone == StashMoveLogic.Zone.SOURCE ? "请填写 3号ID（存储箱端）" : "请填写 2号ID（待搬运箱端）");
@@ -1783,7 +1887,7 @@ public class StashMover extends Module {
 
         RotationManager.getInstance().sync();
         releaseSneak();
-        backoffTicks = 10;   // 投完立即按 S 后退，避免脚踩气泡柱触发珍珠
+        backoffTicks = 60;   // 投完按 S 后退（实际按“离柱心 ≥2.5 格”提前停，60 只是上限）
         cooldown = 3;
         progress();
     }
@@ -2197,8 +2301,9 @@ public class StashMover extends Module {
     private void releaseMovementKeys() {
         releaseForward();
         releaseSneak();
-        if (backoffTicks > 0 && mc.options != null) {
+        if (mc.options != null) {
             mc.options.backKey.setPressed(false);
+            mc.options.jumpKey.setPressed(false);
         }
         backoffTicks = 0;
     }
