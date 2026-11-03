@@ -575,6 +575,12 @@ public class StashMover extends Module {
     private final List<BlockPos> chestQueue = new ArrayList<>();
     private int queueIndex;
     private BlockPos openChest;
+    /** 连续点击同一个箱子却没打开的次数（点不开就报错，不再无限沉默重试）。 */
+    private int openAttempts;
+    /** 当前寻路目标（寻路守卫：同一目标不重复下发，避免每 tick 重置 Baritone 路径）。 */
+    private BlockPos pathTarget;
+    private long pathStartTick;
+    private int pathRetries;
     private boolean finalTrip;
     private int pullCount;
     private int expectedN;
@@ -650,6 +656,10 @@ public class StashMover extends Module {
         chestQueue.clear();
         queueIndex = 0;
         openChest = null;
+        openAttempts = 0;
+        pathTarget = null;
+        pathStartTick = 0;
+        pathRetries = 0;
         finalTrip = false;
         ackReceived = false;
         resendCount = 0;
@@ -708,6 +718,9 @@ public class StashMover extends Module {
         if (mc.player == null || mc.world == null) return;
         tick++;
         lastPos = lastPos == null ? mc.player.getEntityPos() : lastPos;
+
+        // 容器已打开 → 说明上一次点击成功，点击失败计数归零
+        if (containerOpen()) openAttempts = 0;
 
         // 投完珍珠立即按 S 后退，避免站在气泡柱上触发珍珠（每 tick 处理，不受动作冷却影响）
         if (backoffTicks > 0) {
@@ -816,10 +829,7 @@ public class StashMover extends Module {
             warnThrottled("箱子搜索半径内没有待搬运箱，请检查重生点是否在箱子旁边");
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(chest) > 20) {
-            PathManagers.get().moveTo(chest, true);
-            return;
-        }
+        if (!approachForOpen(chest)) return;
         openChestAt(chest);
     }
 
@@ -900,10 +910,7 @@ public class StashMover extends Module {
             cooldown = Math.max(1, clickDelay.get());
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(chestPos) > 20) {
-            PathManagers.get().moveTo(chestPos, true);
-            return;
-        }
+        if (!approachForOpen(chestPos)) return;
         openChestAt(chestPos);
     }
 
@@ -976,10 +983,7 @@ public class StashMover extends Module {
             return;
         }
         BlockPos chestPos = pearlChest.get();
-        if (mc.player.getBlockPos().getSquaredDistance(chestPos) > 20) {
-            PathManagers.get().moveTo(chestPos, true);
-            return;
-        }
+        if (!approachForOpen(chestPos)) return;
         openChestAt(chestPos);
     }
 
@@ -989,14 +993,11 @@ public class StashMover extends Module {
             enterStuck("请先设置存储箱位置");
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(store) > 20) {
-            PathManagers.get().moveTo(store, true);
-            return;
-        }
         if (containerOpen()) {
             moverState = MoverState.UNLOAD;
             return;
         }
+        if (!approachForOpen(store)) return;
         openChestAt(store);
     }
 
@@ -1103,10 +1104,7 @@ public class StashMover extends Module {
             return;
         }
         if (!containerOpen()) {
-            if (mc.player.getBlockPos().getSquaredDistance(chestPos) > 20) {
-                PathManagers.get().moveTo(chestPos, true);
-                return;
-            }
+            if (!approachForOpen(chestPos)) return;
             openChestAt(chestPos);
             return;
         }
@@ -1206,10 +1204,7 @@ public class StashMover extends Module {
             enterStuck("待搬运箱区已搬空（没有可搬的箱子了）");
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(chest) > 20) {
-            PathManagers.get().moveTo(chest, true);
-            return;
-        }
+        if (!approachForOpen(chest)) return;
         openChestAt(chest);
     }
 
@@ -1230,10 +1225,7 @@ public class StashMover extends Module {
                 enterStuck("存储箱不存在");
                 return;
             }
-            if (mc.player.getBlockPos().getSquaredDistance(store) > 20) {
-                PathManagers.get().moveTo(store, true);
-                return;
-            }
+            if (!approachForOpen(store)) return;
             openChestAt(store);
             return;
         }
@@ -2165,9 +2157,80 @@ public class StashMover extends Module {
         return -1;
     }
 
+    /** 开箱的有效距离（眼睛到方块中心，单位格）。超过就先寻路靠近，绝不隔空点。 */
+    private static final double OPEN_REACH = 3.5;
+
+    /**
+     * 统一的“走过去”入口（V6.7p5）。
+     *
+     * <p>旧实现在自动搜索 / 单箱 / 存储箱等分支里<b>每 tick 裸调 moveTo</b>，Baritone 会每 tick
+     * 重新计算路径（等于永远走不完），表现就是“人站着不动、箱子离远一点就永远点不开”。
+     * 这里加守卫：同一目标正在走就不重复下发；走太久没到才重设，最多 2 次。
+     */
+    private void pathTo(BlockPos pos, boolean ignoreY) {
+        if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
+        if (!pos.equals(pathTarget)) {
+            pathTarget = pos;
+            pathStartTick = tick;
+            pathRetries = 0;
+            if (PathManagers.get().isPathing()) PathManagers.get().stop();
+            PathManagers.get().moveTo(pos, ignoreY);
+            return;
+        }
+        if (PathManagers.get().isPathing()) {
+            // 走太久还没到（可能被卡住/目标不可达）→ 重设目标
+            if (tick - pathStartTick > 240 && pathRetries < 2) {
+                pathRetries++;
+                pathStartTick = tick;
+                PathManagers.get().stop();
+                PathManagers.get().moveTo(pos, ignoreY);
+                debugMsg("寻路超时，重设目标（第 " + pathRetries + " 次）");
+            }
+            return;
+        }
+        // Baritone 自己停下了 → 隔 20 tick 再试一次，避免每 tick 重算
+        if (tick - pathStartTick > 20) {
+            pathStartTick = tick;
+            PathManagers.get().moveTo(pos, ignoreY);
+        }
+    }
+
+    /**
+     * 开箱前先靠近：眼睛到方块中心 ≤ {@link #OPEN_REACH} 格才允许点击。
+     *
+     * <p>服务端对交互有距离校验，隔空点击会被静默丢弃（表现为“点了没反应”）；
+     * 这里统一把“够不够近”前置判断，不够就先走。
+     *
+     * @return true = 已经在可点击范围内
+     */
+    private boolean approachForOpen(BlockPos pos) {
+        if (pos == null || pos.equals(BlockPos.ORIGIN)) return false;
+        Vec3d center = Vec3d.ofCenter(pos);
+        Vec3d eye = mc.player.getEyePos();
+        if (eye.distanceTo(center) <= OPEN_REACH) {
+            pathTarget = null;
+            return true;
+        }
+        // 已经站在方块正上方/正下方（XZ 基本重合）：GoalXZ 寻路不再有帮助，直接允许点击
+        // （否则会出现"XZ 距离=0、Baritone 认为已到达、却因为高度差永远判超距"的死循环）
+        if (Math.hypot(eye.x - center.x, eye.z - center.z) <= 1.2) {
+            pathTarget = null;
+            return true;
+        }
+        pathTo(pos, true);
+        return false;
+    }
+
     private void openChestAt(BlockPos pos) {
         if (pos == null) return;
         openChest = pos;
+        // 保险：调用方已经判过距离，这里再兜一次，避免别处漏判后隔空点击
+        if (!approachForOpen(pos)) return;
+        if (openAttempts >= 8) {
+            enterStuck("连续 8 次都打不开箱子 " + pos.toShortString() + "（检查是否被方块挡住或位置填错）");
+            return;
+        }
+        openAttempts++;
         BlockClicker.clickBlockFacingPlayer(pos, true, Hand.MAIN_HAND);
         cooldown = 15;
         progress();
@@ -2336,22 +2399,36 @@ public class StashMover extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
 
-        Color green = new Color(0, 255, 0, 100);
-        Color blue = new Color(0, 170, 255, 100);
-        Color yellow = new Color(255, 255, 0, 100);
-        Color orange = new Color(255, 140, 0, 100);
-        Color cyan = new Color(0, 255, 255, 100);
+        Color green = new Color(0, 255, 0, 100);        // 珍珠房活板门
+        Color blue = new Color(0, 170, 255, 100);       // 珍珠箱
+        Color yellow = new Color(255, 255, 0, 100);     // 存储箱
+        Color orange = new Color(255, 140, 0, 100);     // 已搬空拉黑
+        Color cyan = new Color(0, 255, 255, 100);       // 珍珠点（拉珍珠端）
+        Color source = new Color(255, 0, 200, 160);     // 待搬运箱（品红，最显眼）
+        Color faint = new Color(255, 0, 200, 45);       // 扫描到的其它待搬运箱（淡）
+        Color active = new Color(255, 255, 255, 220);   // 当前正在操作的箱子
 
         if (isMoverRole()) {
             if (mode.get() == Mode.MOVER) {
+                drawIfSet(event, targetChest.get(), source);    // 待搬运箱（单箱子模式的坐标）
                 drawIfSet(event, trapdoor.get(), green);
                 drawIfSet(event, pearlChest.get(), blue);
                 drawIfSet(event, storeChest.get(), yellow);
             } else {
+                drawIfSet(event, sourceTarget.get(), source);   // 待搬运箱（三号模式坐标）
                 drawIfSet(event, sourceTrapdoor.get(), green);
                 drawIfSet(event, storeTrapdoor.get(), green);
                 drawIfSet(event, trioPearlChest.get(), blue);
                 drawIfSet(event, trioStoreChest.get(), yellow);
+            }
+            // 自动/框选扫到的待搬运箱队列（当前目标另外用高亮画）
+            for (BlockPos p : chestQueue) {
+                if (p.equals(openChest)) continue;
+                event.renderer.box(p, faint, faint, ShapeMode.Sides, 0);
+            }
+            // 当前正在操作（要点开）的箱子：白框全亮，一眼看出它在开哪一格
+            if (openChest != null && !openChest.equals(BlockPos.ORIGIN)) {
+                event.renderer.box(openChest, active, active, ShapeMode.Both, 0);
             }
             for (BlockPos p : blacklist) {
                 event.renderer.box(p, orange, orange, ShapeMode.Sides, 0);

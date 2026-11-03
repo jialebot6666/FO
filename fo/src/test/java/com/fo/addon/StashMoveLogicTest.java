@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 分区判定 / 传送检测 / 双箱配对（V6.7 自动搬运三号模式）。 */
@@ -143,5 +144,40 @@ class StashMoveLogicTest {
         // 已经 2.5 格及以上 → 可以停
         assertFalse(StashMoveLogic.needMoreBackoff(2.5, 2.5));
         assertFalse(StashMoveLogic.needMoreBackoff(4.0, 2.5));
+    }
+
+    // ==================== 点击选面（V6.7p5） ====================
+
+    @Test
+    void 站斜上方优先点侧面() {
+        // 眼睛在方块东侧 +X 2 格、高 2 格：水平 2 >= 2*0.6 → 选东面
+        assertEquals(StashMoveLogic.FACE_EAST, StashMoveLogic.pickClickFace(2, 2, 0, false));
+        assertEquals(StashMoveLogic.FACE_WEST, StashMoveLogic.pickClickFace(-2, 2, 0, false));
+        assertEquals(StashMoveLogic.FACE_SOUTH, StashMoveLogic.pickClickFace(0, 2, 2, false));
+        assertEquals(StashMoveLogic.FACE_NORTH, StashMoveLogic.pickClickFace(0, 2, -2, false));
+    }
+
+    @Test
+    void 顶面被漏斗挡住时不选顶面() {
+        // 正上方、顶面空 → 可以点顶面
+        assertEquals(StashMoveLogic.FACE_UP, StashMoveLogic.pickClickFace(0, 2, 0, false));
+        // 正上方但顶上被漏斗占住 → 必须走侧面（旧实现会选顶面然后点不动）
+        int face = StashMoveLogic.pickClickFace(0, 2, 0, true);
+        assertNotEquals(StashMoveLogic.FACE_UP, face);
+    }
+
+    @Test
+    void 站在正下方永远不选底面() {
+        // 眼睛低于方块中心：水平 0、dy 为负 → 只能侧面
+        int face = StashMoveLogic.pickClickFace(0.2, -2, 0.1, false);
+        assertNotEquals(StashMoveLogic.FACE_UP, face);
+    }
+
+    @Test
+    void 水平方向取偏移更大的轴() {
+        // X 偏移更大 → 东/西
+        assertEquals(StashMoveLogic.FACE_EAST, StashMoveLogic.pickClickFace(3, 0.5, 1, false));
+        // Z 偏移更大 → 南/北
+        assertEquals(StashMoveLogic.FACE_SOUTH, StashMoveLogic.pickClickFace(0.5, 0.5, 3, false));
     }
 }

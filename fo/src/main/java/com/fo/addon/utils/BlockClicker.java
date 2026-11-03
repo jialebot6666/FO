@@ -1,5 +1,6 @@
 package com.fo.addon.utils;
 
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
@@ -10,21 +11,25 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 /**
- * 方块点击工具（流程原样移植自 meteor-miku 的 BaritoneUtil.clickBlock，用户指定用 miku 的实现，
- * 不复用自动种树那套）。
+ * 方块点击工具（流程移植自 meteor-miku 的 BaritoneUtil.clickBlock，用户指定用 miku 的实现）。
  *
- * <p>miku 的点击流程（逐步对齐，未做简化）：
+ * <p>miku 的点击流程（逐步对齐）：
  * <ol>
  *   <li>按目标面算出命中点（方块中心 + 面方向偏移 0.5）；</li>
  *   <li>挥手：客户端 swingHand + 服务端 HandSwingC2SPacket；</li>
- *   <li>旋转：{@link RotationManager#register} 发完整位置包（带目标 yaw/pitch）并同步摄像机；</li>
+ *   <li>旋转到目标朝向；</li>
  *   <li>发带 sequence 的 PlayerInteractBlockC2SPacket（FO 用 accesswidener 打开的
  *       PendingUpdateManager 取序列号，与 miku 的 IClientWorld 访问器等价）；</li>
- *   <li>{@link RotationManager#sync} 发回真实朝向，视角归位。</li>
+ *   <li>视角归位。</li>
  * </ol>
  *
- * <p>与 miku 唯一的差别：miku 通过 mixin 访问器取 PendingUpdateManager，FO 走 accesswidener
- * 暴露的 {@code ClientWorld.getPendingUpdateManager()}，取到的序列号与发包内容完全一致。
+ * <p>V6.7p5 改动（用户反馈“所有功能都不转头”）：
+ * 旋转改用 Meteor 的 {@link Rotations} 系统。miku 的 {@code RotationManager} 走的是
+ * {@code Rotations.setCamRotation}，而 Meteor 里它只影响第三人称的<b>身体朝向</b>
+ * （AvatarRendererMixin），第一人称摄像机完全不转，看起来就是“没反应”。
+ * 换成 {@code Rotations.rotate(yaw, pitch, priority, callback)} 后：
+ * ① 下一个移动包会带上目标朝向（服务端先看到朝向，再收到交互包，顺序有保证）；
+ * ② 客户端会临时把玩家朝向切到目标值（第一人称真的转头），回调后再归位。
  */
 public final class BlockClicker {
 
@@ -49,26 +54,44 @@ public final class BlockClicker {
 
         BlockHitResult result = new BlockHitResult(hitVec, side, pos, false);
 
-        // 3. 旋转（可选）
+        // 3~5. 转头 → 交互包 → 归位（由 Meteor 的 Rotations 在移动包前后完成）
         if (rotate) {
-            RotationManager.getInstance().register(new Rotation(hitVec).setPriority(10));
-        }
-
-        // 4. 带序列号的交互包（序列号语义对齐 miku 的 sendSequencedPacket）
-        sendSequencedPacket(hand, result);
-
-        // 5. 视角归位
-        if (rotate) {
-            RotationManager.getInstance().sync();
+            Rotation rotation = new Rotation(hitVec);
+            Rotations.rotate(rotation.getYaw(), rotation.getPitch(), 60,
+                () -> sendSequencedPacket(hand, result));
+        } else {
+            sendSequencedPacket(hand, result);
         }
     }
 
-    /** 以玩家视线方向自动选面后点击（开箱子/点活板门常用：哪面看得见点哪面）。 */
+    /** 自动选面后点击（开箱子/点活板门常用：哪面够得着点哪面）。 */
     public static void clickBlockFacingPlayer(BlockPos pos, boolean rotate, Hand hand) {
-        Vec3d blockCenter = Vec3d.ofCenter(pos);
-        Vec3d diff = blockCenter.subtract(mc.player.getEyePos());
-        Direction side = Direction.getFacing(diff.x, diff.y, diff.z);
-        clickBlock(pos, side, rotate, hand);
+        if (mc.player == null || mc.world == null) return;
+        clickBlock(pos, pickFace(pos), rotate, hand);
+    }
+
+    /**
+     * 选一个“够得着”的面：优先水平四个侧面，其次顶面，<b>绝不选底面</b>。
+     *
+     * <p>旧实现直接 {@code Direction.getFacing(eye - center)}：玩家站在箱子斜上方时会选顶面，
+     * 而箱子顶上接了漏斗（比如刷物塔）时，顶面命中点正好落在漏斗里，服务端会拒绝这次交互，
+     * 表现就是“点了没反应、靠近一点才偶尔成功”。
+     */
+    private static Direction pickFace(BlockPos pos) {
+        Vec3d eye = mc.player.getEyePos();
+        Vec3d center = Vec3d.ofCenter(pos);
+        double dx = eye.x - center.x;
+        double dy = eye.y - center.y;
+        double dz = eye.z - center.z;
+        boolean upBlocked = !mc.world.getBlockState(pos.up()).isAir();
+        int face = StashMoveLogic.pickClickFace(dx, dy, dz, upBlocked);
+        return switch (face) {
+            case StashMoveLogic.FACE_EAST -> Direction.EAST;
+            case StashMoveLogic.FACE_WEST -> Direction.WEST;
+            case StashMoveLogic.FACE_SOUTH -> Direction.SOUTH;
+            case StashMoveLogic.FACE_NORTH -> Direction.NORTH;
+            default -> Direction.UP;
+        };
     }
 
     private static void sendSequencedPacket(Hand hand, BlockHitResult result) {

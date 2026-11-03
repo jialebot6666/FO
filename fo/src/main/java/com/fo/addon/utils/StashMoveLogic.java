@@ -116,4 +116,42 @@ public final class StashMoveLogic {
         double dz = nowZ - prevZ;
         return dx * dx + dz * dz < minMove * minMove;
     }
+
+    /** 点击面：东。 */
+    public static final int FACE_EAST = 0;
+    /** 点击面：西。 */
+    public static final int FACE_WEST = 1;
+    /** 点击面：南。 */
+    public static final int FACE_SOUTH = 2;
+    /** 点击面：北。 */
+    public static final int FACE_NORTH = 3;
+    /** 点击面：上（顶面）。 */
+    public static final int FACE_UP = 4;
+
+    /**
+     * 选一个“够得着”的点击面（V6.7p5）。
+     *
+     * <p>规则：优先水平四个侧面；只有在明显从上往下看、且方块顶上没被占用时才选顶面；
+     * <b>永远不选底面</b>（眼睛不低于方块中心时绝不选顶面/底面）。
+     *
+     * <p>为什么需要：旧实现直接按“眼睛 → 方块中心”的向量取最大分量定面，玩家站在箱子
+     * 斜上方时会选到顶面；而箱子上接了漏斗（刷物塔常见）时顶面命中点落在漏斗里，
+     * 服务端会拒绝交互，表现就是“点了没反应、必须靠近才偶尔成功”。
+     *
+     * @param dx        眼睛相对方块中心的 X 偏移
+     * @param dy        眼睛相对方块中心的 Y 偏移
+     * @param dz        眼睛相对方块中心的 Z 偏移
+     * @param upBlocked 方块上方是否被其它方块占用
+     * @return {@link #FACE_EAST} / {@link #FACE_WEST} / {@link #FACE_SOUTH} / {@link #FACE_NORTH} / {@link #FACE_UP}
+     */
+    public static int pickClickFace(double dx, double dy, double dz, boolean upBlocked) {
+        double horizontal = Math.hypot(dx, dz);
+        // dy <= 0：眼睛不高于方块中心 → 只能用侧面；upBlocked：顶面被占 → 也只能用侧面
+        boolean useSide = horizontal >= Math.abs(dy) * 0.6 || dy <= 0 || upBlocked;
+        if (useSide) {
+            if (Math.abs(dx) >= Math.abs(dz)) return dx >= 0 ? FACE_EAST : FACE_WEST;
+            return dz >= 0 ? FACE_SOUTH : FACE_NORTH;
+        }
+        return FACE_UP;
+    }
 }
