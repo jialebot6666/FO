@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p1`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p1-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p2`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p2-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -331,6 +331,20 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     产物名 `FO-6.7p1-1.21.11.jar`。
   - ⚠️ 已知取舍：双号模式自杀时，背包里留下的非潜影盒（食物/工具）会掉在原地；
     若服务器不是死亡不掉落，可后续加「自杀前把剩余物品先存箱」开关。
+- ✅ 6.7p2 已修复：**三号模式投珍珠的两处逻辑问题**（用户实机报的 bug）。
+  - ① **投掷前先检测气泡柱**：用严格判定 `ownPearlInColumn(water)`（XZ 误差 ≤0.9 格、Y 在水柱内、
+    owner==自己）——柱里已有自己的珍珠就直接跳过投掷去发「拉我N」，不再多投一颗。
+    同一判定也用于投后校验（旧的 Y±8 宽松范围会把落在活板门上的珍珠也算成功）。双号模式同样加了这层检查
+    （`dualWalkWater` 一进门就查，有珍珠连路都不用走）。
+  - ② **不再走到水上**：`pearlStandSpot()` 在活板门 2 格半径内找「脚下实心、身体两格空气」的站位
+    （排除活板门格与水格），Baritone `moveToPrecise` 过去；投掷前若活板门关着先用 BlockClicker 点开
+    （之前完全没开活板门，珍珠会落在活板门上）。
+  - ③ **潜行 + 瞄准 + 后退**（用户口径）：投掷时按住 shift，视线用 `FacingLogic.yawPitchTo` 瞄准
+    **气泡柱方块中心**（不是原来的 pitch=90 垂直向下），投完立刻按 S 后退 10 tick，防止脚踩气泡柱触发珍珠。
+    关闭模块/卡住时 `releaseMovementKeys()` 统一释放前进/潜行/后退键。
+  - ⚠️ 注意：柱里没珍珠时仍然是「先投（充值回程票）再发拉我N」——这是刻意顺序，
+    否则被拉走后本区没有可释放的珍珠，下一趟回不来。
+  - 寻路统一加 `isPathing()` 守卫，避免每 tick 重置 Baritone 目标。
 
 ## 硬性规范（每次改动必须执行）
 1. **每次改动完成后，都必须创建一个对应的 Git commit**，以便后续追踪和回滚。

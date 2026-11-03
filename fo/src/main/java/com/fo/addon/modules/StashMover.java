@@ -3,6 +3,7 @@ package com.fo.addon.modules;
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.BlockClicker;
+import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.PeerMessageLogic;
 import com.fo.addon.utils.Rotation;
 import com.fo.addon.utils.RotationManager;
@@ -587,8 +588,10 @@ public class StashMover extends Module {
     private String stuckReason = "";
     private long nextAlarmTick;
     private boolean forwardHeld;
-    /** 投掷前的短按前进微调剩余 tick（借鉴 misaka x0276：走到水柱正中心再投）。 */
-    private int nudgeTicks;
+    /** 投掷后按 S 后退的剩余 tick（防止脚踩气泡柱触发珍珠）。 */
+    private int backoffTicks;
+    /** 投掷时是否按住潜行键。 */
+    private boolean sneakHeld;
 
     // 三号模式
     private TrioState trioState = TrioState.LOOT;
@@ -640,7 +643,8 @@ public class StashMover extends Module {
         stuckReason = "";
         nextAlarmTick = 0;
         forwardHeld = false;
-        nudgeTicks = 0;
+        backoffTicks = 0;
+        sneakHeld = false;
         restockStepsLeft = 0;
         pullActive = false;
         unloadedSomething = false;
@@ -659,7 +663,7 @@ public class StashMover extends Module {
 
     @Override
     public void onDeactivate() {
-        releaseForward();
+        releaseMovementKeys();
         PathManagers.get().stop();
         blacklist.clear();
         chestQueue.clear();
@@ -680,6 +684,13 @@ public class StashMover extends Module {
         if (mc.player == null || mc.world == null) return;
         tick++;
         lastPos = lastPos == null ? mc.player.getEntityPos() : lastPos;
+
+        // 投完珍珠立即按 S 后退，避免站在气泡柱上触发珍珠（每 tick 处理，不受动作冷却影响）
+        if (backoffTicks > 0) {
+            mc.options.backKey.setPressed(true);
+            backoffTicks--;
+            if (backoffTicks <= 0) mc.options.backKey.setPressed(false);
+        }
 
         if (cooldown > 0) {
             cooldown--;
@@ -820,14 +831,30 @@ public class StashMover extends Module {
             enterStuck("请先设置搬运活板门位置");
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(stand) > 4) {
-            PathManagers.get().moveTo(stand, true);
+        // 气泡柱里已经有自己的珍珠 → 不用再走这一趟，直接去还珍珠/卸货
+        if (ownPearlInColumn(stand.down(1))) {
+            moverState = MoverState.PUT_BACK;
+            return;
+        }
+        // 走到活板门「旁边」的实心格，不踩气泡柱（踩上去会触发珍珠）
+        BlockPos spot = pearlStandSpot(stand);
+        BlockPos target = spot != null ? spot : stand;
+        if (mc.player.getBlockPos().getSquaredDistance(target) > 4) {
+            if (!PathManagers.get().isPathing()) {
+                PathManagers.get().moveToPrecise(target);
+            }
             return;
         }
         moverState = MoverState.TAKE_PEARL;
     }
 
     private void dualTakePearl() {
+        // 气泡柱里已经有自己的珍珠就不用再投一颗（省珍珠、也避免重复投放触发）
+        if (ownPearlInColumn(trapdoor.get().down(1))) {
+            closeScreen();
+            moverState = MoverState.PUT_BACK;
+            return;
+        }
         if (countPearls() > 0) {
             closeScreen();
             moverState = MoverState.THROW;
@@ -857,7 +884,13 @@ public class StashMover extends Module {
     }
 
     private void dualThrow() {
-        if (!nudgeToCenter(trapdoor.get())) return;
+        BlockPos stand = trapdoor.get();
+        BlockPos water = stand.down(1);
+        if (ownPearlInColumn(water)) {
+            moverState = MoverState.PUT_BACK;
+            return;
+        }
+        if (!prepareThrowPosition(stand)) return;
         int slot = findPearlHotbarSlot();
         if (slot < 0) {
             // 珍珠被 QUICK_MOVE 塞进主背包时，先用 Meteor 的背包移动把它换到快捷栏（不打断投掷流程）
@@ -870,7 +903,8 @@ public class StashMover extends Module {
             moverState = MoverState.TAKE_PEARL;
             return;
         }
-        doThrowPearl(slot, trapdoor.get());
+        sneakForThrow();
+        doThrowPearl(slot, Vec3d.ofCenter(water));
         throwAttempts++;
         verifyStartTick = tick;
         moverState = MoverState.VERIFY;
@@ -878,7 +912,7 @@ public class StashMover extends Module {
 
     private void dualVerify() {
         BlockPos water = trapdoor.get().down(1);
-        if (ownPearlInWater(water)) {
+        if (ownPearlInColumn(water)) {
             lastPearlThrowTick = tick;
             moverState = MoverState.PUT_BACK;
             cooldown = 10;
@@ -1251,11 +1285,16 @@ public class StashMover extends Module {
             enterStuck("请先设置" + trioZone + "的活板门位置");
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(stand) > 4) {
-            PathManagers.get().moveTo(stand, true);
+        BlockPos water = stand.down(1);
+        // ① 先检测气泡柱里有没有自己的珍珠：有就不再投（省珍珠，也避免二次投放触发）
+        if (ownPearlInColumn(water)) {
+            debugMsg("气泡柱里已有自己的珍珠，跳过投掷");
+            trioState = TrioState.SEND;
+            cooldown = 5;
             return;
         }
-        if (!nudgeToCenter(stand)) return;
+        // ② 站到活板门旁边的实心格（不踩气泡柱）+ 确认活板门已打开
+        if (!prepareThrowPosition(stand)) return;
         int slot = findPearlHotbarSlot();
         if (slot < 0) {
             int inv = findPearlIndexMainInventory();
@@ -1267,7 +1306,9 @@ public class StashMover extends Module {
             enterStuck("快捷栏里没有末影珍珠");
             return;
         }
-        doThrowPearl(slot, stand);
+        // ③ 按住 shift、视线看向气泡柱中心投掷，投完立刻按 S 后退
+        sneakForThrow();
+        doThrowPearl(slot, Vec3d.ofCenter(water));
         throwAttempts++;
         verifyStartTick = tick;
         trioState = TrioState.VERIFY;
@@ -1275,7 +1316,7 @@ public class StashMover extends Module {
 
     private void trioVerify() {
         BlockPos stand = trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
-        if (ownPearlInWater(stand.down(1))) {
+        if (ownPearlInColumn(stand.down(1))) {
             lastPearlThrowTick = tick;
             trioState = TrioState.SEND;
             cooldown = 10;
@@ -1537,59 +1578,109 @@ public class StashMover extends Module {
         else mc.player.networkHandler.sendChatMessage(cmd);
     }
 
-    private void doThrowPearl(int hotbarSlot, BlockPos stand) {
+    /**
+     * 朝指定点投一颗珍珠（用户口径：站着别踩气泡柱，视线看向气泡柱中心投，投完按 S 后退）。
+     *
+     * <p>视角必须“服务端已看到”才算数：用 miku 的 RotationManager 先发带目标 yaw/pitch 的完整包，
+     * 再发交互包，最后 sync 回真实朝向（顺序：视角包 → 交互包 → 归位包）。
+     */
+    private void doThrowPearl(int hotbarSlot, Vec3d aim) {
         closeScreen();
         mc.player.getInventory().setSelectedSlot(hotbarSlot);
 
-        // 俯角必须“服务端已看到”才算垂直向下投：用 miku 的 RotationManager 发带 pitch=90 的视角包，
-        // 投掷后再 sync 回真实朝向（顺序：视角包 → 交互包 → 归位包，服务端按序处理）
-        Vec3d center = Vec3d.ofCenter(stand);
-        double dx = center.x - mc.player.getX();
-        double dz = center.z - mc.player.getZ();
-        float yaw = mc.player.getYaw();
-        if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
-            yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
-        }
-        RotationManager.getInstance().register(new Rotation(yaw, 90f).setPriority(10));
-        mc.player.setPitch(90f);
-        mc.player.setYaw(yaw);
+        float[] yp = FacingLogic.yawPitchTo(aim.x, aim.y, aim.z,
+            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
+        RotationManager.getInstance().register(new Rotation(yp[0], yp[1]).setPriority(10));
+        mc.player.setYaw(yp[0]);
+        mc.player.setPitch(yp[1]);
 
         mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
 
         RotationManager.getInstance().sync();
-        cooldown = 2;
+        releaseSneak();
+        backoffTicks = 10;   // 投完立即按 S 后退，避免脚踩气泡柱触发珍珠
+        cooldown = 3;
         progress();
     }
 
     /**
-     * 投掷前把玩家挪到水柱正上方（水平误差 &lt;= 0.35 格）。
-     * 参考 misaka 的短按前进键微调：朝水柱中心连按 8 tick 前进键，走够就松。
-     *
-     * @return true = 已就位，可以投掷；false = 本 tick 还在微调，先返回
+     * 找活板门旁「能站人」的实心格（不踩气泡柱）：2 格半径内、脚下实心、身体两格是空气，
+     * 取离玩家最近的一个；找不到返回 null。
      */
-    private boolean nudgeToCenter(BlockPos stand) {
-        if (stand == null || stand.equals(BlockPos.ORIGIN)) return true;
-        Vec3d center = Vec3d.ofCenter(stand);
-        double dx = center.x - mc.player.getX();
-        double dz = center.z - mc.player.getZ();
-        double hd = Math.sqrt(dx * dx + dz * dz);
-        if (hd <= 0.35) {
-            if (forwardHeld) releaseForward();
-            nudgeTicks = 0;
-            return true;
+    private BlockPos pearlStandSpot(BlockPos trapdoorPos) {
+        BlockPos playerPos = mc.player.getBlockPos();
+        BlockPos water = trapdoorPos.down(1);
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos p = trapdoorPos.add(dx, dy, dz);
+                    if (p.equals(trapdoorPos) || p.equals(water)) continue;
+                    if (!isStandable(p)) continue;
+                    double d = p.getSquaredDistance(playerPos);
+                    if (d < bestD) {
+                        bestD = d;
+                        best = p;
+                    }
+                }
+            }
         }
-        if (nudgeTicks <= 0) {
-            nudgeTicks = 8;
-            mc.player.setYaw((float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
-        }
-        mc.options.forwardKey.setPressed(true);
-        forwardHeld = true;
-        nudgeTicks--;
-        if (nudgeTicks <= 0) releaseForward();
-        return false;
+        return best;
     }
 
-    private boolean ownPearlInWater(BlockPos water) {
+    /** 该格能不能站：脚下非空气且不是流体，身体两格空气。 */
+    private boolean isStandable(BlockPos p) {
+        var below = mc.world.getBlockState(p.down());
+        if (below.isAir() || !below.getFluidState().isEmpty()) return false;
+        return mc.world.getBlockState(p).isAir() && mc.world.getBlockState(p.up()).isAir();
+    }
+
+    /**
+     * 投掷前的站位与活板门准备：
+     * ① 走到活板门旁边的实心格（绝不踩气泡柱）；② 活板门关着就点开。
+     *
+     * @return true = 已就位且活板门开着，可以投
+     */
+    private boolean prepareThrowPosition(BlockPos trapdoorPos) {
+        BlockPos spot = pearlStandSpot(trapdoorPos);
+        if (spot == null) spot = trapdoorPos;   // 四周无处可站时退回原位（仍然潜行投）
+        if (mc.player.getBlockPos().getSquaredDistance(spot) > 2.25) {
+            if (!PathManagers.get().isPathing()) {
+                PathManagers.get().moveToPrecise(spot);
+            }
+            return false;
+        }
+        var state = mc.world.getBlockState(trapdoorPos);
+        if (state.getBlock() instanceof TrapdoorBlock && !state.get(TrapdoorBlock.OPEN)) {
+            BlockClicker.clickBlockFacingPlayer(trapdoorPos, true, Hand.MAIN_HAND);
+            cooldown = 10;
+            return false;
+        }
+        return true;
+    }
+
+    /** 投掷时按住潜行键（防止走位滑进气泡柱）。 */
+    private void sneakForThrow() {
+        if (mc.options == null) return;
+        mc.options.sneakKey.setPressed(true);
+        sneakHeld = true;
+    }
+
+    private void releaseSneak() {
+        if (sneakHeld && mc.options != null) {
+            mc.options.sneakKey.setPressed(false);
+        }
+        sneakHeld = false;
+    }
+
+    /**
+     * 气泡柱里是否已经有<b>自己的</b>珍珠（严格判定：XZ 误差 ≤0.9 格、Y 在水柱内）。
+     *
+     * <p>用途有两个：① 投掷前先查——已经有珍珠就不必再投（用户口径）；
+     * ② 投掷后校验——必须真的落在柱内才算成功（原来 Y±8 的宽松范围会把落在活板门上的也算成功）。
+     */
+    private boolean ownPearlInColumn(BlockPos water) {
         if (mc.world == null) return false;
         for (Entity e : mc.world.getEntities()) {
             if (!(e instanceof EnderPearlEntity pearl)) continue;
@@ -1597,9 +1688,10 @@ public class StashMover extends Module {
             boolean mine = owner == mc.player
                 || (owner != null && owner.getUuid().equals(mc.player.getUuid()));
             if (!mine) continue;
-            if (Math.abs(pearl.getX() - (water.getX() + 0.5)) <= 1.5
-                && Math.abs(pearl.getZ() - (water.getZ() + 0.5)) <= 1.5
-                && Math.abs(pearl.getY() - water.getY()) <= 8) {
+            if (Math.abs(pearl.getX() - (water.getX() + 0.5)) <= 0.9
+                && Math.abs(pearl.getZ() - (water.getZ() + 0.5)) <= 0.9
+                && pearl.getY() >= water.getY() - 8.0
+                && pearl.getY() <= water.getY() + 1.6) {
                 return true;
             }
         }
@@ -1892,6 +1984,16 @@ public class StashMover extends Module {
         }
     }
 
+    /** 释放所有自动按下的移动键（前进 / 潜行 / 后退），关模块或卡住时调用。 */
+    private void releaseMovementKeys() {
+        releaseForward();
+        releaseSneak();
+        if (backoffTicks > 0 && mc.options != null) {
+            mc.options.backKey.setPressed(false);
+        }
+        backoffTicks = 0;
+    }
+
     private void warnThrottled(String msg) {
         if (tick - warnCooldown > 100) {
             warning(msg);
@@ -1908,7 +2010,7 @@ public class StashMover extends Module {
         nextAlarmTick = tick;
         if (mode.get() == Mode.TRIO) trioState = TrioState.STUCK;
         else moverState = MoverState.STUCK;
-        releaseForward();
+        releaseMovementKeys();
         PathManagers.get().stop();
         warning("自动搬运卡住：" + reason + "（已暂停，等手动处理）");
         nextAlarmTick = tick + 200;
