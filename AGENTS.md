@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.37`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.37-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -14,6 +14,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   6. FO 自动挖矿（`modules/AutoMining`）
   7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
+  9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
@@ -289,8 +290,38 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - 测试：无新增（这两个分支都是 Minecraft 客户端强耦合的副作用路径，纯逻辑无法覆盖），
     `cd fo && gradle build --no-daemon` 共 **355 测试全绿**（0 failures / 0 errors）。
 
-## 硬性规范（每次改动必须执行）
+- ✅ 6.7 已完成：**新增「FO 自动搬运」**（移植 misaka StashMover 搬运端 + miku PearlBot 拉珍珠端，
+  本地分支，未推 GitHub，等用户实机验证后再发版）。一个模块三种模式：
+  - **搬运端（双号）**：misaka 状态机（开箱取物 → 发「拉我N」→ 等「收到N」→ 走到活板门上方
+    投滞留珍珠（pitch 90°）→ 还多余珍珠 → 卸货进存储箱 → 自杀（默认 `/suicide --confirm`）/岩浆
+    → 重生回待搬运箱继续）；三种待搬运方式（自动搜索/单箱子/区域框选）；双箱成对拉黑。
+  - **拉珍珠端（双号）**：miku 珍珠大管家全套——珍珠点映射表（`StringMapSetting`，用户名→坐标）、
+    右键活板门录入模式、告示牌识别（珍珠 = 告示牌正下方，已确认用户场地贴法）、关键字「拉我」、
+    距离检查、Baritone 寻路、miku 交互工具点活板门、赶路超时、可选回出发点。
+  - **三号模式**：三个互斥角色开关（1号搬运端 / 2号待搬运箱端 / 3号存储箱端），三个号各开一个；
+    1 号在两区纯拉珍珠往返、**不自杀**，卡住只报警暂停；珍珠箱全路线一个，<4 精确补到 16（逐颗
+    右键补、不整堆搬、不还珍珠）；另有「只开1号搬运端」开关（2/3 号交给 ZenithProxy 插件）。
+  - **私信协议**：`/m`（可切 `/tell`）+「拉我N」/「收到N」（N 内存计数每次+1，镜像配对）；
+    确认判定 = 来自预期搭档 + 含「确认关键字」（默认“收到”），**带数字必须匹配 N，不带也放行**
+    （兼容 ZenithProxy/miku 风格回复）；「等待确认」关掉则发完直接走流程。
+  - **修掉 misaka 的 3 个 bug**：① 等确认无超时（改 300 tick 超时 + 重发 3 次报警）；
+    ② 珍珠滞留检测不认主人（改只认 `owner == 自己`）；③ 投掷前「准星指方块就等待」在标准水柱
+    结构下永不通过（已删除，直接 pitch 90° 投）。
+  - **新增工具**：`utils/BlockClicker`（miku `BaritoneUtil.clickBlock` 流程：面中心 + 挥手 + 旋转 +
+    带序列号 `PlayerInteractBlockC2SPacket`（走 accesswidener 的 `PendingUpdateManager`）+ 视角归位）；
+    `utils/StringMapSetting`（miku 同款键值表格设置）；`utils/PeerMessageLogic`、`utils/StashPearlLogic`、
+    `utils/StashMoveLogic`、`utils/StashStats`、`utils/StashStatsSetting`（全部纯逻辑可单测）。
+    复用仓库已有 `utils/Rotation`、`utils/RotationManager`（V4.35 为杀戮光环移植的 miku 同款）。
+  - **统计**：只记本次在线（趟数 + 潜影盒数），关模块不清零、断线/退服（GameLeftEvent）清零、
+    设置页「重置」真按钮手动清零（前端重做，不用古城那套只读框）。
+  - ⚠️ **双号搬运的硬性前提**：重生点必须设在待搬运箱旁边（箱子搜索半径最大 20 格，
+    超出会一直报警）；活板门正下方 1 格必须是水。
+  - ⚠️ 刻意未做（用户要求测试后再评估）：活板门点击后的翻转验证、N 计数器持久化、
+    背包可堆叠空间判定、私信白名单/请求冷却、自动暂停其他模块。
+  - 测试：新增 39 个（私信解析/配对 13、珍珠补货 7、分区与双箱配对 9、统计 5、界面文本 5），
+    共 **51 个测试套件全绿**（0 failures / 0 errors）。
 
+## 硬性规范（每次改动必须执行）
 1. **每次改动完成后，都必须创建一个对应的 Git commit**，以便后续追踪和回滚。
 2. **每次改动后，都必须编写或更新相关测试**，并在交付给用户前，确保所有测试和验证全部通过。
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律使用中文，不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。

@@ -1,0 +1,88 @@
+package com.fo.addon;
+
+import com.fo.addon.utils.StashMoveLogic;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/** 分区判定 / 传送检测 / 双箱配对（V6.7 自动搬运三号模式）。 */
+class StashMoveLogicTest {
+
+    @Test
+    void 离待搬运箱近判待搬运箱区() {
+        assertEquals(StashMoveLogic.Zone.SOURCE,
+            StashMoveLogic.nearerZone(0, 0, 10, 10, 100, 100));
+    }
+
+    @Test
+    void 离存储箱近判存储箱区() {
+        assertEquals(StashMoveLogic.Zone.STORE,
+            StashMoveLogic.nearerZone(0, 0, 100, 100, 10, 10));
+    }
+
+    @Test
+    void 等距判待搬运箱区() {
+        assertEquals(StashMoveLogic.Zone.SOURCE,
+            StashMoveLogic.nearerZone(0, 0, 10, 0, -10, 0));
+    }
+
+    @Test
+    void 只有一个坐标时判到已知那侧() {
+        assertEquals(StashMoveLogic.Zone.STORE,
+            StashMoveLogic.nearerZone(0, 0, Double.NaN, Double.NaN, 5, 5));
+        assertEquals(StashMoveLogic.Zone.SOURCE,
+            StashMoveLogic.nearerZone(0, 0, 5, 5, Double.NaN, Double.NaN));
+        assertEquals(StashMoveLogic.Zone.UNKNOWN,
+            StashMoveLogic.nearerZone(0, 0, Double.NaN, Double.NaN, Double.NaN, Double.NaN));
+    }
+
+    @Test
+    void 位置突跳判定被拉走() {
+        // 一 tick 内位移 40 格 > 阈值 32
+        assertTrue(StashMoveLogic.teleportJumped(0, 0, 40, 0, 32));
+        // 位移 10 格不算
+        assertFalse(StashMoveLogic.teleportJumped(0, 0, 10, 0, 32));
+        // 阈值边界：正好 32 格不算（严格大于）
+        assertFalse(StashMoveLogic.teleportJumped(0, 0, 32, 0, 32));
+    }
+
+    @Test
+    void 双箱另一半_左半顺时针() {
+        // 朝北(0,-1) 的左半 → 顺时针 → 东(+1,0)（与原版 ChestBlock 字节码一致）
+        int[] off = StashMoveLogic.chestOtherHalfOffset(true, 0, -1);
+        assertEquals(1, off[0]);
+        assertEquals(0, off[1]);
+    }
+
+    @Test
+    void 双箱另一半_右半逆时针() {
+        // 朝北(0,-1) 的右半 → 逆时针 → 西(-1,0)
+        int[] off = StashMoveLogic.chestOtherHalfOffset(false, 0, -1);
+        assertEquals(-1, off[0]);
+        assertEquals(0, off[1]);
+    }
+
+    @Test
+    void 双箱配对四个朝向都自洽() {
+        // 朝向 (dx,dz)：北(0,-1) 东(1,0) 南(0,1) 西(-1,0)
+        int[][] facings = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+        for (int[] f : facings) {
+            int[] left = StashMoveLogic.chestOtherHalfOffset(true, f[0], f[1]);
+            int[] right = StashMoveLogic.chestOtherHalfOffset(false, f[0], f[1]);
+            // 左右两半互为相反方向
+            assertEquals(-left[0], right[0]);
+            assertEquals(-left[1], right[1]);
+            // 偏移必须落在轴向上（不能是斜对角）
+            assertEquals(1, Math.abs(left[0]) + Math.abs(left[1]));
+        }
+    }
+
+    @Test
+    void 区名中文用于界面() {
+        assertEquals("待搬运箱区", StashMoveLogic.Zone.SOURCE.toString());
+        assertEquals("存储箱区", StashMoveLogic.Zone.STORE.toString());
+        assertEquals("未判定", StashMoveLogic.Zone.UNKNOWN.toString());
+    }
+}

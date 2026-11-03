@@ -11,8 +11,12 @@ import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOKillAura;
+import com.fo.addon.modules.StashMover;
 import com.fo.addon.utils.EnchantLevelMapSetting;
+import com.fo.addon.utils.StashStats;
+import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StealStatsSetting;
+import com.fo.addon.utils.StringMapSetting;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -81,6 +85,33 @@ public class AddonTemplate extends MeteorAddon {
             }
         });
 
+        // V6.7：珍珠点映射设置（miku 珍珠大管家同款表格：用户名 | 坐标 | 删除；底部 重置 | 加号）
+        SettingsWidgetFactory.registerCustomFactory(StringMapSetting.class, theme -> (table, setting) ->
+            StringMapSetting.fillTable(theme, table, (StringMapSetting) setting));
+
+        // V6.7：本次搬运统计（重做前端，不用古城那套只读框拼贴）——
+        //   一行「本次搬运：X 趟 · Y 个潜影盒」+ 右侧原生「重置」按钮（对齐普通功能重置键），
+        //   点击立即清零并就地刷新文字。
+        SettingsWidgetFactory.registerCustomFactory(StashStatsSetting.class, theme -> (table, setting) -> {
+            StashStats stats = StashStats.get();
+
+            String tooltip = table.getRow(table.rowI()).get(0).widget().tooltip;
+            table.removeRow(table.rowI());
+            // ⚠️ removeRow 会把行游标减一（本分组首个设置时 -1，下一句 add 直接越界崩溃，6.31 实机踩过），
+            //   删完必须补一次 row() 把游标移回来。
+            table.row();
+
+            WTable grid = table.add(theme.table()).expandCellX().marginTop(6).widget();
+            WLabel value = grid.add(theme.label("本次搬运：" + stats.displayText())).expandCellX().widget();
+            value.tooltip = tooltip;
+            WButton reset = grid.add(theme.button("重置")).widget();
+            reset.action = () -> {
+                stats.reset();
+                value.set("本次搬运：" + stats.displayText());
+            };
+            grid.row();
+        });
+
         // V6.27：累计统计要在模块启动前就能被设置页读到，所以加载期先读一次文件
         AncientStealStats.get().replaceWith(StealStatsFile.load());
 
@@ -93,6 +124,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoMining());
         Modules.get().add(new FOKillAura());
         Modules.get().add(new FOAncientCitySearch());
+        Modules.get().add(new StashMover());
     }
 
     @Override
