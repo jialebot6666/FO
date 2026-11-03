@@ -63,6 +63,21 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 卸货过滤（V6.7p1 修复）：哪些物品允许存进存储箱。
+     *
+     * <ul>
+     *   <li>末影珍珠<b>永远不入库</b>——三号模式的珍珠是随身携带的“回程票”，
+     *       双号模式万一还珍珠失败也不能把它存掉；</li>
+     *   <li>开了「只拿潜影盒」时，只存潜影盒（拿什么存什么，非潜影盒留在背包）。</li>
+     * </ul>
+     */
+    public static boolean shouldUnload(String itemId, boolean onlyShulker) {
+        if (itemId == null) return false;
+        if ("minecraft:ender_pearl".equals(itemId)) return false;
+        return !onlyShulker || StashPearlLogic.isShulkerBoxId(itemId);
+    }
+
+    /**
      * 双箱另一半的偏移（dx, dz）。
      *
      * @param left   是否是双箱的左半（ChestType.LEFT）

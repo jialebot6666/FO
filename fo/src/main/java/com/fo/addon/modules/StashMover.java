@@ -944,7 +944,7 @@ public class StashMover extends Module {
 
     private void dualUnload() {
         if (!containerOpen()) {
-            if (inventoryEmpty()) {
+            if (!hasItemsToUnload()) {
                 onUnloadDone();
                 return;
             }
@@ -1139,7 +1139,7 @@ public class StashMover extends Module {
             return;
         }
         if (!containerOpen()) {
-            if (inventoryEmpty()) {
+            if (!hasItemsToUnload()) {
                 if (unloadedSomething) StashStats.get().addTrip();
                 unloadedSomething = false;
                 trioState = TrioState.RESTOCK;
@@ -1680,9 +1680,30 @@ public class StashMover extends Module {
         if (!(mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler)) return -1;
         int size = handler.slots.size();
         for (int i = size - 36; i < size; i++) {
-            if (!handler.getSlot(i).getStack().isEmpty()) return i;
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (isUnloadCandidate(stack)) return i;
         }
         return -1;
+    }
+
+    /** 背包里是否还有“可以存进存储箱”的东西（珍珠、只拿潜影盒时的非潜影盒都排除）。 */
+    private boolean hasItemsToUnload() {
+        var inv = mc.player.getInventory();
+        for (int i = 0; i < 36; i++) {
+            if (isUnloadCandidate(inv.getStack(i))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 卸货过滤（V6.7p1 修复）：
+     * ① 末影珍珠任何时候都不入库（三号模式的回程票 / 双号还珍珠失败时的保命珍珠）；
+     * ② 开了「只拿潜影盒」时只存潜影盒，非潜影盒留在背包。
+     */
+    private boolean isUnloadCandidate(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        String id = Registries.ITEM.getId(stack.getItem()).toString();
+        return StashMoveLogic.shouldUnload(id, onlyShulker.get());
     }
 
     private int findPearlSlotInContainer() {

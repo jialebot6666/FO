@@ -85,4 +85,31 @@ class StashMoveLogicTest {
         assertEquals("存储箱区", StashMoveLogic.Zone.STORE.toString());
         assertEquals("未判定", StashMoveLogic.Zone.UNKNOWN.toString());
     }
+
+    // ==================== 卸货过滤（V6.7p1 修复） ====================
+
+    @Test
+    void 末影珍珠任何时候都不入库() {
+        assertFalse(StashMoveLogic.shouldUnload("minecraft:ender_pearl", false));
+        assertFalse(StashMoveLogic.shouldUnload("minecraft:ender_pearl", true));
+    }
+
+    @Test
+    void 只拿潜影盒时只存潜影盒() {
+        assertTrue(StashMoveLogic.shouldUnload("minecraft:shulker_box", true));
+        assertTrue(StashMoveLogic.shouldUnload("minecraft:red_shulker_box", true));
+        assertFalse(StashMoveLogic.shouldUnload("minecraft:diamond", true));
+        assertFalse(StashMoveLogic.shouldUnload("minecraft:golden_carrot", true));
+    }
+
+    @Test
+    void 未开只拿潜影盒时非珍珠物品都存() {
+        assertTrue(StashMoveLogic.shouldUnload("minecraft:diamond", false));
+        assertTrue(StashMoveLogic.shouldUnload("minecraft:shulker_box", false));
+    }
+
+    @Test
+    void 空ID不卸() {
+        assertFalse(StashMoveLogic.shouldUnload(null, false));
+    }
 }
