@@ -152,7 +152,7 @@ public class StashMover extends Module {
     }
 
     private enum MoverState {
-        LOOT, SEND, WAIT_ACK, WALK_WATER, TAKE_PEARL, THROW, VERIFY, PUT_BACK,
+        LOOT, SEND, WAIT_ACK, WALK_WATER, TAKE_PEARL, THROW, PUT_BACK,
         WALK_STORE, UNLOAD, SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
@@ -667,7 +667,6 @@ public class StashMover extends Module {
     private long lastSendTick;
     private int resendCount;
     private long verifyStartTick;
-    private int throwAttempts;
     private long lastPearlThrowTick;
     private long refillStartTick;
     private BlockPos cachedLava;
@@ -763,6 +762,10 @@ public class StashMover extends Module {
     private int pullN = -1;
     private long pullStartTick;
     private int pullPhase;
+    private boolean pullClickSent;
+    private boolean pullTrapdoorWasOpen;
+    private long pullClickStartTick;
+    private int pullClickAttempts;
     private BlockPos pullStartPos;
     private long pullReturnStart;
 
@@ -799,7 +802,6 @@ public class StashMover extends Module {
         finalTrip = false;
         ackReceived = false;
         resendCount = 0;
-        throwAttempts = 0;
         cachedLava = null;
         stuckReason = "";
         nextAlarmTick = 0;
@@ -872,7 +874,8 @@ public class StashMover extends Module {
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!(event.packet instanceof PlayerPositionLookS2CPacket)) return;
-        if (!isMoverRole()) return;
+        // V6.7p13：搬运端（双号/三人1号）与拉珍珠端（双号/三人2/3号）都参与防卡
+        if (!isMoverRole() && !isPullerRole()) return;
 
         // ⚠️ 这个回调在**网络线程**：只记时间戳 + 置标志，绝不碰玩家/按键/寻路。
         // 真正的处理放到 onTick（客户端线程），见 tickAntiStuck 的调用点。
@@ -887,10 +890,9 @@ public class StashMover extends Module {
         releaseMovementKeys();
         PathManagers.get().stop();
         pathTarget = null;
-        BlockPos at = mc.player.getBlockPos();
         warning("检测到频繁传送（5 秒内 " + teleportFlood.count(System.currentTimeMillis())
             + " 次），判定卡脚，开始脱困");
-        info("我卡住了！我在：" + at.toShortString());
+        info("我卡住了！请手动检查站位");
         if (debug.get()) {
             info("[防卡] 第 " + antiStuckCount + " 次，状态=" + trioState + "，在水里="
                 + (mc.player.isTouchingWater() ? "是" : "否") + "，碰撞=" + mc.player.horizontalCollision);
@@ -904,7 +906,7 @@ public class StashMover extends Module {
 
         BlockPos safe = findAntiStuckSpot();
         if (safe != null) {
-            info("尝试移动到安全位置 " + safe.toShortString());
+            info("尝试移动到附近的安全位置");
             pathTarget = safe;
             pathStartTick = tick;
             pathToSince = tick;
@@ -982,6 +984,13 @@ public class StashMover extends Module {
             return;
         }
 
+        // V6.7p13：正在寻路且真的在移动 → 算进展（双号/三人通用，不再只限 trio）。
+        // 否则「从很远处走去珍珠箱/柱子」会被 2 分钟看门狗误杀；Baritone 原地打转不算。
+        if (PathManagers.get().isPathing() && lastPos != null
+            && !StashMoveLogic.isStalled(lastPos.x, lastPos.z, mc.player.getX(), mc.player.getZ(), 0.05)) {
+            progress();
+        }
+
         try {
             if (isMoverRole()) {
                 if (mode.get() == Mode.TRIO) tickTrioMover();
@@ -1032,7 +1041,6 @@ public class StashMover extends Module {
             case WALK_WATER -> dualWalkWater();
             case TAKE_PEARL -> dualTakePearl();
             case THROW -> dualThrow();
-            case VERIFY -> dualVerify();
             case PUT_BACK -> dualPutBack();
             case WALK_STORE -> dualWalkStore();
             case UNLOAD -> dualUnload();
@@ -1164,46 +1172,19 @@ public class StashMover extends Module {
 
     private void dualThrow() {
         BlockPos stand = trapdoor.get();
-        BlockPos water = stand.down(1);
-        if (ownPearlInColumn(water)) {
-            moverState = MoverState.PUT_BACK;
+        if (stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置搬运活板门位置");
             return;
         }
-        if (!prepareThrowPosition(stand)) return;
-        int slot = findPearlHotbarSlot();
-        if (slot < 0) {
-            // 珍珠被 QUICK_MOVE 塞进主背包时，先用 Meteor 的背包移动把它换到快捷栏（不打断投掷流程）
-            int inv = findPearlIndexMainInventory();
-            if (inv >= 0) {
-                InvUtils.move().from(inv).toHotbar(mc.player.getInventory().getSelectedSlot());
-                cooldown = 5;
-                return;
-            }
-            moverState = MoverState.TAKE_PEARL;
-            return;
-        }
-        sneakForThrow();
-        doThrowPearl(slot, Vec3d.ofCenter(water));
-        throwAttempts++;
-        verifyStartTick = tick;
-        moverState = MoverState.VERIFY;
-    }
-
-    private void dualVerify() {
-        BlockPos water = trapdoor.get().down(1);
-        if (ownPearlInColumn(water)) {
-            lastPearlThrowTick = tick;
+        // V6.7p13：双号复用和 1号同一套投掷子流程（站位正对面→开活板门→贴边→投→判定→后退）。
+        // 成功后去还珍珠（PUT_BACK）；没珍珠则回去借（TAKE_PEARL）；失败由子流程内部报警。
+        ThrowSeq r = tickThrowSequence(stand, () -> {
+            releaseSneak();
             moverState = MoverState.PUT_BACK;
             cooldown = 10;
-            return;
-        }
-        if (tick - verifyStartTick > 60) {
-            if (throwAttempts >= 3) {
-                enterStuck("投掷珍珠失败（水柱里没有检测到自己的珍珠）");
-            } else {
-                moverState = MoverState.THROW;
-                cooldown = 20;
-            }
+        });
+        if (r == ThrowSeq.NO_PEARL) {
+            moverState = MoverState.TAKE_PEARL;
         }
     }
 
@@ -1407,20 +1388,13 @@ public class StashMover extends Module {
                 return;
             }
             if (debug.get()) {
-                info("[启动] 判定在" + zoneName() + "（离最近区锚点 " + Math.round(near) + " 格），本区珍珠箱="
-                    + zonePearlChest().toShortString());
+                info("[启动] 判定在" + zoneName() + "（离最近区锚点 " + Math.round(near) + " 格），本区珍珠箱"
+                    + (zonePearlChest().equals(BlockPos.ORIGIN) ? "未配置" : "已配置"));
             }
             // 直接赋值：trioState 本来就是 SETTLE，走 setTrioState 会被「状态没变」挡掉而不打印
             trioState = TrioState.SETTLE;
             lastProgressTick = tick;
             cooldown = PACE_STEP;
-        }
-        // V6.7p8：正在寻路且人真的在移动 → 算「有进展」。
-        // 否则「从很远处走去珍珠箱/柱子」这种正常的长距离移动会被 2 分钟看门狗误杀。
-        // 注意只认「真的移动了」：Baritone 卡住原地打转时不算，看门狗仍会报警。
-        if (trioState != TrioState.STUCK && PathManagers.get().isPathing() && lastPos != null
-            && !StashMoveLogic.isStalled(lastPos.x, lastPos.z, mc.player.getX(), mc.player.getZ(), 0.05)) {
-            progress();
         }
         if (trioState != TrioState.STUCK && tick - lastProgressTick > 2400) {
             enterStuck("长时间没有进展（2 分钟无有效动作）");
@@ -1802,11 +1776,14 @@ public class StashMover extends Module {
      * 否则这里会把刚瞄准好的投掷视角拽回柱心。
      */
     private void faceColumn() {
+        faceColumnAt(trioTrapdoor());
+    }
+
+    /** 朝某根柱子的气泡柱心真实转头（V6.7p13 参数化，供共享投掷子流程用）。 */
+    private void faceColumnAt(BlockPos td) {
         if (mc.player == null) return;
-        BlockPos td = trioTrapdoor();
         if (td == null || td.equals(BlockPos.ORIGIN)) return;
-        Vec3d c = Vec3d.ofCenter(td.down(1));
-        lookAt(c);
+        lookAt(Vec3d.ofCenter(td.down(1)));
     }
 
     /**
@@ -1831,8 +1808,9 @@ public class StashMover extends Module {
         }
         // V6.7p10：1~8 格这段用短按键走到「柱子旁那一格中心」，不调寻路
         if (settlePosition(stand)) {
-            debugMsg("[脱离] 已站到柱子旁 " + mc.player.getBlockPos().toShortString());
-            setTrioState(TrioState.RESTOCK, "已站到柱子旁，本区珍珠箱=" + zonePearlChest().toShortString());
+            debugMsg("[脱离] 已站到柱子旁");
+            setTrioState(TrioState.RESTOCK, "已站到柱子旁，本区珍珠箱"
+                + (zonePearlChest().equals(BlockPos.ORIGIN) ? "未配置" : "已配置"));
             cooldown = PACE_SETTLE_DONE;
         }
     }
@@ -2046,7 +2024,7 @@ public class StashMover extends Module {
             if (stepFailCount >= 5) {
                 stepFailCount = 0;
                 dumpStandSpotFailure(trapdoorPos);
-                enterStuck("走不到柱子旁 " + spot.toShortString() + "（被挡住了？）");
+                enterStuck("走不到柱子旁（被挡住了？）");
             } else {
                 warnThrottled("走到柱子旁站位失败，重试中（第 " + stepFailCount + " 次）");
             }
@@ -2111,6 +2089,22 @@ public class StashMover extends Module {
         return 0;
     }
 
+    /** 「投一颗珍珠进柱子」共享子流程的结果（V6.7p13 起，三人 1号 与 双号搬运端共用）。 */
+    private enum ThrowSeq { RUNNING, DONE, NO_PEARL, FAILED }
+
+    /** 三人模式 1 号的投掷入口（具体步骤在 {@link #tickThrowSequence}）。 */
+    private void trioThrow() {
+        BlockPos stand = trioTrapdoor();
+        if (stand == null || stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置" + zoneName() + "的活板门位置");
+            return;
+        }
+        ThrowSeq r = tickThrowSequence(stand, this::finishTrioThrow);
+        if (r == ThrowSeq.NO_PEARL) {
+            enterStuck("快捷栏里没有末影珍珠");
+        }
+    }
+
     /**
      * 投掷子流程（V6.7p3 建立，V6.7p7 按用户口径重排节奏）：
      * 检珍珠 → 校正站位 → <b>确认脱离</b> → <b>开活板门（大部分时候是关的，必须自己点开并确认）</b>
@@ -2119,32 +2113,26 @@ public class StashMover extends Module {
      * <p>V6.7p7 改动：每个子步骤之间留 6 tick（原来 2 tick）、点完活板门等 14 tick 让服务端同步方块状态、
      * 校验超时 60 → 80 tick；每 tick 都调用 {@link #faceColumn()} 把视角锁在气泡柱上（全程转头）。
      */
-    private void trioThrow() {
-        BlockPos stand = trioTrapdoor();
-        if (stand == null || stand.equals(BlockPos.ORIGIN)) {
-            enterStuck("请先设置" + zoneName() + "的活板门位置");
-            return;
-        }
+    private ThrowSeq tickThrowSequence(BlockPos stand, Runnable onSuccess) {
         BlockPos water = stand.down(1);
-
         // 每 tick 都把视角对准气泡柱（用户口径：全程都要转头）。
         // 唯独「正在投掷」这一 tick 不叠加：doThrowPearl 已经算好精确瞄准角，
         // 这里再转一次会把镜头拽回柱心，投掷就偏了。
-        if (throwSub != 4) faceColumn();
+        if (throwSub != 4) faceColumnAt(stand);
 
         switch (throwSub) {
             case 0 -> {
                 if (ownPearlInColumn(water)) {
                     debugMsg("[投掷] 气泡柱里已有自己的珍珠，跳过投掷");
-                    finishTrioThrow();
-                    return;
+                    onSuccess.run();
+                    return ThrowSeq.DONE;
                 }
                 throwRetries = 0;
                 setThrowSub(1, "柱里没珍珠，准备投一颗");
             }
             case 1 -> {
                 if (settlePosition(stand)) {
-                    debugMsg("[投掷] 站位已确认：" + mc.player.getBlockPos().toShortString());
+                    debugMsg("[投掷] 站位已确认");
                     setThrowSub(2, "脱离完成，开始检查活板门");
                     cooldown = PACE_STEP;
                 }
@@ -2164,7 +2152,7 @@ public class StashMover extends Module {
                     edgeLastX = mc.player.getX();
                     edgeLastZ = mc.player.getZ();
                     cooldown = PACE_STEP;
-                    return;
+                    return ThrowSeq.RUNNING;
                 }
                 // 关着 → 必须先自己打开（用户口径：大部分时间都是关的）
                 // ⚠️ V6.7p11 刻意偏离：PearlDrop 反编译源码里是**反过来**的
@@ -2182,16 +2170,16 @@ public class StashMover extends Module {
                         backoffTicks = 25;
                         setThrowSub(1, "退开换角度重开活板门");
                         cooldown = 30;
-                        return;
+                        return ThrowSeq.RUNNING;
                     }
-                    enterStuck("连续 " + (6 * (trapdoorRetreats + 1)) + " 次都打不开活板门 " + stand.toShortString()
+                    enterStuck("连续 " + (6 * (trapdoorRetreats + 1)) + " 次都打不开活板门"
                         + "（眼睛距=" + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(Vec3d.ofCenter(stand)))
-                        + "，请手动确认这个坐标是不是活板门、有没有被方块挡住）");
-                    return;
+                        + "，请手动确认活板门是否填对、有没有被方块挡住）");
+                    return ThrowSeq.FAILED;
                 }
                 if (!approachForOpen(stand)) {
                     debugMsg("[活板门] 离得还远，先走近");
-                    return;
+                    return ThrowSeq.RUNNING;
                 }
                 trapdoorClickAttempts++;
                 debugMsg("[活板门] 关着 → 点击打开（第 " + trapdoorClickAttempts + " 次）");
@@ -2218,21 +2206,21 @@ public class StashMover extends Module {
                     if (inv >= 0) {
                         InvUtils.move().from(inv).toHotbar(mc.player.getInventory().getSelectedSlot());
                         cooldown = PACE_STEP;
-                        return;
+                        return ThrowSeq.RUNNING;
                     }
-                    enterStuck("快捷栏里没有末影珍珠");
-                    return;
+                    return ThrowSeq.NO_PEARL;
                 }
                 sneakForThrow();
                 // V6.7p11：投之前记一次背包珍珠数，投完用「数量是否下降」判定成功（PearlDrop 的做法）
                 pearlCountBefore = countPearls();
                 debugMsg("[投掷] 按住 Shift 投出（快捷栏槽位 " + slot + "，现有珍珠 " + pearlCountBefore + "）");
                 doThrowPearl(slot, columnAimPoint(water));
+                backoffTicks = TRIO_RETREAT_TIMEOUT;   // trio 投完蹲着后退（后退阶段处理停止）
                 setThrowSub(5, "已投出，准备后退");
                 cooldown = PACE_STEP;
             }
             case 5 -> {
-                if (backOffToSafe()) {
+                if (backOffToSafe(water)) {
                     setThrowSub(6, "已退到安全距离");
                     verifyStartTick = tick;
                     cooldown = PACE_STEP;
@@ -2254,7 +2242,8 @@ public class StashMover extends Module {
                         warning("珍珠已投出（数量 " + pearlCountBefore + " → " + countPearls()
                             + "），但柱内暂未检测到，若下趟回不来请检查落点");
                     }
-                    finishTrioThrow();
+                    onSuccess.run();
+                    return ThrowSeq.DONE;
                 } else if (tick - verifyStartTick > TRIO_THROW_TIMEOUT) {
                     throwRetries++;
                     if (throwRetries >= TRIO_MAX_THROW_RETRIES) {
@@ -2267,7 +2256,8 @@ public class StashMover extends Module {
                 }
             }
         }
-    }
+    
+        return ThrowSeq.RUNNING;}
 
     /** 投掷流程收尾：松键、回到“取货/存货”阶段。 */
     private void finishTrioThrow() {
@@ -2291,10 +2281,9 @@ public class StashMover extends Module {
     }
 
     /** ④ 松开 shift、按 S 退离气泡柱（退到离柱心 ≥2.5 格），再回到投掷前的原位。 */
-    private boolean backOffToSafe() {
+    private boolean backOffToSafe(BlockPos water) {
         // V6.7p12：后退全程保持蹲着（用户口径），只在退到安全距离后才由 finishTrioThrow 松开
         sneakForThrow();
-        BlockPos water = trioTrapdoor().down(1);
         Vec3d center = Vec3d.ofCenter(water);
         double dist = Math.hypot(center.x - mc.player.getX(), center.z - mc.player.getZ());
 
@@ -2350,8 +2339,7 @@ public class StashMover extends Module {
         Vec3d now = mc.player.getEntityPos();
         if (lastPos != null && StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, now.x, now.z, 32)) {
             trioZone = trioZone == StashMoveLogic.Zone.SOURCE ? StashMoveLogic.Zone.STORE : StashMoveLogic.Zone.SOURCE;
-            throwAttempts = 0;
-            blacklist.clear();
+                blacklist.clear();
             chestQueue.clear();
             queueIndex = 0;
             throwSub = 0;
@@ -2424,13 +2412,31 @@ public class StashMover extends Module {
             }
             double distSq = mc.player.getBlockPos().getSquaredDistance(pullPos);
             if (distSq <= 16) {
-                lookAt(Vec3d.ofCenter(pullPos));
-                afterMoveAction = () -> BlockClicker.clickBlockNoRotate(pullPos, Direction.UP, Hand.MAIN_HAND);
-                String ack = pullN >= 0 ? ackKeyword.get() + pullN : ackKeyword.get();
-                sendPrivate(pullRequester, ack);
-                info("已拉 " + pullRequester + " 的珍珠");
-                pullPhase = 1;
-                pullReturnStart = tick;
+                // V6.7p13：点活板门加「确认 + 重试」——用门的状态是否翻转判断点中了没。
+                boolean isTrapdoor = mc.world.getBlockState(pullPos).getBlock() instanceof TrapdoorBlock;
+                if (!pullClickSent) {
+                    pullClickSent = true;
+                    pullClickAttempts = 1;
+                    pullTrapdoorWasOpen = isTrapdoor && trapdoorIsOpenOrAbsent(pullPos);
+                    pullClickStartTick = tick;
+                    realClick(pullPos);
+                    return;
+                }
+                boolean flipped = isTrapdoor && (trapdoorIsOpenOrAbsent(pullPos) != pullTrapdoorWasOpen);
+                if (flipped) {
+                    finishPullClick();
+                } else if (tick - pullClickStartTick > 10) {
+                    if (pullClickAttempts < 3) {
+                        pullClickAttempts++;
+                        pullTrapdoorWasOpen = isTrapdoor && trapdoorIsOpenOrAbsent(pullPos);
+                        pullClickStartTick = tick;
+                        debugMsg("[拉珍珠] 活板门没翻转，重试第 " + (pullClickAttempts - 1) + " 次");
+                        realClick(pullPos);
+                    } else {
+                        // 3 次都没翻转也发 ack，别让 1 号一直等
+                        finishPullClick();
+                    }
+                }
                 return;
             }
             if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(pullPos, true);
@@ -2453,12 +2459,22 @@ public class StashMover extends Module {
         if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(pullStartPos, true);
     }
 
+    private void finishPullClick() {
+        String ack = pullN >= 0 ? ackKeyword.get() + pullN : ackKeyword.get();
+        sendPrivate(pullRequester, ack);
+        info("已拉 " + pullRequester + " 的珍珠");
+        pullPhase = 1;
+        pullReturnStart = tick;
+    }
+
     private void resetPull() {
         pullActive = false;
         pullPos = null;
         pullRequester = null;
         pullN = -1;
         pullPhase = 0;
+        pullClickSent = false;
+        pullClickAttempts = 0;
     }
 
     @EventHandler
@@ -2503,6 +2519,8 @@ public class StashMover extends Module {
         pullN = req.number();
         pullStartTick = tick;
         pullPhase = 0;
+        pullClickSent = false;
+        pullClickAttempts = 0;
         pullStartPos = mc.player.getBlockPos();
         info("收到 " + parsed.sender() + " 的拉珍珠请求，出发");
     }
@@ -2557,7 +2575,7 @@ public class StashMover extends Module {
                     if (!(mc.world.getBlockEntity(p) instanceof SignBlockEntity sign)) continue;
                     for (var line : sign.getFrontText().getMessages(false)) {
                         if (line.getString().toLowerCase(Locale.ROOT).contains(key)) {
-                            info("找到包含名字的告示牌: " + p.toShortString());
+                            info("找到包含名字的告示牌");
                             return p.down();
                         }
                     }
@@ -2575,7 +2593,7 @@ public class StashMover extends Module {
         event.setCancelled(true);
         String name = "新珍珠点" + pearlPoints.get().size();
         pearlPoints.get().put(name, StashPearlLogic.formatPos(pos.getX(), pos.getY(), pos.getZ()));
-        info("已记录珍珠点 " + pos.toShortString() + "，请在设置里把「" + name + "」改成玩家 ID");
+        info("已记录珍珠点「" + name + "」，请在设置里把它改成玩家 ID");
     }
 
     // ==================== 通用工具 ====================
@@ -2637,10 +2655,8 @@ public class StashMover extends Module {
         turnTo(yp[0], yp[1]);
         afterMoveAction = () -> {
             if (mc.player != null) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-            // V6.7p12：投完**不松 Shift**——后退也要蹲着（用户口径），到安全位再松（finishTrioThrow）
         };
-
-        backoffTicks = TRIO_RETREAT_TIMEOUT;   // 投完按 S 后退（实际按“离柱心 ≥1.0 格”提前停，这里只是上限）
+        // 收尾（是否后退、是否松 Shift）由调用方决定：trio 要蹲着后退，双号投完直接站起走下一步
         cooldown = 3;
         progress();
     }
@@ -2701,12 +2717,10 @@ public class StashMover extends Module {
         if (!debug.get() || mc.world == null || mc.player == null) return;
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
-        debugMsg("[脱困] 找不到可站格｜玩家格=" + feet.toShortString()
-            + " 自身=" + blockName(feet)
+        debugMsg("[脱困] 找不到可站格｜自身=" + blockName(feet)
             + " 脚下=" + blockName(feet.down())
             + " 水中=" + mc.player.isTouchingWater()
-            + "｜活板门=" + trapdoorPos.toShortString()
-            + " 打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
+            + "｜活板门打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
             + " 水格=" + blockName(water));
     }
 
@@ -2721,24 +2735,6 @@ public class StashMover extends Module {
      *
      * @return true = 已就位且活板门开着，可以投
      */
-    private boolean prepareThrowPosition(BlockPos trapdoorPos) {
-        BlockPos spot = pearlStandSpot(trapdoorPos);
-        if (spot == null) spot = trapdoorPos;   // 四周无处可站时退回原位（仍然潜行投）
-        if (mc.player.getBlockPos().getSquaredDistance(spot) > 2.25) {
-            if (!PathManagers.get().isPathing()) {
-                PathManagers.get().moveToPrecise(spot);
-            }
-            return false;
-        }
-        var state = mc.world.getBlockState(trapdoorPos);
-        if (state.getBlock() instanceof TrapdoorBlock && !state.get(TrapdoorBlock.OPEN)) {
-            realClick(trapdoorPos);
-            cooldown = 10;
-            return false;
-        }
-        return true;
-    }
-
     /** 投掷时按住潜行键（防止走位滑进气泡柱）。 */
     private void sneakForThrow() {
         if (mc.options == null) return;
@@ -3014,9 +3010,9 @@ public class StashMover extends Module {
             PathManagers.get().moveToPrecise(pos);
             return;
         }
-        // 同一个目标走太久还没到 → 别再无限重试，直接报出来（坐标 + 目标）
+        // 同一个目标走太久还没到 → 别再无限重试，直接报出来
         if (tick - pathToSince > 400) {
-            enterStuck("走去 " + pos.toShortString() + " 超时（20 秒没到），请检查路是否被堵");
+            enterStuck("走位超时（20 秒没到），请检查路是否被堵");
             return;
         }
         if (!PathManagers.get().isPathing() && tick - pathStartTick > 20) {
@@ -3088,19 +3084,19 @@ public class StashMover extends Module {
         if (!pos.equals(openChest)) {
             openAttempts = 0;
             if (debug.get()) {
-                info("[开箱] 换目标 → " + pos.toShortString() + "，失败计数归零");
+                info("[开箱] 换目标，失败计数归零");
             }
         }
         openChest = pos;
         // 保险：调用方已经判过距离，这里再兜一次，避免别处漏判后隔空点击
         if (!approachForOpen(pos)) return;
         if (openAttempts >= 8) {
-            enterStuck("连续 8 次都打不开箱子 " + pos.toShortString() + "（检查是否被方块挡住或位置填错）");
+            enterStuck("连续 8 次都打不开箱子（检查是否被方块挡住或位置填错）");
             return;
         }
         openAttempts++;
         Vec3d center = Vec3d.ofCenter(pos);
-        debugMsg("[开箱] 点击 " + pos.toShortString() + " 第 " + openAttempts + " 次"
+        debugMsg("[开箱] 点击第 " + openAttempts + " 次"
             + "（眼睛距 " + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(center))
             + " / 阈值 " + OPEN_REACH + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
         realClick(pos);
@@ -3276,7 +3272,7 @@ public class StashMover extends Module {
         int prev = throwSub;
         throwSub = next;
         if (debug.get()) {
-            info("[三号][投掷] 子步骤 " + prev + " → " + next + " " + THROW_SUB_NAMES[next]
+            info("[投掷] 子步骤 " + prev + " → " + next + " " + THROW_SUB_NAMES[next]
                 + (why == null || why.isEmpty() ? "" : "（" + why + "）"));
         }
     }

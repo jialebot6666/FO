@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p12`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p12-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p13`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p13-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -524,6 +524,25 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     `backOffToSafe()` 开头改为 `sneakForThrow()` 保持蹲姿，退到离柱心 ≥1.0 格、
     校验完成后由 `finishTrioThrow()` 统一松开。
   - 测试：全仓 **51 套件 422 测试全绿**（改动为交互/走位实时耦合，无新增纯逻辑）。
+- ✅ 6.7p13 已修复：**把 6.7p7~p12 修的所有 bug 适配到双号搬运端与拉珍珠端**（用户确认：双号珍珠房结构和 1 号一样，活板门靠墙、门板占一侧；2/3 号一起加固）。
+  - 采用「**共用工具箱**」而非复制：抽出一份模式无关的投掷子流程，两种模式各自驱动，
+    逻辑只有一份，以后修一处两边同生效。双号的「借珍珠/还珍珠/自杀回重生点」主链**一行没动**。
+  - **阶段0（先修外溢回归）**：① `doThrowPearl` 之前去掉 `releaseSneak()` + 设 `backoffTicks`，
+    导致双号投完一直蹲着 + 莫名后退 → 现在 `doThrowPearl` 只负责「转头 + 投」，
+    收尾（后退/松键）交回调用方（trio 补 `backoffTicks`，dual 补 `releaseSneak`）；
+    ② 「寻路中算进展」的看门狗从 `tickTrioMover` 上移到 `onTick` 顶层，双号长距离寻路不再被误杀。
+  - **阶段2（抽共享投掷子流程）**：新增 `ThrowSeq` 枚举 + `tickThrowSequence(stand, onSuccess)`，
+    把 1 号验证过的「站正对面→开活板门→贴边居中→瞄腔底投→珍珠数下降判定→蹲着后退」整条链参数化。
+    `trioThrow` 变薄壳，`dualThrow` 也调同一份；删掉双号旧的 `prepareThrowPosition`/`dualVerify`/
+    `MoverState.VERIFY`/`throwAttempts` 字段（数量判定已进共享子流程，成功后双号直接 PUT_BACK）。
+    `faceColumn`→`faceColumnAt(stand)`、`backOffToSafe`→`backOffToSafe(water)` 参数化；
+    `setThrowSub` 前缀去掉「三号」（两个模式共用）。
+  - **阶段3（拉珍珠端加固）**：`tickPuller`（双号 PEARL + 三人 2/3 号共用）点活板门
+    改为「真实交互 + **门状态翻转确认 + 最多 3 次重试**」，3 次都不翻转也发 ack（别让 1 号干等）；
+    防卡 `TeleportFloodDetector` 覆盖从 `isMoverRole()` 扩到 `isMoverRole() || isPullerRole()`。
+  - **附带**：StashMover 日志去坐标（无政府服防泄露），新增 `NoCoordinatesInLogsTest`
+    防回归（只查自动搬运模块的日志语句不含绝对坐标）。
+  - 测试：全仓 **52 套件 423 测试全绿**（本轮是重构 + 行为对齐，无新增纯逻辑函数）。
   - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
