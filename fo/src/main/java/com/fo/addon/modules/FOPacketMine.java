@@ -455,6 +455,10 @@ public class FOPacketMine extends Module {
         if (!isValidTarget(pos)) return false;
 
         if (mainSession != null && mainSession.pos.equals(pos)) return true;
+
+        // 双重破坏开启时，镜像会话正在挖的方块拒绝再开主会话（上游 alH 守卫）
+        if (doubleBreak.get() && mirrorSession != null && mirrorSession.pos.equals(pos)) return false;
+
         if (mainSession != null && !mainSession.done && mainSession.priority > priority) {
             // 已有更高优先级的会话且仍在范围内工作（上游 alI 的抢占保护）
             if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) <= range.get()) return false;
@@ -589,25 +593,26 @@ public class FOPacketMine extends Module {
             }
         }
 
-        // 镜像会话（双重破坏的第二条进度线，上游 helper.xs()）
+        // 镜像会话（双重破坏的第二条进度线，上游 helper.xs()+xu()）：
+        // ⚠️ 上游镜像只推进度与完成判定，从不发 STOP——它若发包会把共享的 280ms 冷却时钟
+        //    和时间校验时钟每 tick 刷新，把主会话（点第二个方块后）永久卡死（6.8p10 修复）
         if (mirrorSession != null) {
             mirrorSession.progressTick();
-            if (mirrorSession.progress >= 1.0f
-                && !mc.world.getBlockState(mirrorSession.pos).isAir()
-                && BlockUtils.canBreak(mirrorSession.pos)) {
-                mirrorSession.tryBreak();
-            }
-            if (mc.world.getBlockState(mirrorSession.pos).isAir() && !instantMine.get()) {
+            if (mirrorSession.done
+                || (mirrorSession.progress >= 1.0f
+                    && ++mirrorSession.breakAttempts > miningTicks.get())) {
                 mirrorSession = null;
             }
         }
 
-        // 主会话（上游 helper2.xq()）
+        // 主会话（上游 helper2.xq()）：完成收尾只走 done（进度满后的收尾在 tryBreak 内，
+        // 上游 xu 是镜像专用——主会话若再走一遍会双重计数并发双 STOP，6.8p10 修复）；
+        // InstantMine 开启时保留 done 会话：方块重生后进度仍满，直接秒补 STOP（上游 f/d 不重置语义）
         if (mainSession != null) {
             // 会话期间每 tick 清零原版挖掘进度：原版破坏由发包接管
             if (mc.interactionManager != null) mc.interactionManager.cancelBlockBreaking();
             mainSession.tick();
-            if (mainSession.checkDone()) mainSession = null;
+            if (mainSession.done && !instantMine.get()) mainSession = null;
         }
 
         // 末影箱键（边沿触发，防止按住连放）
@@ -621,8 +626,12 @@ public class FOPacketMine extends Module {
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (!render.get()) return;
-        if (mainSession != null) mainSession.render(event);
-        if (mirrorSession != null) mirrorSession.render(event);
+        // 主会话完成后不再画（避免空气位残留满格盒子）；镜像画之前与主会话同位去重（上游 aly）
+        if (mainSession != null && !mainSession.done) mainSession.render(event);
+        if (mirrorSession != null && !mirrorSession.done
+            && (mainSession == null || !mainSession.pos.equals(mirrorSession.pos))) {
+            mirrorSession.render(event);
+        }
     }
 
     // ── 挖掘会话（上游 BlockPosPlayerHelper 的移植版）──
@@ -802,8 +811,13 @@ public class FOPacketMine extends Module {
             if (ideal < progress || miningAir) progress = ideal;
         }
 
-        /** 发破坏包（上游 xt）：时间校验 → 换持策略 → STOP。 */
+        /** 发破坏包（上游 xt）：实时面/范围门 → 时间校验 → 换持策略 → STOP。 */
         void tryBreak() {
+            // 实时范围与破坏面（上游 xt 每次调用 PlacementUtils.Fi 重算；超出范围或取不到面不发）：
+            // 玩家转身/远离后仍用旧面发 STOP 会被 Grim 判非法（6.8p10 修复）
+            if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) > range.get()) return;
+            dir = getFacing(pos);
+
             // 时间校验模式：STOP 前必须等够真实挖掘时间（上游 FX 分支）
             if (grimMode.get() == GrimMode.时间校验) {
                 double expected = Math.ceil(1.0 / Math.max(maxDelta, 1e-6)) * 50.0;
@@ -870,43 +884,6 @@ public class FOPacketMine extends Module {
                 progress = 0;
                 prevProgress = 0;
             }
-        }
-
-        /** 完成判定（上游 xu）：进度满后按挖掘上限收尾。 */
-        boolean checkDone() {
-            if (done) return true;
-
-            if (progress >= 1.0f) {
-                boolean holdingBest = bestSlot == -1
-                    || (bestStack != null && ItemStack.areEqual(bestStack, mc.player.getMainHandStack()));
-                if (holdingBest) {
-                    breakAttempts++;
-                    return breakAttempts > miningTicks.get();
-                }
-                // 额外切换：进度满但没拿最快工具 → 换上发包再换回（上游 AutoSwitch 分支）
-                if (autoSwitch.get() && !manual.get() && bestSlot != -1) {
-                    if (swapAction.get() == SwapActionMode.静默换持) {
-                        int button = mc.player.getInventory().getSelectedSlot();
-                        screenSwap(bestSlot, button);
-                        if (endRotate.get()) rotateTo(pos);
-                        breakAttempts++;
-                        sendStop();
-                        swing();
-                        screenSwap(bestSlot, button);
-                    } else {
-                        InvUtils.swap(bestSlot, true);
-                        if (endRotate.get()) rotateTo(pos);
-                        breakAttempts++;
-                        sendStop();
-                        swing();
-                    }
-                    return breakAttempts > miningTicks.get();
-                }
-                return false;
-            }
-
-            breakAttempts = 0;
-            return false;
         }
 
         /** 渲染（上游 alz）：缓动 + 帧间插值 + 盒子收缩 + 形状贴合 + 四色渐变。 */

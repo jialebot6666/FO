@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p9`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p9-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p10`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p10-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -231,6 +231,21 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p10 已完成：**修复双挖第二个方块挖不掉 / 单挖偶尔失败（会话调度对齐上游）**：
+    - 根因一（双挖卡死）：镜像会话误调 tryBreak 每 tick 发 STOP。上游镜像只做 xs()（进度）+
+      xu()（完成判定），**从不发 STOP**；镜像的 STOP 把共享的 280ms 冷却时钟与时间校验时钟
+      每 tick 刷新 → 点第二个方块后新会话 START 被冷却永久卡死、时间校验永不放行。
+      修复：镜像只推进度 + 完成计数（progress≥1 后 breakAttempts++ > MiningTicks 清除）。
+    - 根因二（单挖偶尔失败）：主会话同时挂 tryBreak + checkDone（上游 xu 仅镜像专用），
+      同 tick 双重 breakAttempts++（阈值语义减半）且 AutoSwitch 分支同 tick 双 STOP。
+      修复：删除主会话的 checkDone 调用与方法（主会话完成=done；InstantMine 开启时保留
+      done 会话，方块重生后秒补 STOP——上游 f/d 不重置语义）。
+    - 根因三：tryBreak 用会话创建时定死的破坏面/无范围复查，转身/远离后 STOP 面非法被 Grim 拒。
+      修复：tryBreak 实时重算 dir（上游 xt 每次 PlacementUtils.Fi 重算）+ 距离超 range 不发。
+    - 其他：mine() 补上游 alH 守卫（DoubleBreak 开且请求位=镜像位 → 拒绝）；渲染对齐上游 aly
+      （主会话 done 不画防空气位残留满格盒；镜像 !done 且与主会话同位去重不画）。
+    - 排除项：上游 125ms list（STOP 去重）在可用源码中只写不读（消费方为未移植联动模块），
+      挖掘路径无此门控，不移植。
   - ✅ 6.8p9 已完成：**修复 6.8p7 起的挖掘回弹（Grim 拒包）**（用户实测 6.8p5 完美、6.8p7 经常回弹，diff 两版+上游逐包比对定位）：
     - **根因：NewDisabler 伪造包 START(0,-999,0) 在 6.8p7 全量重写时误用裸 new（sequence=0）**。
       上游 xE 是 SequencedPacketCreator（`new PlayerActionC2SPacket(START, (0,-999,0), UP, n2)`，
