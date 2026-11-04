@@ -1,319 +1,291 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
-import com.fo.addon.utils.PacketMineLogic;
+import com.fo.addon.utils.SpeedMineLogic;
+import meteordevelopment.meteorclient.events.entity.player.DoAttackEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
-import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
-import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.entity.SortPriority;
-import meteordevelopment.meteorclient.utils.entity.TargetUtils;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
- * FO 发包挖掘（移植自 Hachimi V2 反编译源码的 AutoMine）。
+ * FO 发包挖掘（移植自 Hachimi V2 SpeedMine；源码类 {@code BlockPosBoxMultitask}，1083 行）。
  *
- * <p>来源：{@code pw.hachimi.client.module.combat.AutoMine}（Hachimi-V2-crack.jar 去混淆重构版）。
- * 目标方块计算抽到 {@link PacketMineLogic}（纯逻辑，可单测）；实际挖掘走彗星端（Meteor）
- * 官方 {@link BlockUtils#breakBlock(BlockPos, boolean)}（自动旋转 + 切槽 + 发包），不用自写 Mixin。</p>
+ * <p>用法：对准要挖的方块<b>左键点一下</b>，模块接管该方块的挖掘——客户端自己累计破坏进度，
+ * 达到「挖掘进度」（Speed，3C3U 实战 0.7）就直接发 {@code STOP_DESTROY_BLOCK} 包破坏，
+ * 不需要按住左键，也不受原版挖掘动画/冷却约束。再点别的方块即切换目标。</p>
  *
- * <p>行为（与 Hachimi 原版对齐的部分）：
+ * <p>核心机制（与原版对齐）：
  * <ul>
- *   <li>选目标：范围内最近的存活真人玩家（跳过自己/创造模式/好友，默认排序最近）。</li>
- *   <li>Burrow：挖目标脚里的方块（±0.25 四角，覆盖跨边界站立）。</li>
- *   <li>Face：挖目标头顶的方块。</li>
- *   <li>Surround：挖目标脚下包的围城方块；「检查支撑」开启时只挖
- *       下面是黑曜石/基岩的邻位（对齐原版 {@code ary()} 的支撑判定）。</li>
- *   <li>白名单/黑名单/全部 三档过滤，默认仅黑名单（3C3U 实战名单，见下）。</li>
- *   <li>好友同步：好友正在挖的方块跳过（原版 FriendSync，依赖的"谁在挖哪格"状态
- *       彗星端拿不到，移植版降级为不做——见「与原版差异」）。</li>
+ *   <li>接管方式对齐原版 {@code onAttackBlock}：拦截攻击方块事件、取消原版挖掘、进发包队列。</li>
+ *   <li>进度判定对齐原版 {@code shouldBreak}：{@code calcBlockBreakingDelta} 累计到 Speed 即破坏；
+ *       一击即碎的方块直接发。</li>
+ *   <li>「自动切换」开挖时自动切热栏里最快工具（对齐 SwapAction=Hotbar + AutoSwitch=true）。</li>
+ *   <li>快捷键：暂停键（按住暂停发包）、取消键（放弃当前目标），对齐原版 Pause/Cancel。</li>
+ *   <li>渲染：进度色方块（红→绿渐变，对齐 StartSide/EndSide 语义）+ 方块轮廓。</li>
  * </ul></p>
  *
- * <p>默认参数对齐 3C3U 实战配置（cheng.json AutoMine 段实测值）：目标范围 6、挖掘范围 6、
- * 仅黑名单模式（梯子/基岩/脚手架/火/蜘蛛网/15 色床/重生锚）、排序最近角度、
- * 挖脚里+挖围城开、挖头顶关、聊天提示开。CheckSelf/FriendSync/Priority 为上游
- * Multitask 体系专属，不适用本移植版（见下方差异说明）。</p>
+ * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
+ * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、
+ * OnlyOnGround/PauseOnFlying/PauseInFluid 全关。</p>
  *
- * <p>与原版的刻意差异（反编译语义无法完全确认的部分，保守处理）：
- * <ul>
- *   <li>原版 Surround 邻位候选包含"空气位"（依赖其私有 Multitask 的放置/挖掘复用逻辑），
- *       移植版只挖实心可破坏方块——挖空气无意义。</li>
- *   <li>原版 FriendSync 需要全服玩家的挖掘状态表，彗星端无此数据，不实现。</li>
- *   <li>原版 Wait/双任务并发（Multitask 同时挖两格）未移植，本模块每 tick 只发一次包、
- *       一个会话只挖一格，靠「重复发包间隔」保证速度——行为简单可预期。</li>
- * </ul></p>
+ * <p>刻意不移植（依赖上游私有体系或需实机调试，需要时单独立项）：
+ * Grim「NewDisabler」快速挖绕过、Desync 破坏去同步、InstantMine/DoubleBreak 原版漏洞、
+ * NoReset/NoCollision、EnderChest 按键、Multitask 并发挖掘体系。
+ * ⚠️ 因此 Grim 服上「挖掘进度」可以正常压到 0.7 发包，但没有针对 Grim 快速挖检测的对策，
+ * 实机被拦截时优先把 Speed 往上调（0.85~0.95），仍不行再回来一起做绕过。</p>
  */
 public class FOPacketMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgTarget = settings.createGroup("目标选择");
-    private final SettingGroup sgMine = settings.createGroup("挖掘");
+    private final SettingGroup sgGuard = settings.createGroup("暂停条件");
     private final SettingGroup sgRender = settings.createGroup("渲染");
 
-    // 目标选择
+    // 通用
 
-    private final Setting<Double> targetRange = sgTarget.add(new DoubleSetting.Builder()
-        .name("目标范围").description("搜索目标玩家的最大距离")
-        .defaultValue(6).min(1).sliderMax(16).build()
+    private final Setting<Double> speed = sgGeneral.add(new DoubleSetting.Builder()
+        .name("挖掘进度").description("vanilla 破坏进度累计到该倍率即发包破坏（Speed）。3C3U 实战 0.7")
+        .defaultValue(0.7).min(0.1).sliderMin(0.3).sliderMax(1.0).build()
     );
 
-    private final Setting<SortPriority> sortPriority = sgTarget.add(new EnumSetting.Builder<SortPriority>()
-        .name("排序方式").description("多个目标时优先攻击谁")
-        .defaultValue(SortPriority.ClosestAngle).build()
-    );
-
-    private final Setting<Boolean> ignoreCreative = sgTarget.add(new BoolSetting.Builder()
-        .name("忽略创造模式").description("跳过创造模式的玩家")
-        .defaultValue(true).build()
-    );
-
-    // 挖掘
-
-    private final Setting<Double> mineRange = sgMine.add(new DoubleSetting.Builder()
-        .name("挖掘范围").description("离目标方块超过该距离就不挖（原版 MineRange）")
+    private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
+        .name("范围").description("能接管的方块最大距离（Range）")
         .defaultValue(6).min(1).sliderMax(8).build()
     );
 
-    private final Setting<Boolean> mineBurrow = sgMine.add(new BoolSetting.Builder()
-        .name("挖脚里").description("挖目标玩家脚里的方块（Burrow）")
+    private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
+        .name("自动切换").description("开挖时自动切热栏里最快的适用工具")
         .defaultValue(true).build()
     );
 
-    private final Setting<Boolean> mineFace = sgMine.add(new BoolSetting.Builder()
-        .name("挖头顶").description("挖目标玩家头顶的方块（Face）")
+    private final Setting<Boolean> swing = sgGeneral.add(new BoolSetting.Builder()
+        .name("挥手").description("发包破坏时挥手（实战 Swing=None，默认关）")
         .defaultValue(false).build()
     );
 
-    private final Setting<Boolean> mineSurround = sgMine.add(new BoolSetting.Builder()
-        .name("挖围城").description("挖目标玩家脚下的围城方块（Surround）")
-        .defaultValue(true).build()
+    private final Setting<Boolean> startRotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("开挖转向").description("开挖前把视角转向目标方块（实战关闭）")
+        .defaultValue(false).build()
     );
 
-    private final Setting<Boolean> checkSupport = sgMine.add(new BoolSetting.Builder()
-        .name("检查支撑").description("围城方块只挖下面是黑曜石/基岩的（对齐原版支撑判定）")
-        .defaultValue(true).build()
+    private final Setting<Keybind> pauseKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("暂停键").description("按住时暂停发包挖掘（不丢当前目标）")
+        .defaultValue(Keybind.none()).build()
     );
 
-    private final Setting<Boolean> pauseOnUse = sgMine.add(new BoolSetting.Builder()
-        .name("使用物品时暂停").description("正在吃食物/拉弓等使用物品动作时暂停挖掘")
-        .defaultValue(true).build()
+    private final Setting<Keybind> cancelKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("取消键").description("按一下放弃当前目标")
+        .defaultValue(Keybind.none()).build()
     );
 
-    private final Setting<Integer> resendInterval = sgMine.add(new IntSetting.Builder()
-        .name("重复发包间隔").description("对同一格重复发挖掘包的间隔（tick）。1=每 tick 都发")
-        .defaultValue(2).min(1).sliderMax(10).build()
-    );
-
-    private final Setting<Boolean> swing = sgMine.add(new BoolSetting.Builder()
-        .name("挥手").description("发包挖掘时挥手")
-        .defaultValue(true).build()
-    );
-
-    private final Setting<FilterMode> filterMode = sgMine.add(new EnumSetting.Builder<FilterMode>()
-        .name("过滤模式").description("目标方块的过滤规则")
+    private final Setting<FilterMode> filterMode = sgGeneral.add(new EnumSetting.Builder<FilterMode>()
+        .name("过滤模式").description("能接管的方块过滤规则")
         .defaultValue(FilterMode.仅黑名单).build()
     );
 
-    private final Setting<Boolean> notify = sgMine.add(new BoolSetting.Builder()
-        .name("聊天提示").description("锁定新目标时在聊天栏提示（对齐原版 Notify）")
-        .defaultValue(true).build()
-    );
+    /** 黑名单默认值：照搬 3C3U 实战配置（cheng.json SpeedMine.Blacklist）。 */
+    private static final Block[] DEFAULT_BLACKLIST = {Blocks.FIRE, Blocks.RESPAWN_ANCHOR};
 
-    /** 黑名单默认值：照搬 3C3U 实战配置（cheng.json AutoMine.Blacklist）。 */
-    private static final Block[] DEFAULT_BLACKLIST = {
-        Blocks.LADDER, Blocks.BEDROCK, Blocks.SCAFFOLDING, Blocks.FIRE, Blocks.COBWEB,
-        Blocks.ORANGE_BED, Blocks.MAGENTA_BED, Blocks.LIGHT_BLUE_BED, Blocks.YELLOW_BED,
-        Blocks.LIME_BED, Blocks.PINK_BED, Blocks.GRAY_BED, Blocks.LIGHT_GRAY_BED,
-        Blocks.CYAN_BED, Blocks.PURPLE_BED, Blocks.BLUE_BED, Blocks.BROWN_BED,
-        Blocks.GREEN_BED, Blocks.RED_BED, Blocks.BLACK_BED, Blocks.RESPAWN_ANCHOR
-    };
-
-    private final Setting<List<Block>> blacklist = sgMine.add(new BlockListSetting.Builder()
-        .name("黑名单").description("过滤模式下不挖的方块")
+    private final Setting<List<Block>> blacklist = sgGeneral.add(new BlockListSetting.Builder()
+        .name("黑名单").description("过滤模式下不接管的方块")
         .defaultValue(DEFAULT_BLACKLIST)
         .visible(() -> filterMode.get() != FilterMode.仅白名单)
         .build()
     );
 
-    /** 白名单默认值：照搬 3C3U 实战配置（cheng.json AutoMine.Whitelist）。 */
-    private final Setting<List<Block>> whitelist = sgMine.add(new BlockListSetting.Builder()
-        .name("白名单").description("过滤模式下只挖的方块")
+    private final Setting<List<Block>> whitelist = sgGeneral.add(new BlockListSetting.Builder()
+        .name("白名单").description("过滤模式下只接管的方块")
         .defaultValue(Blocks.OBSIDIAN, Blocks.ENDER_CHEST)
         .visible(() -> filterMode.get() == FilterMode.仅白名单)
         .build()
     );
 
+    // 暂停条件（实战值全关，按需打开）
+
+    private final Setting<Boolean> onlyOnGround = sgGuard.add(new BoolSetting.Builder()
+        .name("仅地面").description("只有站在地面上才发包（OnlyOnGround）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> pauseOnFlying = sgGuard.add(new BoolSetting.Builder()
+        .name("飞行暂停").description("飞行时暂停（PauseOnFlying）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> pauseInFluid = sgGuard.add(new BoolSetting.Builder()
+        .name("水中暂停").description("游泳时暂停（PauseInFluid）")
+        .defaultValue(false).build()
+    );
+
     // 渲染
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("高亮").description("在游戏里画出正在挖的方块")
+        .name("渲染").description("画出当前目标和挖掘进度（Render）")
         .defaultValue(true).build()
     );
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("形状模式").description("高亮的线框/填充方式")
+        .name("形状模式").description("线框/填充方式（BoxMode）")
         .defaultValue(ShapeMode.Both).build()
     );
 
-    private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-        .name("填充颜色").description("高亮的填充颜色")
-        .defaultValue(new SettingColor(225, 57, 57, 40)).build()
+    private final Setting<SettingColor> startColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
+        .name("开始颜色").description("刚开挖的颜色（StartSide，红）")
+        .defaultValue(new SettingColor(255, 60, 60, 80)).build()
     );
 
-    private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("线条颜色").description("高亮的线条颜色")
-        .defaultValue(new SettingColor(225, 57, 57, 200)).build()
+    private final Setting<SettingColor> endColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
+        .name("结束颜色").description("即将破坏的颜色（EndSide，绿）")
+        .defaultValue(new SettingColor(60, 255, 60, 120)).build()
     );
 
-    /** 当前目标（HUD 信息用）。 */
-    private PlayerEntity target;
-    /** 当前会话正在挖的方块；null = 没有在挖。 */
+    private final Setting<Boolean> blockOutline = sgRender.add(new BoolSetting.Builder()
+        .name("方块轮廓").description("画目标方块的轮廓线（BlockOutline）")
+        .defaultValue(true).build()
+    );
+
+    /** 当前正在发包挖的方块；null = 空闲。 */
     private BlockPos current;
-    /** 上一次发包的方块（会话标识）。 */
-    private BlockPos lastPos;
-    /** 当前会话已发包次数（超时放弃换下一格）。 */
-    private int packets;
-    /** 重复发包计数器。 */
-    private int resendTimer;
-    /** 上一次聊天提示过的目标名（避免每 tick 刷屏）。 */
-    private String lastNotifyName;
+    /** 当前目标方块的破坏面。 */
+    private Direction currentDir;
+    /** 已累计的破坏进度（0~1）。 */
+    private float progress;
 
     public FOPacketMine() {
-        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 AutoMine：自动发包挖目标玩家的脚里(Burrow)/头顶(Face)/围城(Surround)方块。");
+        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 SpeedMine：对准方块左键接管，自动发包快挖（进度阈值 0.7），支持自动切工具/暂停/取消/进度渲染。");
     }
 
     @Override
     public void onActivate() {
-        target = null;
-        current = null;
-        packets = 0;
-        resendTimer = 0;
-        lastNotifyName = null;
+        cancelSession();
     }
 
     @Override
     public void onDeactivate() {
-        target = null;
-        current = null;
+        cancelSession();
+    }
+
+    /**
+     * 接管方块（对齐原版 onAttackBlock：拦截攻击 → 取消原版挖掘 → 进发包队列）。
+     * 注：彗星端 1.21.11 没有 AttackBlockEvent，等价触发点是 DoAttackEvent
+     * （原版 doAttack() 开头触发），目标方块从准星取。
+     */
+    @EventHandler
+    private void onAttack(DoAttackEvent event) {
+        if (!(mc.crosshairTarget instanceof BlockHitResult hit)
+            || mc.crosshairTarget.getType() != HitResult.Type.BLOCK) return;
+
+        BlockPos pos = hit.getBlockPos();
+        if (!isValidTarget(pos)) return;
+
+        // 接管：不让原版开始真挖掘
+        event.cancel();
+
+        if (pos.equals(current)) return; // 已经在挖这格
+        startSession(pos, hit.getSide());
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        target = null;
-        current = null;
-
-        // 使用物品时暂停（对齐原版 breakSetting/useItem 守卫）
-        if (pauseOnUse.get() && mc.player.isUsingItem()) return;
-
-        // 选目标（跳过自己/好友/创造/死人，范围内按排序取第一）
-        // 注：彗星端 TargetUtils.getPlayerTarget 返回 LivingEntity，但语义就是玩家；
-        //     PlayerUtils.isAlive() 不带参（只查自己），实体用 isAlive()
-        LivingEntity lt = TargetUtils.getPlayerTarget(targetRange.get(), sortPriority.get());
-        if (lt == null || !lt.isAlive()) return;
-        PlayerEntity t = (PlayerEntity) lt;
-        if (ignoreCreative.get() && t.isCreative()) return;
-        if (Friends.get().isFriend(t)) return;
-        target = t;
-
-        // 锁定新目标时提示一次（对齐原版 Notify）
-        if (notify.get()) {
-            String name = t.getName().getString();
-            if (!name.equals(lastNotifyName)) {
-                info("发包挖掘目标: " + name);
-                lastNotifyName = name;
-            }
+        if (pauseKey.get().isPressed()) return;
+        if (cancelKey.get().isPressed()) {
+            cancelSession();
+            return;
         }
 
-        // 收集候选方块
-        List<BlockPos> candidates = collectCandidates(t);
-        if (candidates.isEmpty()) return;
+        if (onlyOnGround.get() && !mc.player.isOnGround()) return;
+        if (pauseOnFlying.get() && mc.player.getAbilities().flying) return;
+        if (pauseInFluid.get() && mc.player.isTouchingWater()) return;
 
-        BlockPos best = PacketMineLogic.closest(candidates, mc.player.getX(), mc.player.getZ());
-        if (best == null) return;
+        if (current == null) return;
 
-        // 距离守卫（对齐原版 MineRange：眼睛到方块中心的直线距离）
-        double dist = mc.player.getEyePos().distanceTo(best.toCenterPos());
-        if (dist > mineRange.get()) return;
+        // 服务端已经破坏了这格 → 收工
+        BlockState state = mc.world.getBlockState(current);
+        if (state.isAir()) {
+            cancelSession();
+            return;
+        }
+        if (!BlockUtils.canBreak(current)) {
+            cancelSession();
+            return;
+        }
 
-        if (!BlockUtils.canBreak(best)) return;
-
-        // 会话：同一格按间隔重复发包，直到方块消失或超时
-        if (best.equals(lastPos) && !sessionExpired()) {
-            current = lastPos;
-            if (++resendTimer < resendInterval.get()) return;
-            resendTimer = 0;
+        float delta = state.calcBlockBreakingDelta(mc.player, mc.world, current);
+        if (SpeedMineLogic.shouldBreak(progress, delta, speed.get().floatValue())) {
+            // 到阈值：直接发 STOP_DESTROY_BLOCK 包破坏（发包挖掘的核心一步）
+            mc.player.networkHandler.sendPacket(
+                new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir));
+            if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND);
+            // 客户端状态复位，避免原版残留半截挖掘进度
+            mc.interactionManager.cancelBlockBreaking();
+            progress = 0;
+            current = null;
         } else {
-            // 换了新格子，开新会话
-            lastPos = best;
-            packets = 0;
-            resendTimer = 0;
-            current = best;
+            progress = SpeedMineLogic.accumulate(progress, delta);
         }
-
-        BlockUtils.breakBlock(best, swing.get());
-        packets++;
     }
 
-    /** 会话超时：同一格发了太多包还没挖掉，视为打不动（黑曜石没工具/伪 obsidian），放弃。 */
-    private boolean sessionExpired() {
-        return packets >= 40;
+    /** 开始挖一格：切工具 → 转向（可选）→ 发 START 包。 */
+    private void startSession(BlockPos pos, Direction dir) {
+        cancelSession();
+
+        if (autoSwitch.get()) switchToBestTool(mc.world.getBlockState(pos));
+
+        currentDir = dir;
+        progress = 0;
+
+        Runnable start = () -> mc.interactionManager.attackBlock(pos, currentDir);
+        if (startRotate.get()) {
+            Rotations.rotate(Rotations.getYaw(pos.toCenterPos()), Rotations.getPitch(pos.toCenterPos()), start);
+        } else {
+            start.run();
+        }
+
+        current = pos;
     }
 
-    private List<BlockPos> collectCandidates(LivingEntity t) {
-        List<BlockPos> out = new ArrayList<>();
-
-        if (mineBurrow.get()) {
-            for (BlockPos pos : PacketMineLogic.burrowCandidates(t.getX(), t.getY(), t.getZ())) {
-                if (isMineableTarget(pos)) out.add(pos);
-            }
+    /** 自动切换：热栏里对该方块最快的工具（Meteor 现成 findFastestTool，对齐 SwapAction=Hotbar）。 */
+    private void switchToBestTool(BlockState state) {
+        meteordevelopment.meteorclient.utils.player.FindItemResult tool = InvUtils.findFastestTool(state);
+        if (tool.found() && tool.slot() != mc.player.getInventory().getSelectedSlot()) {
+            InvUtils.swap(tool.slot(), false);
         }
-
-        if (mineFace.get()) {
-            for (BlockPos pos : PacketMineLogic.faceCandidates(t.getX(), t.getY(), t.getZ())) {
-                if (isMineableTarget(pos)) out.add(pos);
-            }
-        }
-
-        if (mineSurround.get()) {
-            double width = t.getWidth();
-            for (BlockPos pos : PacketMineLogic.surroundCandidates(t.getX(), t.getY(), t.getZ(), width)) {
-                if (checkSupport.get() && !hasUnbreakableSupport(pos)) continue;
-                if (isMineableTarget(pos)) out.add(pos);
-            }
-        }
-
-        return out;
     }
 
-    /**
-     * 目标方块过滤：非空气、无流体、过白/黑名单（对齐原版 {@code arC()}）。
-     */
-    private boolean isMineableTarget(BlockPos pos) {
+    /** 目标过滤（对齐原版 Selection/Whitelist/Blacklist + Range）。 */
+    private boolean isValidTarget(BlockPos pos) {
+        if (pos.equals(current)) return true; // 已接管的不重复过滤
+        if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) > range.get()) return false;
+
         BlockState state = mc.world.getBlockState(pos);
-        Block block = state.getBlock();
         if (state.isAir()) return false;
         if (!state.getFluidState().isEmpty()) return false;
 
+        Block block = state.getBlock();
         switch (filterMode.get()) {
             case 仅黑名单: return !blacklist.get().contains(block);
             case 仅白名单: return whitelist.get().contains(block);
@@ -321,23 +293,29 @@ public class FOPacketMine extends Module {
         }
     }
 
-    /** 支撑判定（对齐原版 {@code ary()}）：下面一格是黑曜石或基岩才允许挖。 */
-    private boolean hasUnbreakableSupport(BlockPos pos) {
-        Block below = mc.world.getBlockState(pos.down()).getBlock();
-        return below == Blocks.BEDROCK || below == Blocks.OBSIDIAN;
-    }
-
-    @Override
-    public String getInfoString() {
-        return target != null ? target.getName().getString() : null;
+    private void cancelSession() {
+        if (current != null && mc.interactionManager != null) {
+            mc.interactionManager.cancelBlockBreaking();
+        }
+        current = null;
+        progress = 0;
     }
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (!render.get() || current == null) return;
         if (mc.world.getBlockState(current).isAir()) return;
+
+        int[] c = SpeedMineLogic.lerpColor(
+            new int[]{startColor.get().r, startColor.get().g, startColor.get().b, startColor.get().a},
+            new int[]{endColor.get().r, endColor.get().g, endColor.get().b, endColor.get().a},
+            progress
+        );
+        SettingColor side = new SettingColor(c[0], c[1], c[2], c[3]);
+        SettingColor line = new SettingColor(c[0], c[1], c[2], Math.min(255, c[3] + 100));
+
         Box box = new Box(current);
-        event.renderer.box(box, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+        event.renderer.box(box, side, line, shapeMode.get(), blockOutline.get() ? 0 : -1);
     }
 
     public enum FilterMode {

@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p1`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p1-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p2`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p2-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -15,7 +15,8 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
-  10. FO 发包挖掘（`modules/FOPacketMine`，移植自 Hachimi V2 AutoMine：自动发包挖目标玩家的脚里(Burrow)/头顶(Face)/围城(Surround)方块；几何纯逻辑在 `utils/PacketMineLogic`，单测 `PacketMineLogicTest`）
+  10. FO 自动挖脚（`modules/FOAutoMine`，6.8p1 引入、6.8p2 由「FO 发包挖掘」改名：移植 Hachimi V2 AutoMine，自动发包挖目标玩家的脚里(Burrow)/头顶(Face)/围城(Surround)方块；几何纯逻辑在 `utils/PacketMineLogic`，单测 `PacketMineLogicTest`）
+  11. FO 发包挖掘（`modules/FOPacketMine`，6.8p2 新增：移植 Hachimi V2 SpeedMine——对准方块左键接管，客户端自算破坏进度、到阈值（3C3U 实战 0.7）直接发 STOP_DESTROY_BLOCK 包破坏；自动切最快工具、暂停/取消快捷键、进度色渲染；纯逻辑 `utils/SpeedMineLogic`，单测 `SpeedMineLogicTest`。⚠️ 刻意不移植：Grim NewDisabler 绕过、Desync、InstantMine/DoubleBreak 漏洞、EnderChest 按键、Multitask 并发体系（模块头注释有记录）；Grim 实机拦截时先调高「挖掘进度」）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
@@ -210,6 +211,20 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     - 刻意不移植三处（上游反编译语义不可证，模块头注释有记录）：Surround 空气位候选 /
       FriendSync（需全服玩家挖掘状态表，彗星端无此数据）/ 双格并发挖掘（改单会话重复发包）。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
+  - ✅ 6.8p2 已完成：**新增 FO 发包挖掘（SpeedMine 移植）+ 旧模块改名**（用户指正：6.8p1 的
+    「FO 发包挖掘」实际移植的是上游 AutoMine（自动挖目标脚下方块），不是用户要的发包挖掘）。
+    - 6.8p1 模块改名 **「FO 自动挖脚」**（`modules/FOAutoMine`，代码零变动）。
+    - 新增 **「FO 发包挖掘」**（`modules/FOPacketMine` 重写）：移植 Hachimi V2 SpeedMine
+      （源码类 BlockPosBoxMultitask，1083 行）。核心：拦截 AttackBlockEvent 接管方块 →
+      客户端自算 `calcBlockBreakingDelta` 进度 → 到阈值（Speed，实战 0.7）直接发
+      `STOP_DESTROY_BLOCK` 包破坏 + `cancelBlockBreaking()` 复位；自动切热栏最快工具；
+      暂停/取消快捷键（KeybindSetting）；渲染红→绿进度色。默认参数照搬实战配置
+      （Speed=0.7/Range=6/仅黑名单(火、重生锚)/不挥手/不转向/三个暂停条件全关）。
+      纯逻辑 `utils/SpeedMineLogic`（进度判定/工具选择/颜色渐变），单测 `SpeedMineLogicTest` 9 用例。
+    - ⚠️ 刻意不移植（模块头注释 + 本条记录）：Grim「NewDisabler」快速挖绕过、Desync、
+      InstantMine/DoubleBreak 原版漏洞、NoReset/NoCollision、EnderChest 按键、
+      Hold(1.21+ 持握)、Multitask 并发体系——这些依赖上游私有 Manager/Mixin 体系或需实机调试。
+      Grim 服被拦时先调高「挖掘进度」到 0.85~0.95。
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
   - ⚠️ 已知与参考实现的偏差（我们按 MC 本体语义实现，是刻意修正）：参考实现的 `enchant_with_levels` 忽略 options
