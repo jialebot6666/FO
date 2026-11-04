@@ -26,6 +26,33 @@ class SpeedMineLogicTest {
     }
 
     @Test
+    void applyStateFlags_离地且无视惩罚_还原五倍() {
+        // CheckGround=false（实战值）：离地时还原原版扣掉的 /5 惩罚
+        assertEquals(0.5f, SpeedMineLogic.applyStateFlags(0.1f, false, false, false, true), 1e-6);
+    }
+
+    @Test
+    void applyStateFlags_在地面_不变() {
+        assertEquals(0.1f, SpeedMineLogic.applyStateFlags(0.1f, true, false, false, true), 1e-6);
+    }
+
+    @Test
+    void applyStateFlags_开启地面检测_离地保留惩罚() {
+        // CheckGround=true：离地惩罚保留
+        assertEquals(0.1f, SpeedMineLogic.applyStateFlags(0.1f, false, false, true, true), 1e-6);
+    }
+
+    @Test
+    void applyStateFlags_鞘翅滑翔且开启飞行检测_保留惩罚() {
+        assertEquals(0.1f, SpeedMineLogic.applyStateFlags(0.1f, false, true, false, true), 1e-6);
+    }
+
+    @Test
+    void applyStateFlags_鞘翅但关闭飞行检测_无视惩罚() {
+        assertEquals(0.5f, SpeedMineLogic.applyStateFlags(0.1f, false, true, false, false), 1e-6);
+    }
+
+    @Test
     void shouldBreak_一击即碎_直接破坏() {
         assertTrue(SpeedMineLogic.shouldBreak(0.0f, 1.0f, 0.7f));
         assertTrue(SpeedMineLogic.shouldBreak(0.0f, 1.0f, 1.5f));

@@ -1,6 +1,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.utils.Easing;
 import com.fo.addon.utils.SpeedMineLogic;
 import meteordevelopment.meteorclient.events.entity.player.DoAttackEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -8,6 +9,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -16,6 +18,7 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -24,499 +27,96 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.LadderBlock;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.shape.VoxelShape;
 
 import java.util.List;
 
 /**
- * FO 发包挖掘（移植自 Hachimi V2 SpeedMine；源码类 {@code BlockPosBoxMultitask} +
- * {@code BlockPosPlayerHelper}，Packet 模式完整协议）。
+ * FO 发包挖掘——移植自 Hachimi V2 SpeedMine（源码类 {@code BlockPosBoxMultitask}，
+ * 1083 行 + 会话类 {@code BlockPosPlayerHelper}，591 行）的 <b>完整移植版</b>（6.9p0）。
  *
- * <p>用法：对准要挖的方块<b>左键点一下</b>，模块接管该方块的挖掘——客户端自己累计破坏进度，
- * 达到「挖掘进度」（Speed）就发 {@code STOP_DESTROY_BLOCK} 包破坏，不需要按住左键。</p>
+ * <p>核心机制：对准方块左键接管 → 客户端自算破坏进度 → 到阈值（Speed，3C3U 实战 0.7）
+ * 直接发 {@code STOP_DESTROY_BLOCK} 包破坏。</p>
  *
- * <p><b>Grim 绕过协议（3C3U 实战依赖，逐包对齐上游）：</b>
+ * <p>6.9p0 全量移植内容：</p>
  * <ul>
- *   <li>{@code NewDisabler}（实战值）：会话开始连发 START(真实位置) →
- *       START(0,-999,0)（伪造包把服务端/Grim 的挖掘位置追踪重指向假方块）→
- *       DoubleBreak 开时再补一个 STOP（双进度漏洞）。这样后续真实的 STOP 不受
- *       服务端 vanilla 1.21.2+ 快挖防护与 Grim fastbreak 检查约束。</li>
- *   <li>{@code Disabler}：START 前先发一个 STOP。</li>
- *   <li>{@code 时间校验}（上游 Strict/Time）：不做伪造，STOP 发出前等待
- *       {@code ceil(1/最大单tick进度)*50ms} 的真实挖掘时间（只差 25ms 以内才放行）。</li>
- *   <li>所有模式共用：上次 STOP 后 <b>280ms 冷却</b>内不开新会话（上游 alP()）。</li>
- *   <li>所有挖掘包都带正确的 block-change sequence（与仓库 {@code BlockClicker} 同款
- *       accesswidener 取号，不再发 sequence=0 的裸包）。</li>
- * </ul></p>
- *
- * <p>进度模型对齐上游 {@code xs()}：{@code delta / Speed} 累计到 1.0 即破坏；
- * 实战配置 CheckGround/CheckFly 均为 true，与直接用原版
- * {@code calcBlockBreakingDelta}（内部按真实 onGround/鞘翅/水中衰减）等价。</p>
- *
- * <p>其余对齐：STOP 发出后方块未消失，等「重试等待」tick 后重开整个会话（RetryTicks）；
- * 「即时重破」开启时破坏完成后继续对原位置补发 STOP 流（上游 InstantMine：方块被刷新回
- * 来时立即再破，最多持续 RetryTicks tick）。</p>
+ *   <li>双会话（Multitask）：主会话（左键/对外 API 请求，带优先级抢占）+
+ *       镜像会话（双重破坏的第二条挖掘进度线，上游 helper/helper2）。</li>
+ *   <li>对外 API：{@link #mine(BlockPos, int)}——FO 其他模块可请求"帮我挖这个方块"，
+ *       带优先级抢占语义（对齐上游 alI）。</li>
+ *   <li>原版加速（Damage）模式：不接管攻击，原版挖掘进度达到 Speed 即置满秒破
+ *       （Mixin 访问 {@code currentBreakingProgress}）；附属：无冷却（NoDelay）、
+ *       不重置（NoReset）、不中断（NoAbort，Mixin 拦截 cancelBlockBreaking）。</li>
+ *   <li>Grim 绕过四模式：新版绕过（START 后补 START(0,-999,0) 伪造包）、旧版绕过
+ *       （START 前先 STOP）、时间校验（STOP 前等够真实挖掘时间）、无。</li>
+ *   <li>渲染全套：盒子动画（随进度向中心收缩）、缓动曲线（28 种，对齐上游 Easing）、
+ *       形状贴合（方块真实轮廓）、帧间平滑（tickDelta 插值）、四色渐变。</li>
+ *   <li>末影箱按键：在会话方块位置放置末影箱（放置范围/放置转向，上游 EnderChest）。</li>
+ *   <li>碰撞穿透（NoCollision）：Mixin 取消会话方块对本人的碰撞，可走进方块。</li>
+ *   <li>时序：280ms 会话冷却（alP）、重试等待（RetryTicks）、挖掘上限（MiningTicks）、
+ *       即时重破（InstantMine）、保持/持握上限（Hold/HoldTicks）、额外切换（AutoSwitch）。</li>
+ *   <li>状态旗标：地面检测（CheckGround）/飞行检测（CheckFly）——控制挖掘速度预测
+ *       是否计入空中/鞘翅惩罚（1.21.11 原版对离地挖掘一律 /5）。</li>
+ *   <li>假破块（Desync）：无 / 正常破坏 / 假破块（客户端本地移除）。</li>
+ * </ul>
  *
  * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
- * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、Grim=NewDisabler、
- * DoubleBreak=true、RetryTicks=10、InstantMine=true、Desync=SetAir（假破块）、
- * Notify 开（聊天提示）、
- * OnlyOnGround/PauseOnFlying/PauseInFluid 全关、渲染色实战 hex。</p>
+ * 仅黑名单（火/重生锚）、Grim=新版绕过、DoubleBreak=true、RetryTicks=10、
+ * MiningTicks=10、InstantMine=true、MineAir=true、CheckGround=false/CheckFly=true、
+ * Desync=假破块、Notify 开。</p>
  *
- * <p>刻意不移植（依赖上游私有体系）：Hold/HoldTicks 换持握回切（本模块自动切换后全程持工具，
- * 不做屏幕容器级回切）、Desync 客户端假破块、NoCollision 挖掘格无碰撞、MineAir、
- * EnderChest 按键、Multitask 并发体系。Grim 服被拦时优先换 Grim 模式或调高「挖掘进度」。</p>
+ * <p>与上游的刻意差异（依赖 Hachimi 私有体系，无法等价移植）：</p>
+ * <ul>
+ *   <li>SwapMode 仅 Hotbar 直切（上游 Screen/Inventory 容器级换持不做）；</li>
+ *   <li>MainHand/Blink/AutoAnchor 联动不适用（Hachimi 专属模块）；</li>
+ *   <li>长按持续挖掘不做（6.8p5 的按键状态卡死漏洞已删，见 AGENTS.md 6.8p6）。</li>
+ * </ul>
  */
 public class FOPacketMine extends Module {
+    /** 单例（Mixin 与对外 API 入口）。 */
+    private static FOPacketMine instance;
+
+    public static FOPacketMine get() {
+        return instance;
+    }
+
+    /** Mixin 访问 mc 用的入口。 */
+    public net.minecraft.client.MinecraftClient mc() {
+        return mc;
+    }
+
+    // ── 设置组 ──────────────────────────────────────────────
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgGuard = settings.createGroup("暂停条件");
+    private final SettingGroup sgDamage = settings.createGroup("原版加速");
+    private final SettingGroup sgPause = settings.createGroup("暂停条件");
+    private final SettingGroup sgChest = settings.createGroup("末影箱");
     private final SettingGroup sgRender = settings.createGroup("渲染");
 
-    // 通用
-
-    private final Setting<Double> speed = sgGeneral.add(new DoubleSetting.Builder()
-        .name("挖掘进度").description("vanilla 破坏进度累计到该倍率即发包破坏（Speed）。3C3U 实战 0.7")
-        .defaultValue(0.7).min(0.1).sliderMin(0.3).sliderMax(1.0).build()
-    );
-
-    private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
-        .name("范围").description("能接管的方块最大距离（Range）")
-        .defaultValue(6).min(1).sliderMax(8).build()
-    );
-
-    private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
-        .name("自动切换").description("开挖时自动切热栏里最快的适用工具")
-        .defaultValue(true).build()
-    );
-
-    private final Setting<Boolean> swing = sgGeneral.add(new BoolSetting.Builder()
-        .name("挥手").description("发包破坏时挥手（实战 Swing=None，默认关）")
-        .defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> startRotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("开挖转向").description("开挖前把视角转向目标方块（实战关闭）")
-        .defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> notify = sgGeneral.add(new BoolSetting.Builder()
-        .name("聊天提示").description("发包破坏方块后在聊天栏提示坐标（Notify，实战开启）")
-        .defaultValue(true).build()
-    );
-
-    private final Setting<DesyncMode> desync = sgGeneral.add(new EnumSetting.Builder<DesyncMode>()
-        .name("假破块").description("发破坏包后客户端本地立即移除方块，视觉上瞬间消失（上游 Desync=SetAir，实战开启）")
-        .defaultValue(DesyncMode.客户端清除).build()
-    );
-
-    private final Setting<Keybind> pauseKey = sgGeneral.add(new KeybindSetting.Builder()
-        .name("暂停键").description("按住时暂停发包挖掘（不丢当前目标）")
-        .defaultValue(Keybind.none()).build()
-    );
-
-    private final Setting<Keybind> cancelKey = sgGeneral.add(new KeybindSetting.Builder()
-        .name("取消键").description("按一下放弃当前目标")
-        .defaultValue(Keybind.none()).build()
-    );
-
-    private final Setting<FilterMode> filterMode = sgGeneral.add(new EnumSetting.Builder<FilterMode>()
-        .name("过滤模式").description("能接管的方块过滤规则")
-        .defaultValue(FilterMode.仅黑名单).build()
-    );
-
-    /** 黑名单默认值：照搬 3C3U 实战配置（cheng.json SpeedMine.Blacklist）。 */
-    private static final Block[] DEFAULT_BLACKLIST = {Blocks.FIRE, Blocks.RESPAWN_ANCHOR};
-
-    private final Setting<List<Block>> blacklist = sgGeneral.add(new BlockListSetting.Builder()
-        .name("黑名单").description("过滤模式下不接管的方块")
-        .defaultValue(DEFAULT_BLACKLIST)
-        .visible(() -> filterMode.get() != FilterMode.仅白名单)
-        .build()
-    );
-
-    private final Setting<List<Block>> whitelist = sgGeneral.add(new BlockListSetting.Builder()
-        .name("白名单").description("过滤模式下只接管的方块")
-        .defaultValue(Blocks.OBSIDIAN, Blocks.ENDER_CHEST)
-        .visible(() -> filterMode.get() == FilterMode.仅白名单)
-        .build()
-    );
-
-    // Grim 绕过（3C3U 实战核心）
-
-    private final Setting<GrimMode> grimMode = sgGeneral.add(new EnumSetting.Builder<GrimMode>()
-        .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。新版绕过=实战 NewDisabler，旧版绕过=Disabler")
-        .defaultValue(GrimMode.新版绕过).build()
-    );
-
-    private final Setting<Boolean> doubleBreak = sgGeneral.add(new BoolSetting.Builder()
-        .name("双重破坏").description("会话开始即补发一个 STOP（原版双挖掘进度漏洞，DoubleBreak）。实战开启")
-        .defaultValue(true).build()
-    );
-
-    private final Setting<Integer> retryTicks = sgGeneral.add(new IntSetting.Builder()
-        .name("重试等待").description("STOP 发出后方块仍未消失，等待该 tick 数后重开会话（RetryTicks）。实战 10")
-        .defaultValue(10).min(0).sliderMax(60).build()
-    );
-
-    private final Setting<Boolean> instantMine = sgGeneral.add(new BoolSetting.Builder()
-        .name("即时重破").description("破坏完成后继续对原位置补发 STOP 流，方块被刷新回来时立即再破（InstantMine）。实战开启")
-        .defaultValue(true).build()
-    );
-
-    // 暂停条件（实战值全关，按需打开）
-
-    private final Setting<Boolean> onlyOnGround = sgGuard.add(new BoolSetting.Builder()
-        .name("仅地面").description("只有站在地面上才发包（OnlyOnGround）")
-        .defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> pauseOnFlying = sgGuard.add(new BoolSetting.Builder()
-        .name("飞行暂停").description("飞行时暂停（PauseOnFlying）")
-        .defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> pauseInFluid = sgGuard.add(new BoolSetting.Builder()
-        .name("水中暂停").description("游泳时暂停（PauseInFluid）")
-        .defaultValue(false).build()
-    );
-
-    // 渲染
-
-    private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("渲染").description("画出当前目标和挖掘进度（Render）")
-        .defaultValue(true).build()
-    );
-
-    private final Setting<BoxMode> boxMode = sgRender.add(new EnumSetting.Builder<BoxMode>()
-        .name("形状模式").description("线框/填充方式（上游 BoxMode，实战 Both）")
-        .defaultValue(BoxMode.全部).build()
-    );
-
-    private final Setting<SettingColor> startColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("开始颜色").description("刚开挖的颜色（StartSide，实战 0x3f7e7ef5 青色）")
-        .defaultValue(new SettingColor(63, 126, 126, 245)).build()
-    );
-
-    private final Setting<SettingColor> endColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("结束颜色").description("即将破坏的颜色（EndSide，实战 0x066e6ee1 深青）")
-        .defaultValue(new SettingColor(6, 110, 110, 225)).build()
-    );
-
-    private final Setting<SettingColor> startLineColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("开始线条").description("刚开挖的线框颜色（StartLine，实战 0xff9595ff 粉红）")
-        .defaultValue(new SettingColor(255, 149, 149, 255)).build()
-    );
-
-    private final Setting<SettingColor> endLineColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("结束线条").description("即将破坏的线框颜色（EndLine，实战 0xff9595ff 粉红）")
-        .defaultValue(new SettingColor(255, 149, 149, 255)).build()
-    );
-
-    private final Setting<Boolean> blockOutline = sgRender.add(new BoolSetting.Builder()
-        .name("方块轮廓").description("画目标方块的轮廓线（BlockOutline）")
-        .defaultValue(true).build()
-    );
-
-    /** 上游 alP()：NewDisabler/Time 模式下两次会话的最小间隔。 */
-    private static final long SESSION_COOLDOWN_MS = 280;
-    /** 上游 xt()：Time 模式放行 STOP 的剩余时间阈值。 */
-    private static final double TIME_MODE_SLACK_MS = 25.0;
-
-    // 会话状态
-
-    /** 当前正在发包挖的方块；null = 空闲。 */
-    private BlockPos current;
-    /** 当前目标方块的破坏面。 */
-    private Direction currentDir;
-    /** 已累计的破坏进度（0~1，= vanilla delta 累计 / Speed）。 */
-    private float progress;
-    /** 是否已发过 START 序列。 */
-    private boolean started;
-    /** 是否已发过破坏 STOP，等待服务端确认。 */
-    private boolean breakSent;
-    /** STOP 发出后等待服务端破坏的 tick 计数（RetryTicks）。 */
-    private int waitTicks;
-    /** 即时重破流已发的 tick 数。 */
-    private int rebreakTicks;
-    /** 本会话最大单 tick 破坏进度（Time 模式估时用，上游 p）。 */
-    private float maxDelta;
-    /** START 发出时刻（Time 模式用，上游 j）。 */
-    private long startTime;
-    /** 上次 STOP 发出时刻（会话冷却用，上游 i）。 */
-    private long lastStopTime;
-
-    public FOPacketMine() {
-        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 SpeedMine：对准方块左键接管，自动发包快挖，带 Grim NewDisabler 绕过（3C3U 实战协议）。");
+    /** 上游 DamagePacketMode（Packet=发包挖掘 / Damage=原版加速）。 */
+    public enum MineMode {
+        发包挖掘, 原版加速
     }
 
-    @Override
-    public void onActivate() {
-        cancelSession();
+    /** 上游 DisablerNewDisablerMode（旧版绕过=Disabler、新版绕过=NewDisabler；Strict/Time 合并为时间校验）。 */
+    public enum GrimMode {
+        无, 旧版绕过, 新版绕过, 时间校验
     }
 
-    @Override
-    public void onDeactivate() {
-        cancelSession();
-    }
-
-    /**
-     * 接管方块（对齐原版 onAttackBlock：拦截攻击 → 取消原版挖掘 → 进发包队列）。
-     * 注：彗星端 1.21.11 没有 AttackBlockEvent，等价触发点是 DoAttackEvent
-     * （原版 doAttack() 开头触发），目标方块从准星取。
-     */
-    @EventHandler
-    private void onAttack(DoAttackEvent event) {
-        if (!(mc.crosshairTarget instanceof BlockHitResult hit)
-            || mc.crosshairTarget.getType() != HitResult.Type.BLOCK) return;
-
-        BlockPos pos = hit.getBlockPos();
-        if (!isValidTarget(pos)) return;
-
-        // 只接管有效目标：无效目标放行原版挖掘（否则普通方块完全挖不动）
-        event.cancel();
-
-        if (pos.equals(current)) return; // 已经在挖这格
-        startSession(pos, hit.getSide());
-    }
-
-    /** 开始挖一格：记录目标与破坏面，START 序列由 tick 循环发（冷却后）。 */
-    private void startSession(BlockPos pos, Direction dir) {
-        cancelSession();
-        current = pos;
-        currentDir = dir;
-    }
-
-    @EventHandler
-    private void onTick(TickEvent.Pre event) {
-        if (pauseKey.get().isPressed()) return;
-        if (cancelKey.get().isPressed()) {
-            cancelSession();
-            return;
-        }
-
-        if (onlyOnGround.get() && !mc.player.isOnGround()) return;
-        if (pauseOnFlying.get() && mc.player.getAbilities().flying) return;
-        if (pauseInFluid.get() && mc.player.isTouchingWater()) return;
-
-        // 会话期间每 tick 清零原版挖掘进度：原版破坏由发包接管
-        // （6.8p6：删除 6.8p5 的"按住攻击键自动接管"——存在按键状态卡死漏洞，
-        //   打开界面后松键事件被吞，导致不点击也自动挖掘）
-        if (current != null && mc.interactionManager != null) {
-            mc.interactionManager.cancelBlockBreaking();
-        }
-
-        if (current == null) return;
-
-        BlockState state = mc.world.getBlockState(current);
-
-        // ── 阶段一：还没发 START 序列 ──
-        if (!started) {
-            if (state.isAir()) { // 目标没了（被别人挖掉）
-                cancelSession();
-                return;
-            }
-            // 会话冷却（上游 alP()：NewDisabler/时间校验模式下 280ms 内不开新会话）
-            if (grimMode.get() != GrimMode.无 && grimMode.get() != GrimMode.旧版绕过
-                && SpeedMineLogic.inSessionCooldown(System.currentTimeMillis(), lastStopTime, SESSION_COOLDOWN_MS)) {
-                return;
-            }
-            if (autoSwitch.get()) switchToBestTool(state);
-            sendStartSequence();
-            return;
-        }
-
-        // ── 阶段三：STOP 已发，等服务端破坏 ──
-        if (breakSent) {
-            if (state.isAir()) {
-                // 破坏成功。即时重破（上游 InstantMine）：继续对原位置每 tick 补发 STOP，
-                // 方块若被刷新回来会被流里的包直接破掉
-                if (instantMine.get() && rebreakTicks < retryTicks.get()) {
-                    rebreakTicks++;
-                    sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir);
-                    lastStopTime = System.currentTimeMillis();
-                } else {
-                    cancelSession();
-                }
-                return;
-            }
-            waitTicks++;
-            if (waitTicks > retryTicks.get()) {
-                // 服务端一直没破（被拦/回弹）：整个会话重来
-                restartSession();
-            }
-            return;
-        }
-
-        // ── 阶段二：已 START，累计进度 ──
-        if (state.isAir()) { // 服务端已破坏
-            cancelSession();
-            return;
-        }
-        if (!BlockUtils.canBreak(current)) {
-            cancelSession();
-            return;
-        }
-
-        float delta = state.calcBlockBreakingDelta(mc.player, mc.world, current);
-        if (delta > maxDelta) maxDelta = delta;
-
-        if (SpeedMineLogic.shouldBreak(progress, delta, speed.get().floatValue())) {
-            progress = 1;
-            // Time 模式：STOP 前必须等够真实挖掘时间（上游 xt() 的 FX 分支）
-            if (grimMode.get() == GrimMode.时间校验) {
-                double expected = Math.ceil(1.0 / Math.max(maxDelta, 1e-6)) * 50.0;
-                if (!SpeedMineLogic.timeModeStopAllowed(expected, System.currentTimeMillis() - startTime, TIME_MODE_SLACK_MS)) {
-                    return;
-                }
-            }
-            sendBreakPacket();
-        } else {
-            progress = SpeedMineLogic.accumulate(progress, delta);
-        }
-    }
-
-    /**
-     * 会话开始发包序列（逐包对齐上游 {@code BlockPosPlayerHelper.xr()}，Packet 模式分支）：
-     * Disabler: STOP(真实) → START(真实)；NewDisabler: START(真实) → START(0,-999,0) →
-     * DoubleBreak 开时补 STOP(真实)；时间校验/无: 仅 START(真实)。
-     */
-    private void sendStartSequence() {
-        progress = 0;
-        maxDelta = 0;
-        waitTicks = 0;
-        rebreakTicks = 0;
-
-        Runnable start = this::sendStartPackets;
-        if (startRotate.get()) {
-            Rotations.rotate(Rotations.getYaw(current.toCenterPos()), Rotations.getPitch(current.toCenterPos()), start);
-        } else {
-            start.run();
-        }
-    }
-
-    private void sendStartPackets() {
-        Direction dir = currentDir;
-
-        if (grimMode.get() == GrimMode.旧版绕过) {
-            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, dir);
-        }
-        sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, current, dir);
-        startTime = System.currentTimeMillis();
-
-        if (grimMode.get() == GrimMode.新版绕过) {
-            // 伪造包：把服务端/Grim 的挖掘位置追踪重指向不存在的方块（上游 xE）
-            sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP);
-        }
-        if (doubleBreak.get()) {
-            // 原版双挖掘进度漏洞（上游 xD，DoubleBreak=true 实战开启）
-            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, dir);
-        }
-
-        started = true;
-    }
-
-    /** 发破坏 STOP（上游 xt() 的发包部分）。 */
-    private void sendBreakPacket() {
-        sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir);
-        if (swing.get()) mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-        // 假破块（上游 Desync=SetAir）：客户端本地立即移除，视觉瞬间消失
-        if (desync.get() == DesyncMode.客户端清除) {
-            mc.world.removeBlock(current, false);
-        }
-        if (notify.get()) info("发包挖掘：已破坏 %d %d %d", current.getX(), current.getY(), current.getZ());
-        mc.interactionManager.cancelBlockBreaking();
-        breakSent = true;
-        waitTicks = 0;
-        lastStopTime = System.currentTimeMillis();
-    }
-
-    /** 带正确 block-change sequence 的挖掘包（与仓库 BlockClicker 同款取号，上游 SequencedPacketCreator）。 */
-    private void sendDig(PlayerActionC2SPacket.Action action, BlockPos pos, Direction dir) {
-        if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
-        int sequence;
-        var pending = mc.world.getPendingUpdateManager().incrementSequence();
-        sequence = pending.sequence;
-        pending.close();
-        mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(action, pos, dir, sequence));
-    }
-
-    /** 自动切换：热栏里对该方块最快的工具（Meteor 现成 findFastestTool，对齐 SwapAction=Hotbar）。 */
-    private void switchToBestTool(BlockState state) {
-        var tool = InvUtils.findFastestTool(state);
-        if (tool.found() && tool.slot() != mc.player.getInventory().getSelectedSlot()) {
-            InvUtils.swap(tool.slot(), false);
-        }
-    }
-
-    /** 目标过滤（对齐原版 Selection/Whitelist/Blacklist + Range）。 */
-    private boolean isValidTarget(BlockPos pos) {
-        if (pos.equals(current)) return true; // 已接管的不重复过滤
-        if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) > range.get()) return false;
-
-        BlockState state = mc.world.getBlockState(pos);
-        if (state.isAir()) return false;
-        if (!state.getFluidState().isEmpty()) return false;
-
-        Block block = state.getBlock();
-        switch (filterMode.get()) {
-            case 仅黑名单: return !blacklist.get().contains(block);
-            case 仅白名单: return whitelist.get().contains(block);
-            default: return true;
-        }
-    }
-
-    /** STOP 没生效：整会话重置，下个 tick 重新走冷却 → START 序列。 */
-    private void restartSession() {
-        started = false;
-        breakSent = false;
-        progress = 0;
-        maxDelta = 0;
-        waitTicks = 0;
-        rebreakTicks = 0;
-    }
-
-    private void cancelSession() {
-        if (current != null && mc.interactionManager != null && started && !breakSent) {
-            mc.interactionManager.cancelBlockBreaking();
-        }
-        current = null;
-        progress = 0;
-        started = false;
-        breakSent = false;
-        waitTicks = 0;
-        rebreakTicks = 0;
-        maxDelta = 0;
-    }
-
-    @EventHandler
-    private void onRender3D(Render3DEvent event) {
-        if (!render.get() || current == null) return;
-        if (mc.world.getBlockState(current).isAir()) return;
-
-        int[] side = SpeedMineLogic.lerpColor(
-            new int[]{startColor.get().r, startColor.get().g, startColor.get().b, startColor.get().a},
-            new int[]{endColor.get().r, endColor.get().g, endColor.get().b, endColor.get().a},
-            progress
-        );
-        int[] line = SpeedMineLogic.lerpColor(
-            new int[]{startLineColor.get().r, startLineColor.get().g, startLineColor.get().b, startLineColor.get().a},
-            new int[]{endLineColor.get().r, endLineColor.get().g, endLineColor.get().b, endLineColor.get().a},
-            progress
-        );
-        SettingColor sideColor = new SettingColor(side[0], side[1], side[2], side[3]);
-        SettingColor lineColor = new SettingColor(line[0], line[1], line[2], line[3]);
-
-        Box box = new Box(current);
-        event.renderer.box(box, sideColor, lineColor, boxMode.get().toShapeMode(), blockOutline.get() ? 0 : -1);
-    }
-
-    public enum FilterMode {
-        全部, 仅黑名单, 仅白名单
+    /** 上游 NoneNormalMode（Desync：无 / 正常破坏=客户端完整破坏 / 假破块=本地移除）。 */
+    public enum DesyncMode {
+        无, 正常破坏, 假破块
     }
 
     /** 上游 BoxMode 的中文化（Meteor 的 ShapeMode 枚举值是英文，GUI 会露英文）。 */
@@ -532,13 +132,833 @@ public class FOPacketMine extends Module {
         }
     }
 
-    /** 上游 NoneNormalMode 的中文化（Desync）。 */
-    public enum DesyncMode {
-        无, 客户端清除
+    public enum FilterMode {
+        全部, 仅黑名单, 仅白名单
     }
 
-    /** 上游 DisablerNewDisablerMode（旧版绕过=Disabler、新版绕过=NewDisabler；Strict 与 Time 行为相同，合并为时间校验）。 */
-    public enum GrimMode {
-        无, 旧版绕过, 新版绕过, 时间校验
+    private final Setting<MineMode> mode = sgGeneral.add(new EnumSetting.Builder<MineMode>()
+        .name("模式").description("发包挖掘=接管左键纯发包；原版加速=不接管，原版进度到阈值直接置满秒破（Mode，实战发包挖掘）")
+        .defaultValue(MineMode.发包挖掘).build()
+    );
+
+    private final Setting<Double> speed = sgGeneral.add(new DoubleSetting.Builder()
+        .name("挖掘进度").description("触发破坏的进度阈值（Speed，实战 0.7）")
+        .defaultValue(0.7).min(0.1).sliderMax(1).build()
+    );
+
+    private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
+        .name("挖掘范围").description("离目标方块超过该距离就不挖（Range，实战 6）")
+        .defaultValue(6).min(1).sliderMax(8).build()
+    );
+
+    private final Setting<GrimMode> grimMode = sgGeneral.add(new EnumSetting.Builder<GrimMode>()
+        .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。实战新版绕过")
+        .defaultValue(GrimMode.新版绕过).build()
+    );
+
+    private final Setting<Boolean> doubleBreak = sgGeneral.add(new BoolSetting.Builder()
+        .name("双重破坏").description("会话开始补发一个 STOP，并开第二条挖掘进度线（DoubleBreak，实战开启）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Boolean> instantMine = sgGeneral.add(new BoolSetting.Builder()
+        .name("即时重破").description("方块破坏后继续对其补发 STOP，重破刷新回来的方块（InstantMine，实战开启）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Integer> retryTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("重试等待").description("发包后方块一直不掉，超过该 tick 数整个会话重来（RetryTicks，实战 10）")
+        .defaultValue(10).min(1).sliderMax(60).build()
+    );
+
+    private final Setting<Integer> miningTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("挖掘上限").description("进度挖满后允许等待破坏的最大 tick 数（MiningTicks）")
+        .defaultValue(10).min(1).sliderMax(60).build()
+    );
+
+    private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
+        .name("额外切换").description("进度挖满时若没拿最快工具，自动换上发破坏包再换回（AutoSwitch）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Boolean> hold = sgGeneral.add(new BoolSetting.Builder()
+        .name("保持换持").description("发包后先不把工具切回去，等方块消失或到持握上限（Hold，1.21+ 服务器适用）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> manual = sgGeneral.add(new BoolSetting.Builder()
+        .name("手动切换").description("不自动换工具，自己手动切（Manual）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Integer> holdTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("持握上限").description("保持换持时最多持握工具的 tick 数（HoldTicks）")
+        .defaultValue(2).min(0).sliderMax(60).build()
+    );
+
+    private final Setting<Boolean> mineAir = sgGeneral.add(new BoolSetting.Builder()
+        .name("允许挖空气").description("允许对空气位发起挖掘（MineAir，实战开启）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Boolean> ignoreBroken = sgGeneral.add(new BoolSetting.Builder()
+        .name("忽略已破坏").description("已被破坏（空）的方块不成为挖掘目标（IgnoreBroken）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<DesyncMode> desync = sgGeneral.add(new EnumSetting.Builder<DesyncMode>()
+        .name("假破块").description("发包破坏后客户端本地怎么处理方块（Desync）。实战假破块")
+        .defaultValue(DesyncMode.假破块).build()
+    );
+
+    private final Setting<Boolean> notify = sgGeneral.add(new BoolSetting.Builder()
+        .name("聊天提示").description("发包破坏方块后在聊天栏提示坐标（Notify，实战开启）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Boolean> strictCheck = sgGeneral.add(new BoolSetting.Builder()
+        .name("严格暂停").description("暂停期间禁止发起新的挖掘会话（StrictCheck）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> checkGround = sgGeneral.add(new BoolSetting.Builder()
+        .name("地面检测").description("挖掘速度预测计入离地惩罚（CheckGround，实战关闭=无视空中惩罚）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> checkFly = sgGeneral.add(new BoolSetting.Builder()
+        .name("飞行检测").description("挖掘速度预测计入鞘翅滑翔惩罚（CheckFly，实战开启）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Boolean> noCollision = sgGeneral.add(new BoolSetting.Builder()
+        .name("碰撞穿透").description("正在挖的方块对本人的碰撞取消，可以直接走进去（NoCollision）")
+        .defaultValue(false).build()
+    );
+
+    // ── 原版加速（Damage）模式附属 ──
+
+    private final Setting<Boolean> noDelay = sgDamage.add(new BoolSetting.Builder()
+        .name("无冷却").description("破块后无挖掘冷却，可立即继续挖（NoDelay，仅原版加速模式）")
+        .defaultValue(false).visible(() -> mode.get() == MineMode.原版加速).build()
+    );
+
+    private final Setting<Boolean> noReset = sgDamage.add(new BoolSetting.Builder()
+        .name("不重置").description("挖掘中切换物品不重置进度（NoReset，仅原版加速模式）")
+        .defaultValue(false).visible(() -> mode.get() == MineMode.原版加速).build()
+    );
+
+    private final Setting<Boolean> noAbort = sgDamage.add(new BoolSetting.Builder()
+        .name("不中断").description("拦截原版对挖掘的取消（吃东西以外的打断，NoAbort，仅原版加速模式）")
+        .defaultValue(false).visible(() -> mode.get() == MineMode.原版加速).build()
+    );
+
+    // ── 过滤 ──
+
+    private final Setting<FilterMode> filterMode = sgGeneral.add(new EnumSetting.Builder<FilterMode>()
+        .name("过滤模式").description("目标方块的过滤规则。实战仅黑名单")
+        .defaultValue(FilterMode.仅黑名单).build()
+    );
+
+    private final Setting<List<Block>> blacklist = sgGeneral.add(new BlockListSetting.Builder()
+        .name("黑名单").description("过滤模式下不挖的方块。实战：火、重生锚")
+        .defaultValue(Blocks.FIRE, Blocks.RESPAWN_ANCHOR)
+        .visible(() -> filterMode.get() != FilterMode.仅白名单)
+        .build()
+    );
+
+    private final Setting<List<Block>> whitelist = sgGeneral.add(new BlockListSetting.Builder()
+        .name("白名单").description("过滤模式下只挖的方块。实战：黑曜石、末影箱")
+        .defaultValue(Blocks.OBSIDIAN, Blocks.ENDER_CHEST)
+        .visible(() -> filterMode.get() == FilterMode.仅白名单)
+        .build()
+    );
+
+    // ── 暂停条件 ──
+
+    private final Setting<Boolean> onlyOnGround = sgPause.add(new BoolSetting.Builder()
+        .name("仅在地面").description("只在站在方块上时工作（OnlyOnGround，站梯子例外）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> pauseOnFlying = sgPause.add(new BoolSetting.Builder()
+        .name("鞘翅暂停").description("鞘翅滑翔时暂停当前挖掘（PauseOnFlying）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> pauseInFluid = sgPause.add(new BoolSetting.Builder()
+        .name("水中暂停").description("处于流体中时暂停当前挖掘（PauseInFluid）")
+        .defaultValue(false).build()
+    );
+
+    // ── 旋转 ──
+
+    private final Setting<Boolean> startRotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("开挖转向").description("开挖前把视角转向目标方块（StartRotate，实战关闭）")
+        .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> endRotate = sgGeneral.add(new BoolSetting.Builder()
+        .name("结束转向").description("发破坏包前把视角转向目标方块（EndRotate）")
+        .defaultValue(false).build()
+    );
+
+    // ── 按键 ──
+
+    private final Setting<Keybind> pauseKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("暂停键").description("按住时暂停发包挖掘（不丢当前目标）")
+        .defaultValue(Keybind.none()).build()
+    );
+
+    private final Setting<Keybind> cancelKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("取消键").description("按住时放弃当前挖掘目标")
+        .defaultValue(Keybind.none()).build()
+    );
+
+    private final Setting<Keybind> enderChestKey = sgChest.add(new KeybindSetting.Builder()
+        .name("末影箱键").description("按一下，在当前会话方块位置放置一个末影箱（EnderChest）")
+        .defaultValue(Keybind.none()).build()
+    );
+
+    private final Setting<Double> placeRange = sgChest.add(new DoubleSetting.Builder()
+        .name("放置范围").description("放末影箱的最大交互距离（PlaceRange）")
+        .defaultValue(4.5).min(1).sliderMax(8).build()
+    );
+
+    private final Setting<Boolean> placeRotate = sgChest.add(new BoolSetting.Builder()
+        .name("放置转向").description("放末影箱前把视角转向放置点（PlaceRotate）")
+        .defaultValue(true).build()
+    );
+
+    // ── 渲染 ──
+
+    private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
+        .name("渲染").description("渲染挖掘进度方块（Render）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<BoxMode> boxMode = sgRender.add(new EnumSetting.Builder<BoxMode>()
+        .name("形状模式").description("线框/填充方式（BoxMode）")
+        .defaultValue(BoxMode.全部).build()
+    );
+
+    private final Setting<Boolean> boxAnimation = sgRender.add(new BoolSetting.Builder()
+        .name("盒子动画").description("渲染盒随进度向中心收缩（BoxAnimation）")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Easing> easing = sgRender.add(new EnumSetting.Builder<Easing>()
+        .name("缓动曲线").description("盒子动画的缓动曲线（Easing）。上游默认圆弧缓出")
+        .defaultValue(Easing.圆弧缓出).build()
+    );
+
+    private final Setting<SettingColor> startColor = sgRender.add(new ColorSetting.Builder()
+        .name("开始颜色").description("刚开挖的面包色（StartSide，实战青色）")
+        .defaultValue(new SettingColor(126, 126, 245, 63)).build()
+    );
+
+    private final Setting<SettingColor> endColor = sgRender.add(new ColorSetting.Builder()
+        .name("结束颜色").description("即将破坏的面包色（EndSide，实战深青）")
+        .defaultValue(new SettingColor(110, 110, 225, 6)).build()
+    );
+
+    private final Setting<SettingColor> startLineColor = sgRender.add(new ColorSetting.Builder()
+        .name("开始线色").description("刚开挖的线框色（StartLine，实战粉红）")
+        .defaultValue(new SettingColor(149, 149, 255, 255)).build()
+    );
+
+    private final Setting<SettingColor> endLineColor = sgRender.add(new ColorSetting.Builder()
+        .name("结束线色").description("即将破坏的线框色（EndLine，实战粉红）")
+        .defaultValue(new SettingColor(149, 149, 255, 255)).build()
+    );
+
+    private final Setting<Boolean> blockOutline = sgRender.add(new BoolSetting.Builder()
+        .name("方块轮廓").description("渲染盒贴合方块真实轮廓（BlockOutline）")
+        .defaultValue(true).build()
+    );
+
+    // ── 会话状态 ──
+
+    /** 上游 280ms 会话冷却（alP）。 */
+    private static final long SESSION_COOLDOWN_MS = 280;
+    /** 时间校验模式放行余量（上游 25ms）。 */
+    private static final double TIME_MODE_SLACK_MS = 25;
+
+    /** 主会话（上游 blockPosPlayerHelper2）：左键点击或对外 API 请求触发。 */
+    private Session mainSession;
+    /** 镜像会话（上游 blockPosPlayerHelper）：双重破坏的第二条进度线。 */
+    private Session mirrorSession;
+    /** 上次发 STOP 的时间（280ms 冷却 + 时间校验基准）。 */
+    private long lastStopTime;
+    /** 保持换持：发包后等待切回的旧槽位。 */
+    private int revertSlot = -1;
+    private int revertTicks;
+    /** 原版加速模式：NoReset 进度快照。 */
+    private ItemStack lastHeldStack;
+    private float lastDamageProgress;
+    /** 末影箱键边沿检测。 */
+    private boolean enderChestKeyWasPressed;
+
+    public FOPacketMine() {
+        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 SpeedMine：左键接管方块，客户端自算进度到阈值直接发包破坏。");
+        instance = this;
+    }
+
+    // ── 对外 API（Multitask）──
+
+    /**
+     * 请求挖掘一个方块（上游 alI 的移植版，带优先级抢占）。
+     *
+     * <p>FO 其他模块可调用：{@code FOPacketMine.get().mine(pos, 优先级)}。
+     * 当前主会话优先级更高且未完成时请求被拒绝。</p>
+     *
+     * @param pos      目标方块
+     * @param priority 优先级（数值越大越优先）
+     * @return 是否接受请求
+     */
+    public boolean mine(BlockPos pos, int priority) {
+        if (mc.player == null || mc.world == null) return false;
+        if (!mc.world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) return false;
+        if (!isValidTarget(pos)) return false;
+
+        if (mainSession != null && mainSession.pos.equals(pos)) return true;
+        if (mainSession != null && !mainSession.done && mainSession.priority > priority) {
+            // 已有更高优先级的会话且仍在范围内工作（上游 alI 的抢占保护）
+            if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) <= range.get()) return false;
+        }
+
+        mainSession = new Session(pos, priority, speed.get().floatValue());
+        mainSession.tick();
+        return true;
+    }
+
+    // ── Mixin 挂钩 ──
+
+    /**
+     * NoAbort 挂钩（Mixin 调用）：原版加速模式 + 不中断 + 未按使用键时，
+     * 拦截原版 cancelBlockBreaking（对齐上游 CancelBlockBreakingEvent 条件）。
+     */
+    public boolean shouldKeepBreaking() {
+        return mode.get() == MineMode.原版加速
+            && noAbort.get()
+            && !mc.options.useKey.isPressed();
+    }
+
+    /**
+     * NoCollision 挂钩（Mixin 调用）：会话进行中且已发过破坏包（上游 m>0）时，
+     * 方块对本人的碰撞取消。
+     */
+    public boolean shouldIgnoreCollision(BlockPos pos) {
+        return noCollision.get()
+            && mainSession != null
+            && mainSession.breakAttempts > 0
+            && pos.equals(mainSession.pos);
+    }
+
+    // ── 事件 ──
+
+    @Override
+    public void onActivate() {
+        mainSession = null;
+        mirrorSession = null;
+        revertSlot = -1;
+        lastHeldStack = null;
+        lastDamageProgress = 0;
+    }
+
+    @Override
+    public void onDeactivate() {
+        cancelAll();
+    }
+
+    @EventHandler
+    private void onAttack(DoAttackEvent event) {
+        if (mode.get() != MineMode.发包挖掘) return;
+        if (!(mc.crosshairTarget instanceof BlockHitResult hit)
+            || mc.crosshairTarget.getType() != HitResult.Type.BLOCK) return;
+
+        BlockPos pos = hit.getBlockPos();
+        if (!isValidTarget(pos)) return;
+
+        // 只接管有效目标：无效目标放行原版挖掘
+        event.cancel();
+
+        if (mainSession != null && pos.equals(mainSession.pos)) return; // 已经在挖这格
+        mine(pos, 8);
+    }
+
+    @EventHandler
+    private void onTick(TickEvent.Pre event) {
+        if (pauseKey.get().isPressed()) return;
+        if (cancelKey.get().isPressed()) {
+            cancelAll();
+            return;
+        }
+
+        // ── 原版加速（Damage）模式：不接管攻击 ──
+        if (mode.get() == MineMode.原版加速) {
+            damageTick();
+            return;
+        }
+
+        // ── 发包挖掘（Packet）模式 ──
+
+        // 保持换持：等方块消失或到持握上限再切回（上游 xB/HoldTicks）
+        if (revertSlot != -1) {
+            revertTicks++;
+            boolean blockGone = mainSession == null
+                || mc.world.getBlockState(mainSession.pos).isAir();
+            if (blockGone || revertTicks > holdTicks.get()) {
+                InvUtils.swap(revertSlot, false);
+                revertSlot = -1;
+                revertTicks = 0;
+            }
+        }
+
+        // 镜像会话（双重破坏的第二条进度线，上游 helper.xs()）
+        if (mirrorSession != null) {
+            mirrorSession.progressTick();
+            if (mirrorSession.progress >= 1.0f
+                && !mc.world.getBlockState(mirrorSession.pos).isAir()
+                && BlockUtils.canBreak(mirrorSession.pos)) {
+                mirrorSession.tryBreak();
+            }
+            if (mc.world.getBlockState(mirrorSession.pos).isAir() && !instantMine.get()) {
+                mirrorSession = null;
+            }
+        }
+
+        // 主会话（上游 helper2.xq()）
+        if (mainSession != null) {
+            // 会话期间每 tick 清零原版挖掘进度：原版破坏由发包接管
+            if (mc.interactionManager != null) mc.interactionManager.cancelBlockBreaking();
+            mainSession.tick();
+            if (mainSession.checkDone()) mainSession = null;
+        }
+
+        // 末影箱键（边沿触发，防止按住连放）
+        boolean pressed = enderChestKey.get().isPressed();
+        if (pressed && !enderChestKeyWasPressed && mainSession != null) {
+            placeEnderChest(mainSession.pos);
+        }
+        enderChestKeyWasPressed = pressed;
+    }
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (!render.get()) return;
+        if (mainSession != null) mainSession.render(event);
+        if (mirrorSession != null) mirrorSession.render(event);
+    }
+
+    // ── 挖掘会话（上游 BlockPosPlayerHelper 的移植版）──
+
+    public class Session {
+        /** 目标方块。 */
+        public BlockPos pos;
+        /** 破坏面。 */
+        public Direction dir;
+        /** 请求优先级。 */
+        public int priority;
+        /** 速度倍率（Speed；镜像会话固定 1.0）。 */
+        public float speedScale;
+
+        /** 当前破坏进度（上游 d）。 */
+        public float progress;
+        /** 上一 tick 进度（渲染帧间插值，上游 c）。 */
+        public float prevProgress;
+        /** 单 tick 最大进度（时间校验 + 理想钳制用，上游 p）。 */
+        public float maxDelta;
+        /** 已开始发包（上游 f）。 */
+        public boolean started;
+        /** 挖空气会话（上游 o）。 */
+        public boolean miningAir;
+        /** 完成（上游 e）。 */
+        public boolean done;
+
+        /** 进行 tick 数（上游 l）。 */
+        public int ticks;
+        /** 破坏包发送次数（上游 m，双阈值：RetryTicks 重置 / MiningTicks 完成）。 */
+        public int breakAttempts;
+        /** 持握 tick 数（上游 n）。 */
+        public int holdTicksCount;
+        /** 会话方块状态。 */
+        public BlockState state;
+        /** 最快工具。 */
+        public ItemStack bestStack;
+        /** 最快工具槽位（-1=无）。 */
+        public int bestSlot = -1;
+
+        Session(BlockPos pos, int priority, float speedScale) {
+            this.pos = pos;
+            this.dir = getFacing(pos);
+            this.priority = priority;
+            this.speedScale = speedScale;
+        }
+
+        /** 每 tick 推进（上游 xq）：暂停判定 → 开始 → 进度 → 破坏。 */
+        void tick() {
+            boolean paused = false;
+            if (onlyOnGround.get() && !mc.player.isOnGround()) {
+                // 站在梯子上例外（上游 xq 的 LadderBlock 分支）
+                BlockState standing = mc.world.getBlockState(mc.player.getBlockPos());
+                paused = !(standing.getBlock() instanceof LadderBlock);
+            }
+            if (pauseOnFlying.get() && mc.player.isGliding()) paused = true;
+            if (pauseInFluid.get() && mc.player.isInFluid()) paused = true;
+
+            if (!paused) {
+                if (!started && !inCooldown()) start();
+                if (started) progressTick();
+                if (progress >= 1.0f
+                    && !mc.world.getBlockState(pos).isAir()
+                    && BlockUtils.canBreak(pos)) {
+                    tryBreak();
+                }
+                holdTicksCount++;
+                return;
+            }
+
+            // 暂停中：严格暂停禁止新会话；已有会话继续攒进度但不发破坏包（对齐上游 xq）
+            if (!started && !strictCheck.get() && !inCooldown()) start();
+            if (started) progressTick();
+        }
+
+        /** 开始会话（上游 xr）：转向 → Grim 绕过包序列 → 双重破坏。 */
+        private void start() {
+            state = mc.world.getBlockState(pos);
+
+            if (state.isAir()) {
+                if (!mineAir.get()) return;
+                miningAir = true;
+            } else if (!BlockUtils.canBreak(pos)) {
+                return;
+            }
+
+            if (startRotate.get()) rotateTo(pos);
+
+            // 旧版绕过（Disabler）：START 前先发 STOP（上游 xG）
+            if (grimMode.get() == GrimMode.旧版绕过) {
+                sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir);
+            }
+
+            // 真实 START（上游 xF）
+            sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir);
+
+            // 新版绕过（NewDisabler）：补发 START(0,-999,0) 伪造包，
+            // 把服务端 vanilla 1.21.2+ 快挖防护与 Grim 的挖掘位置追踪重指向假方块（上游 xE）
+            if (grimMode.get() == GrimMode.新版绕过) {
+                mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                    PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP));
+            }
+
+            // 双重破坏：会话开始补一个 STOP（上游 xD），并建镜像会话（第二条进度线）
+            if (doubleBreak.get()) {
+                sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir);
+                if (mirrorSession == null || mirrorSession.done) {
+                    mirrorSession = new Session(pos, priority, 1.0f);
+                    mirrorSession.started = true;
+                }
+            }
+
+            swing();
+            started = true;
+        }
+
+        /** 进度推进（上游 xs）。 */
+        void progressTick() {
+            ticks++;
+            prevProgress = progress;
+            state = mc.world.getBlockState(pos);
+
+            if (state.isAir()) {
+                breakAttempts = 0;
+                if (!miningAir) {
+                    // 即时重破：进度不归零，继续对原位置补 STOP（上游 booleanSetting6 分支）
+                    if (!instantMine.get()) {
+                        started = false;
+                        progress = 0;
+                        prevProgress = 0;
+                        ticks = 0;
+                    }
+                    done = true;
+                }
+                return;
+            }
+
+            // 最快工具（Hotbar，上游 xv；SwapMode 只移植 Hotbar）
+            if (!manual.get()) {
+                FindItemResult fir = InvUtils.findFastestTool(state);
+                bestSlot = fir.found() ? fir.slot() : -1;
+                bestStack = fir.found() ? mc.player.getInventory().getStack(bestSlot) : null;
+            }
+
+            if (!started) return;
+
+            // 挖掘速度预测：以原版实时公式为基线，按最快工具速度缩放，
+            // 再按 CheckGround/CheckFly 旗标修正空中/鞘翅惩罚（上游 StackPlayerUtils.oQ 语义）
+            float vanillaDelta = state.calcBlockBreakingDelta(mc.player, mc.world, pos);
+            if (vanillaDelta <= 0) return;
+
+            ItemStack held = mc.player.getMainHandStack();
+            float heldSpeed = held.getMiningSpeedMultiplier(state);
+            float bestSpeed = bestStack != null ? bestStack.getMiningSpeedMultiplier(state) : heldSpeed;
+            if (heldSpeed > 0 && bestSpeed != heldSpeed) {
+                vanillaDelta *= bestSpeed / heldSpeed;
+            }
+            vanillaDelta = SpeedMineLogic.applyStateFlags(
+                vanillaDelta,
+                mc.player.isOnGround(),
+                mc.player.isGliding(),
+                checkGround.get(),
+                checkFly.get());
+
+            progress = Math.min(1.0f, progress + vanillaDelta / speedScale);
+            maxDelta = Math.max(maxDelta, vanillaDelta);
+
+            // 理想进度钳制（上游 xs 尾部）：进度不得超过真实状态理想挖掘的累计值
+            float ideal = maxDelta * ticks;
+            if (ideal < progress || miningAir) progress = ideal;
+        }
+
+        /** 发破坏包（上游 xt）：时间校验 → 换持策略 → STOP。 */
+        void tryBreak() {
+            // 时间校验模式：STOP 前必须等够真实挖掘时间（上游 FX 分支）
+            if (grimMode.get() == GrimMode.时间校验) {
+                double expected = Math.ceil(1.0 / Math.max(maxDelta, 1e-6)) * 50.0;
+                if (!SpeedMineLogic.timeModeStopAllowed(
+                    expected, System.currentTimeMillis() - lastStopTime, TIME_MODE_SLACK_MS)) {
+                    return;
+                }
+            }
+
+            ItemStack held = mc.player.getMainHandStack();
+
+            if (!manual.get() && bestSlot != -1
+                && (bestStack == null || !ItemStack.areEqual(bestStack, held))) {
+                if (!hold.get()) {
+                    // 直切：换上→发 STOP→自动换回（上游 ba/xA/bb）
+                    InvUtils.swap(bestSlot, true);
+                    if (endRotate.get()) rotateTo(pos);
+                    breakAttempts++;
+                    sendStop();
+                    swing();
+                } else {
+                    // 保持换持：换上不切回，等方块消失或持握上限（上游 Hold/xB 分支）
+                    revertSlot = mc.player.getInventory().getSelectedSlot();
+                    revertTicks = 0;
+                    InvUtils.swap(bestSlot, false);
+                    if (endRotate.get()) rotateTo(pos);
+                    breakAttempts++;
+                    sendStop();
+                    swing();
+                }
+            } else {
+                if (endRotate.get()) rotateTo(pos);
+                breakAttempts++;
+                sendStop();
+                swing();
+            }
+
+            // 重试等待：重试超限，整个会话重来（上游 xt 尾部）
+            if (breakAttempts > retryTicks.get() && (!instantMine.get() || !done)) {
+                started = false;
+                ticks = 0;
+                breakAttempts = 0;
+                progress = 0;
+                prevProgress = 0;
+            }
+        }
+
+        /** 完成判定（上游 xu）：进度满后按挖掘上限收尾。 */
+        boolean checkDone() {
+            if (done) return true;
+
+            if (progress >= 1.0f) {
+                boolean holdingBest = bestSlot == -1
+                    || (bestStack != null && ItemStack.areEqual(bestStack, mc.player.getMainHandStack()));
+                if (holdingBest) {
+                    breakAttempts++;
+                    return breakAttempts > miningTicks.get();
+                }
+                // 额外切换：进度满但没拿最快工具 → 换上发包再换回（上游 AutoSwitch 分支）
+                if (autoSwitch.get() && !manual.get() && bestSlot != -1) {
+                    InvUtils.swap(bestSlot, true);
+                    if (endRotate.get()) rotateTo(pos);
+                    breakAttempts++;
+                    sendStop();
+                    swing();
+                    return breakAttempts > miningTicks.get();
+                }
+                return false;
+            }
+
+            breakAttempts = 0;
+            return false;
+        }
+
+        /** 渲染（上游 alz）：缓动 + 帧间插值 + 盒子收缩 + 形状贴合 + 四色渐变。 */
+        void render(Render3DEvent event) {
+            // 帧间平滑：上一 tick 进度与当前进度按 tickDelta 插值，再过缓动曲线（上游 c+(d-c)*f）
+            double raw = prevProgress + (progress - prevProgress) * event.tickDelta;
+            double eased = easing.get().apply(Math.max(0, Math.min(1, raw)));
+
+            Box box;
+            if (boxAnimation.get()) {
+                // 形状贴合：用方块真实轮廓（火是扁的、台阶是半格，上游 getOutlineShape）
+                Box base;
+                if (blockOutline.get()) {
+                    VoxelShape shape = mc.world.getBlockState(pos).getOutlineShape(mc.world, pos);
+                    base = shape.isEmpty() ? new Box(pos) : shape.getBoundingBox().offset(pos);
+                } else {
+                    base = new Box(pos);
+                }
+                // 盒子动画：随缓动值向中心收缩（上游 BoxAnimation）
+                Vec3d center = base.getCenter();
+                double hx = base.getLengthX() / 2.0 * eased;
+                double hy = base.getLengthY() / 2.0 * eased;
+                double hz = base.getLengthZ() / 2.0 * eased;
+                box = new Box(center.subtract(hx, hy, hz), center.add(hx, hy, hz));
+            } else {
+                box = new Box(pos);
+            }
+
+            int[] side = SpeedMineLogic.lerpColor(toRgba(startColor.get()), toRgba(endColor.get()), eased);
+            int[] line = SpeedMineLogic.lerpColor(toRgba(startLineColor.get()), toRgba(endLineColor.get()), eased);
+
+            event.renderer.box(box,
+                new SettingColor(side[0], side[1], side[2], side[3]),
+                new SettingColor(line[0], line[1], line[2], line[3]),
+                boxMode.get().toShapeMode(), 0);
+        }
+
+        private void sendStop() {
+            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir);
+            lastStopTime = System.currentTimeMillis();
+            markBreak(pos);
+        }
+    }
+
+    // ── 原版加速（Damage）模式 ──
+
+    private void damageTick() {
+        net.minecraft.client.network.ClientPlayerInteractionManager im = mc.interactionManager;
+        if (im == null) return;
+        com.fo.addon.mixin.ClientPlayerInteractionManagerAccessor acc =
+            (com.fo.addon.mixin.ClientPlayerInteractionManagerAccessor) im;
+
+        // 无冷却：清掉破块后的挖掘冷却（上游 MiningCooldownFixEvent 语义）
+        if (noDelay.get() && acc.getBlockBreakingCooldown() > 0) {
+            acc.setBlockBreakingCooldown(0);
+        }
+
+        ItemStack held = mc.player.getMainHandStack();
+
+        // 不重置：换手物品后恢复进度快照（上游 StackEvent 语义）
+        if (noReset.get()
+            && lastHeldStack != null
+            && !ItemStack.areEqual(held, lastHeldStack)
+            && lastDamageProgress > 0
+            && im.getBlockBreakingProgress() <= 0) {
+            acc.setCurrentBreakingProgress(lastDamageProgress);
+        }
+        lastHeldStack = held;
+
+        // 核心一步：原版进度达到 Speed 阈值 → 直接置满，原版同 tick 内发包破坏
+        // （上游 ordinal==0 分支的 hookSetCurrentBreakingProgress(1.0F)）
+        float prog = im.getBlockBreakingProgress();
+        lastDamageProgress = prog;
+        if (prog >= speed.get().floatValue() && prog < 1.0f) {
+            acc.setCurrentBreakingProgress(1.0f);
+        }
+    }
+
+    // ── 辅助 ──
+
+    /** 从准星取破坏面；没看着该方块时取离眼睛最近的面（上游 PlacementUtils.Fh 简化等价）。 */
+    private Direction getFacing(BlockPos pos) {
+        if (mc.crosshairTarget instanceof BlockHitResult hit
+            && hit.getBlockPos().equals(pos)
+            && mc.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+            return hit.getSide();
+        }
+        Vec3d eye = mc.player.getEyePos();
+        Vec3d c = pos.toCenterPos();
+        double dx = eye.x - c.x;
+        double dy = eye.y - c.y;
+        double dz = eye.z - c.z;
+        double ax = Math.abs(dx);
+        double ay = Math.abs(dy);
+        double az = Math.abs(dz);
+        if (ax >= ay && ax >= az) return dx > 0 ? Direction.EAST : Direction.WEST;
+        if (ay >= az) return dy > 0 ? Direction.UP : Direction.DOWN;
+        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+    }
+
+    private void rotateTo(BlockPos pos) {
+        Vec3d target = pos.toCenterPos();
+        Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target), (Runnable) null);
+    }
+
+    /** 目标有效性：过滤模式 + 忽略已破坏。 */
+    private boolean isValidTarget(BlockPos pos) {
+        BlockState state = mc.world.getBlockState(pos);
+        if (ignoreBroken.get() && state.isAir()) return false;
+        Block block = state.getBlock();
+        return switch (filterMode.get()) {
+            case 全部 -> true;
+            case 仅黑名单 -> !blacklist.get().contains(block);
+            case 仅白名单 -> whitelist.get().contains(block);
+        };
+    }
+
+    private boolean inCooldown() {
+        return grimMode.get() != GrimMode.无
+            && grimMode.get() != GrimMode.旧版绕过
+            && SpeedMineLogic.inSessionCooldown(
+                System.currentTimeMillis(), lastStopTime, SESSION_COOLDOWN_MS);
+    }
+
+    /** 挖掘包统一带正确的 block-change sequence（复用 fo.accesswidener 的 GrimV3 条目）。 */
+    private void sendDig(PlayerActionC2SPacket.Action action, BlockPos pos, Direction dir) {
+        var pending = mc.world.getPendingUpdateManager().incrementSequence();
+        int seq = pending.sequence;
+        pending.close();
+        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(action, pos, dir, seq));
+    }
+
+    private void swing() {
+        mc.player.swingHand(Hand.MAIN_HAND);
+    }
+
+    /** 发包破坏后的统一收尾：假破块 + 聊天提示（上游 xz/xA/xC 的 Desync 分支）。 */
+    private void markBreak(BlockPos pos) {
+        switch (desync.get()) {
+            case 正常破坏 -> mc.interactionManager.breakBlock(pos);
+            case 假破块 -> mc.world.removeBlock(pos, false);
+            case 无 -> {
+            }
+        }
+        if (notify.get()) {
+            info("发包挖掘：已破坏 %d %d %d", pos.getX(), pos.getY(), pos.getZ());
+        }
+    }
+
+    private void placeEnderChest(BlockPos pos) {
+        if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) > placeRange.get()) return;
+        FindItemResult fir = InvUtils.find(Items.ENDER_CHEST);
+        if (fir.found()) {
+            BlockUtils.place(pos, fir, placeRotate.get(), 0);
+        }
+    }
+
+    private static int[] toRgba(SettingColor c) {
+        return new int[]{c.r, c.g, c.b, c.a};
+    }
+
+    private void cancelAll() {
+        mainSession = null;
+        mirrorSession = null;
+        revertSlot = -1;
     }
 }

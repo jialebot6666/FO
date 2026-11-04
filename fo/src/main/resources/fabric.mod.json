@@ -13,6 +13,9 @@
   "icon": "assets/template/icon.png",
   "environment": "client",
   "accessWidener": "fo.accesswidener",
+  "mixins": [
+    "fo.mixins.json"
+  ],
   "entrypoints": {
     "meteor": [
       "com.fo.addon.AddonTemplate"
