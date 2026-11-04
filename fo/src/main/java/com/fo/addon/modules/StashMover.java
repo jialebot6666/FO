@@ -46,6 +46,9 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.ShulkerBoxScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -705,6 +708,10 @@ public class StashMover extends Module {
     private double edgeLastZ;
     /** 投掷前记录的背包珍珠数：数量下降 = 投出去了（V6.7p11，PearlDrop 的判定方式）。 */
     private int pearlCountBefore;
+    /** 补货子步骤（V6.7p12）：0=未开始 1=已拿起整堆 2=逐颗放 3=放回余量 4=确认光标空后关闭。 */
+    private int restockPhase;
+    /** 放回余量的尝试次数（防止死循环把所有槽位都试一遍）。 */
+    private int restockPutbackTries;
     /** 走到目标格中心的判定半径（格）。 */
     private static final double STEP_ARRIVE_EPS = 0.35;
     /** 挂起的交互动作：等本 tick 的移动包（带新朝向）发完再执行。 */
@@ -727,6 +734,8 @@ public class StashMover extends Module {
     private long arriveWaitStart;
     /** 连续点活板门没打开的累计次数（换目标/打开成功即归零）。 */
     private int trapdoorClickAttempts;
+    /** 「退开重来」轮数（V6.7p12，连点 6 次没开就退开换角度，最多 2 轮）。 */
+    private int trapdoorRetreats;
     /** 调试心跳：上次打印摘要的 tick。 */
     private long lastHeartbeatTick;
     /** 心跳摘要真正打印出去的 tick（内容不变时用它控制「仍在…」的间隔）。 */
@@ -813,6 +822,9 @@ public class StashMover extends Module {
         nextPearlCheckTick = 0;
         arriveWaitStart = 0;
         trapdoorClickAttempts = 0;
+        trapdoorRetreats = 0;
+        restockPhase = 0;
+        restockPutbackTries = 0;
         lastHeartbeatTick = 0;
         lastHeartbeatPrintTick = 0;
         lastHeartbeatSummary = "";
@@ -1548,7 +1560,7 @@ public class StashMover extends Module {
         int have = countPearls();
         int target = Math.max(restockTarget.get(), restockThreshold.get());
         int need = StashPearlLogic.missingToTarget(have, restockThreshold.get(), target);
-        if (need == 0) {
+        if (need == 0 && restockPhase == 0) {
             debugMsg("[补珍珠] 珍珠 " + have + " 颗已够（阈值 " + restockThreshold.get() + "），不用补");
             setTrioState(TrioState.THROW, "珍珠数量已够");
             cooldown = PACE_RESTOCK_DONE;
@@ -1557,6 +1569,11 @@ public class StashMover extends Module {
         // V6.7p4：取消 64 格距离闸——珍珠不够就寻路过去补（走不过去由看门狗报警）
         double distSq = mc.player.getBlockPos().getSquaredDistance(chestPos);
         if (!containerOpen()) {
+            if (restockPhase != 0) {
+                warning("补货途中界面被关掉了，重置补货步骤（若少了珍珠请检查）");
+                restockPhase = 0;
+                restockPutbackTries = 0;
+            }
             // 开新容器前先关掉可能残留的界面，避免读到别的容器
             if (mc.currentScreen != null) {
                 closeScreen();
@@ -1575,63 +1592,97 @@ public class StashMover extends Module {
             return;
         }
 
-        // 精确补到 target：一次拿起箱内珍珠堆 → 对背包珍珠堆右键逐颗放 → 余量放回
-        if (restockStepsLeft <= 0) {
-            restockStepsLeft = need;
-            restockChestSlot = findPearlSlotInContainer();
-            restockInvSlot = findPearlSlotInInventory();
-            debugMsg("[补珍珠] 开始补货：差 " + need + " 颗，箱内槽位=" + restockChestSlot
-                + " 背包槽位=" + restockInvSlot);
-            if (restockChestSlot < 0) {
-                // V6.7p4：诊断 + 空读重试（排除槽位同步延迟 / 开错容器）
-                var handler = containerHandler();
-                debugMsg("[补珍珠] 界面=" + (handler == null ? "null" : handler.getClass().getSimpleName())
-                    + " 槽位=" + (handler == null ? 0 : handler.slots.size())
-                    + " 找到珍珠槽位=" + restockChestSlot);
-                closeScreen();
-                restockStepsLeft = 0;
-                if (restockRetries < 2) {
-                    restockRetries++;
-                    debugMsg("珍珠箱里没读到珍珠，第 " + restockRetries + " 次重开确认");
-                    cooldown = 20;
+        // ===== V6.7p12：拆成显式子步骤，**光标不空绝不关界面** =====
+        // 原来「放回余量」和「关界面」挤在同一个 tick：服务端可能先处理关界面，
+        // 光标上那堆珍珠就掉地上了。更坑的是——如果箱里那堆刚好等于需要的数量，
+        // 光标本来就是空的，最后那次「放回」点击会把整堆**重新拿起来**，然后关界面直接丢。
+        switch (restockPhase) {
+            case 0 -> {
+                restockStepsLeft = need;
+                restockChestSlot = findPearlSlotInContainer();
+                restockInvSlot = findPearlSlotInInventory();
+                debugMsg("[补珍珠] 开始补货：差 " + need + " 颗，箱内槽位=" + restockChestSlot
+                    + " 背包槽位=" + restockInvSlot);
+                if (restockChestSlot < 0) {
+                    var handler = containerHandler();
+                    debugMsg("[补珍珠] 界面=" + (handler == null ? "null" : handler.getClass().getSimpleName())
+                        + " 槽位=" + (handler == null ? 0 : handler.slots.size())
+                        + " 找到珍珠槽位=" + restockChestSlot);
+                    closeScreen();
+                    restockStepsLeft = 0;
+                    if (restockRetries < 2) {
+                        restockRetries++;
+                        debugMsg("珍珠箱里没读到珍珠，第 " + restockRetries + " 次重开确认");
+                        cooldown = 20;
+                        return;
+                    }
+                    restockRetries = 0;
+                    if (have > 0) {
+                        info("珍珠箱里没有珍珠了，先用剩余 " + have + " 颗");
+                        setTrioState(TrioState.THROW, "珍珠箱空了，用剩余珍珠");
+                        cooldown = PACE_RESTOCK_DONE;
+                    } else {
+                        enterStuck("珍珠箱里没有珍珠");
+                    }
                     return;
                 }
                 restockRetries = 0;
-                if (have > 0) {
-                    info("珍珠箱里没有珍珠了，先用剩余 " + have + " 颗");
-                    setTrioState(TrioState.THROW, "珍珠箱空了，用剩余珍珠");
-                    cooldown = PACE_RESTOCK_DONE;
-                } else {
-                    enterStuck("珍珠箱里没有珍珠");
+                if (restockInvSlot < 0) restockInvSlot = findEmptyInventorySlot();
+                if (restockInvSlot < 0) {
+                    closeScreen();
+                    enterStuck("背包没有空位放珍珠");
+                    return;
                 }
-                return;
+                clickSlot(restockChestSlot, SlotActionType.PICKUP);   // 拿起整堆（光标上）
+                restockPhase = 1;
+                restockPutbackTries = 0;
+                cooldown = Math.max(1, clickDelay.get());
+                progress();
             }
-            restockRetries = 0;
-            if (restockInvSlot < 0) restockInvSlot = findEmptyInventorySlot();
-            if (restockInvSlot < 0) {
+            case 1 -> {
+                // 逐颗右键放到背包珍珠堆；光标空了（箱里那堆不够）也算这一步结束
+                if (restockStepsLeft > 0 && cursorPearlCount() > 0) {
+                    clickSlot(restockInvSlot, SlotActionType.PICKUP, 1);
+                    restockStepsLeft--;
+                    cooldown = Math.max(1, clickDelay.get());
+                    progress();
+                    return;
+                }
+                restockPhase = 2;
+                cooldown = 2;
+            }
+            case 2 -> {
+                if (cursorEmpty()) {
+                    restockPhase = 3;
+                    cooldown = 2;
+                    return;
+                }
+                // 余量放回：优先原槽（空着或还是珍珠），否则找任意空容器槽
+                int putback = putbackSlot();
+                if (putback >= 0) clickSlot(putback, SlotActionType.PICKUP);
+                restockPutbackTries++;
+                cooldown = Math.max(1, clickDelay.get());
+                progress();
+                if (restockPutbackTries > 4) {
+                    warning("珍珠放不回箱子，改塞进背包空格");
+                    int inv = findEmptyInventorySlot();
+                    if (inv >= 0) clickSlot(inv, SlotActionType.PICKUP);
+                }
+            }
+            case 3 -> {
+                // 光标必须是空的才允许关界面（否则那堆珍珠会掉地上）
+                if (!cursorEmpty()) {
+                    restockPhase = 2;
+                    cooldown = 2;
+                    return;
+                }
                 closeScreen();
-                enterStuck("背包没有空位放珍珠");
-                return;
+                restockPhase = 0;
+                restockPutbackTries = 0;
+                debugMsg("[补珍珠] 补货完成，现在有 " + countPearls() + " 颗");
+                setTrioState(TrioState.THROW, "补货完成");
+                cooldown = PACE_RESTOCK_DONE;
             }
-            // 第 1 步：拿起箱内整堆
-            clickSlot(restockChestSlot, SlotActionType.PICKUP);
-            cooldown = Math.max(1, clickDelay.get());
-            progress();
-            return;
-        }
-
-        // 逐个右键放到背包珍珠堆（每次 +1）
-        clickSlot(restockInvSlot, SlotActionType.PICKUP, 1);
-        restockStepsLeft--;
-        cooldown = Math.max(1, clickDelay.get());
-        progress();
-        if (restockStepsLeft <= 0) {
-            // 余量放回箱子原槽
-            clickSlot(restockChestSlot, SlotActionType.PICKUP);
-            closeScreen();
-            debugMsg("[补珍珠] 补货完成，现在有 " + countPearls() + " 颗");
-            setTrioState(TrioState.THROW, "补货完成");
-            cooldown = PACE_RESTOCK_DONE;
         }
     }
 
@@ -1720,7 +1771,19 @@ public class StashMover extends Module {
     private void realClick(BlockPos pos) {
         if (pos == null) return;
         lookAt(Vec3d.ofCenter(pos));
-        afterMoveAction = () -> BlockClicker.clickBlockNoRotate(pos, Hand.MAIN_HAND);
+        afterMoveAction = () -> {
+            if (mc.player == null || mc.interactionManager == null) return;
+            // V6.7p12：优先走**真实玩家交互路径**（准星 raycast + 客户端预测）。
+            // 手搓 PlayerInteractBlockC2SPacket 有两个坑：
+            //   ① 命中点是「中心 + 面方向×0.5」，正好落在方块边界上，部分服务端判无效交互；
+            //   ② 手搓包不做客户端预测，门开了客户端状态不更新 → 下一轮又点一次 → 把门关回去。
+            if (mc.crosshairTarget instanceof BlockHitResult hit && hit.getBlockPos().equals(pos)) {
+                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
+            } else {
+                // 准星没对上（被别的东西挡住/还没转完）→ 退回自己算命中点
+                BlockClicker.clickBlockNoRotate(pos, Hand.MAIN_HAND);
+            }
+        };
     }
 
     /** 本 tick 的移动包（带朝向）发完之后再执行挂起的交互动作。 */
@@ -1785,17 +1848,51 @@ public class StashMover extends Module {
      *
      * <p>结果按区缓存：结构没变就一直用同一格，避免每趟重算。
      */
+    /**
+     * 开着的活板门「门板占哪一侧」（V6.7p12）。
+     *
+     * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，贴在自己那一格的某一侧，
+     * 包围盒能看出来（maxX≈1 → 东侧，minX≈0 → 西侧……）。
+     * 关着的时候是平铺的薄板（X/Z 占满），那种情况返回 null——哪边都不挡。
+     *
+     * @return 门板贴着的那一侧；关着/不是活板门/看不出时返回 null
+     */
+    private Direction openLidSide(BlockPos trapdoor) {
+        var st = mc.world.getBlockState(trapdoor);
+        if (!(st.getBlock() instanceof TrapdoorBlock)) return null;
+        if (!st.get(TrapdoorBlock.OPEN)) return null;   // 关着是平铺的薄板，不挡任何一侧
+        VoxelShape shape = st.getCollisionShape(mc.world, trapdoor);
+        if (shape.isEmpty()) return null;
+        Box b = shape.getBoundingBox();
+        if (b.maxX >= 0.99) return Direction.EAST;
+        if (b.minX <= 0.01) return Direction.WEST;
+        if (b.maxZ >= 0.99) return Direction.SOUTH;
+        if (b.minZ <= 0.01) return Direction.NORTH;
+        return null;
+    }
+
+    /**
+     * 柱子旁边「该站哪一格」（V6.7p12，用户口径：**站活板门的正对面**）。
+     *
+     * <p>为什么必须正对面：门板立在自己那一格的某一侧，站对面贴到边缘也碰不到它；
+     * 站侧面或门板那一侧，按住 Shift 往前贴的时候人物碰撞箱（0.6 宽）会顶到门板，
+     * 走不到位 → 珍珠投不进腔室。这正是实机反馈的「走不到合适位置」。
+     *
+     * <p>实现：用 {@link #openLidSide} 读出门板占哪一侧，正对面**优先**（不加惩罚），
+     * 垂直两侧次之（+100），门板那一侧最后（+1000）；同一层都不可站再试 +1 层，
+     * 还不行退回 {@link #pearlStandSpot}。结果按区缓存。
+     */
     private BlockPos throwStandSpot(BlockPos trapdoor) {
         if (mc.world == null || mc.player == null) return null;
         BlockPos water = trapdoor.down(1);
         if (throwStandCache != null && !throwStandCache.equals(water) && isStandable(throwStandCache)) {
             return throwStandCache;
         }
-        var state = mc.world.getBlockState(trapdoor);
-        Direction facing = state.getBlock() instanceof TrapdoorBlock ? state.get(TrapdoorBlock.FACING) : null;
+        Direction lid = openLidSide(trapdoor);
+        if (debug.get() && lid != null && tick % 100 == 0) {
+            debugMsg("[站位] 门板占" + lid.asString() + "侧，优先站对侧");
+        }
 
-        // V6.7p11（照 PearlDrop 的 findRim）：先试活板门那一层，再试上面一层。
-        // 「落在活板门上/卡在门沿」时，只有 +1 层能站——这是用户实机反馈过的落点之一。
         BlockPos best = null;
         for (int level = 0; level <= 1 && best == null; level++) {
             int feetY = trapdoor.getY() + level;
@@ -1804,7 +1901,11 @@ public class StashMover extends Module {
                 BlockPos p = new BlockPos(trapdoor.getX() + d.getOffsetX(), feetY, trapdoor.getZ() + d.getOffsetZ());
                 if (p.equals(water) || !isStandable(p)) continue;
                 double score = p.getSquaredDistance(mc.player.getBlockPos());
-                if (facing != null && d == facing) score += 1000;   // 贴住那一侧排最后
+                if (lid != null) {
+                    if (d == lid) score += 1000;                          // 门板那一侧：贴过去必撞
+                    else if (d != lid.getOpposite()) score += 100;        // 垂直两侧次之
+                    // 正对面：不加惩罚，只要能站就优先
+                }
                 if (score < bestScore) {
                     bestScore = score;
                     best = p;
@@ -2054,6 +2155,7 @@ public class StashMover extends Module {
                         debugMsg("[活板门] 已确认打开（点了 " + trapdoorClickAttempts + " 次）");
                     }
                     trapdoorClickAttempts = 0;
+                    trapdoorRetreats = 0;
                     setThrowSub(3, "活板门已开，潜行贴到边缘");
                     edgeTicks = 0;
                     edgeStuckTicks = 0;
@@ -2069,8 +2171,20 @@ public class StashMover extends Module {
                 //   （`closeOpenTrapdoor=true`：投之前把开着的活板门关掉）。
                 //   但用户明确指出「门关着珍珠就进不去柱子」，且其实机做法是**开着投**。
                 //   别为了"对齐参考实现"把这里改成关闭——那是另一种腔体结构。
-                if (trapdoorClickAttempts >= 8) {
-                    enterStuck("连续 8 次都打不开活板门 " + stand.toShortString()
+                // V6.7p12（用户口径）：连点 6 次还打不开 → **先离开当前位置再回来重试**。
+                // 有时人贴得太近/站位太偏，准星被门框或自己挡住，退开一米换个角度就好了。
+                if (trapdoorClickAttempts >= 6) {
+                    if (trapdoorRetreats < 2) {
+                        trapdoorRetreats++;
+                        trapdoorClickAttempts = 0;
+                        info("活板门连点 6 次没开，先退开重来（第 " + trapdoorRetreats + " 轮）");
+                        // 面朝柱子按 S 退 25 tick（faceColumn 已经把朝向摆好），然后回第 1 步重新站位
+                        backoffTicks = 25;
+                        setThrowSub(1, "退开换角度重开活板门");
+                        cooldown = 30;
+                        return;
+                    }
+                    enterStuck("连续 " + (6 * (trapdoorRetreats + 1)) + " 次都打不开活板门 " + stand.toShortString()
                         + "（眼睛距=" + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(Vec3d.ofCenter(stand)))
                         + "，请手动确认这个坐标是不是活板门、有没有被方块挡住）");
                     return;
@@ -2178,7 +2292,8 @@ public class StashMover extends Module {
 
     /** ④ 松开 shift、按 S 退离气泡柱（退到离柱心 ≥2.5 格），再回到投掷前的原位。 */
     private boolean backOffToSafe() {
-        releaseSneak();
+        // V6.7p12：后退全程保持蹲着（用户口径），只在退到安全距离后才由 finishTrioThrow 松开
+        sneakForThrow();
         BlockPos water = trioTrapdoor().down(1);
         Vec3d center = Vec3d.ofCenter(water);
         double dist = Math.hypot(center.x - mc.player.getX(), center.z - mc.player.getZ());
@@ -2522,7 +2637,7 @@ public class StashMover extends Module {
         turnTo(yp[0], yp[1]);
         afterMoveAction = () -> {
             if (mc.player != null) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-            releaseSneak();   // Shift 保持到真正投出之后再松（用户口径：蹲着投）
+            // V6.7p12：投完**不松 Shift**——后退也要蹲着（用户口径），到安全位再松（finishTrioThrow）
         };
 
         backoffTicks = TRIO_RETREAT_TIMEOUT;   // 投完按 S 后退（实际按“离柱心 ≥1.0 格”提前停，这里只是上限）
@@ -2684,6 +2799,37 @@ public class StashMover extends Module {
 
     private void closeScreen() {
         if (mc.player != null && mc.currentScreen != null) mc.player.closeHandledScreen();
+    }
+
+    /** 光标上是否没有东西（V6.7p12：关界面前必须为空）。 */
+    private boolean cursorEmpty() {
+        if (mc.player == null) return true;
+        ScreenHandler h = mc.player.currentScreenHandler;
+        return h == null || h.getCursorStack().isEmpty();
+    }
+
+    /** 光标上拿着几颗珍珠。 */
+    private int cursorPearlCount() {
+        if (mc.player == null) return 0;
+        ScreenHandler h = mc.player.currentScreenHandler;
+        if (h == null) return 0;
+        ItemStack st = h.getCursorStack();
+        return st.isOf(Items.ENDER_PEARL) ? st.getCount() : 0;
+    }
+
+    /** 余量该放回哪个槽位：优先原槽，其次任意空容器槽，都没有返回 -1。 */
+    private int putbackSlot() {
+        ScreenHandler h = containerHandler();
+        if (h == null) return -1;
+        if (restockChestSlot >= 0 && restockChestSlot < h.slots.size()) {
+            ItemStack st = h.getSlot(restockChestSlot).getStack();
+            if (st.isEmpty() || st.isOf(Items.ENDER_PEARL)) return restockChestSlot;
+        }
+        int size = h.slots.size();
+        for (int i = 0; i < size - 36; i++) {
+            if (h.getSlot(i).getStack().isEmpty()) return i;
+        }
+        return -1;
     }
 
     private void clickSlot(int slot, SlotActionType type) {
