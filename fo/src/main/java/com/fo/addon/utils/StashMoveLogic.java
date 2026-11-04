@@ -63,6 +63,47 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 离「最近的那个区锚点」有多远（水平距离，格）。V6.7p8 新增。
+     *
+     * <p>用于启动时的距离门槛：超过设定值就报警，让人把角色走到某个区再开模块。
+     * 与 {@link #nearerZone} 用同一对锚点（待搬运箱位置 / 存储箱位置），保证
+     * 「判定所在区」和「距离检查」不会各说各话。
+     *
+     * @param hasSource 待搬运箱位置是否已设置
+     * @param hasStore  存储箱位置是否已设置
+     * @return 最近距离；两处都没设置时返回 {@link Double#MAX_VALUE}
+     */
+    public static double nearestZoneDistance(double playerX, double playerZ,
+                                             double sourceX, double sourceZ, boolean hasSource,
+                                             double storeX, double storeZ, boolean hasStore) {
+        double best = Double.MAX_VALUE;
+        if (hasSource) best = Math.min(best, Math.hypot(playerX - sourceX, playerZ - sourceZ));
+        if (hasStore) best = Math.min(best, Math.hypot(playerX - storeX, playerZ - storeZ));
+        return best;
+    }
+
+    /**
+     * 本区该用哪个珍珠箱（V6.7p8）：本区专用优先 → 回退「通用珍珠箱」→ 都没有。
+     *
+     * <p>做成纯逻辑是为了锁住优先级：只放了一个珍珠箱的老配置必须继续能用
+     * （专用空着就自动回退通用），否则升级后补货会静默失效。
+     *
+     * @return 0 = 用本区专用；1 = 用通用；2 = 两处都没设置
+     */
+    public static int pickPearlChestSlot(boolean zoneChestSet, boolean commonChestSet) {
+        if (zoneChestSet) return PEARL_CHEST_ZONE;
+        if (commonChestSet) return PEARL_CHEST_COMMON;
+        return PEARL_CHEST_NONE;
+    }
+
+    /** {@link #pickPearlChestSlot} 的返回值：用本区专用珍珠箱。 */
+    public static final int PEARL_CHEST_ZONE = 0;
+    /** {@link #pickPearlChestSlot} 的返回值：回退通用珍珠箱。 */
+    public static final int PEARL_CHEST_COMMON = 1;
+    /** {@link #pickPearlChestSlot} 的返回值：两处都没设置。 */
+    public static final int PEARL_CHEST_NONE = 2;
+
+    /**
      * 卸货过滤（V6.7p1 修复）：哪些物品允许存进存储箱。     *
      * <ul>
      *   <li>末影珍珠<b>永远不入库</b>——三号模式的珍珠是随身携带的“回程票”，

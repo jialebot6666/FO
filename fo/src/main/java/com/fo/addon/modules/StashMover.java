@@ -543,9 +543,24 @@ public class StashMover extends Module {
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
+    private final Setting<BlockPos> sourcePearlChest = sgTrio.add(new BlockPosSetting.Builder()
+        .name("待搬运箱区珍珠箱")
+        .description("2 号点这边的珍珠箱。留空（0,0,0）就用下面的「通用珍珠箱」。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
+        .build());
+
+    private final Setting<BlockPos> storePearlChest = sgTrio.add(new BlockPosSetting.Builder()
+        .name("存储箱区珍珠箱")
+        .description("3 号点这边的珍珠箱。留空（0,0,0）就用下面的「通用珍珠箱」。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
+        .build());
+
     private final Setting<BlockPos> trioPearlChest = sgTrio.add(new BlockPosSetting.Builder()
+        // ⚠️ 名字不要改：Meteor 用设置名当配置键，改名会让老配置里已存的坐标读不出来（V6.7p8 刻意保留原名）
         .name("珍珠箱位置")
-        .description("全路线共用一个珍珠箱：手上珍珠少于阈值时来这里补到目标数量。")
+        .description("通用的珍珠箱。只在一条路线上放了一个箱子就填这里；上面两个「分区珍珠箱」填了则以分区为准。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
@@ -565,6 +580,16 @@ public class StashMover extends Module {
         .defaultValue(16)
         .min(1)
         .sliderMax(16)
+        .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
+        .build());
+
+    private final Setting<Integer> startMaxDistance = sgTrio.add(new IntSetting.Builder()
+        .name("启动最远距离")
+        .description("开模块时离最近的区超过这个距离就报警暂停（近的会自己走过去，远的怕走丢/走进危险区）。")
+        .defaultValue(64)
+        .min(16)
+        .max(512)
+        .sliderMax(256)
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
@@ -730,7 +755,10 @@ public class StashMover extends Module {
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
-            trioZone = initialZone();
+            // V6.7p8：这里**不判区**。启动位置是随机的，判区 + 距离检查统一放到 tickTrioMover 的
+            // 第一次 tick 里做（那里有「离两个区都太远就报警」的门槛）。原来在这里直接 initialZone()，
+            // 会绕过距离检查。
+            trioZone = StashMoveLogic.Zone.UNKNOWN;
             trioState = TrioState.SETTLE;
         }
     }
@@ -1180,12 +1208,39 @@ public class StashMover extends Module {
 
     private void tickTrioMover() {
         if (trioZone == StashMoveLogic.Zone.UNKNOWN) {
-            trioZone = initialZone();
-            if (trioZone == StashMoveLogic.Zone.UNKNOWN) {
-                enterStuck("请先设置待搬运箱与存储箱坐标");
+            // V6.7p8：启动位置是随机的（可能在 2 号点、3 号点、珍珠箱旁，也可能在两区之外），
+            // 先看「离最近的区有多远」：近的自己走过去，远的报警等人，别横跨地图乱跑。
+            double near = nearestZoneDistanceXZ();
+            if (near == Double.MAX_VALUE) {
+                enterStuck("请先设置「待搬运箱位置」与「存储箱位置」");
                 return;
             }
-            setTrioState(TrioState.SETTLE, "启动时已确定所在区");
+            int limit = startMaxDistance.get();
+            if (near > limit) {
+                enterStuck("离两个区都太远（最近 " + Math.round(near) + " 格，上限 " + limit
+                    + " 格），请先走到 2 号点或 3 号点再开模块");
+                return;
+            }
+            trioZone = initialZone();
+            if (trioZone == StashMoveLogic.Zone.UNKNOWN) {
+                enterStuck("请先设置「待搬运箱位置」与「存储箱位置」");
+                return;
+            }
+            if (debug.get()) {
+                info("[启动] 判定在" + zoneName() + "（离最近区锚点 " + Math.round(near) + " 格），本区珍珠箱="
+                    + zonePearlChest().toShortString());
+            }
+            // 直接赋值：trioState 本来就是 SETTLE，走 setTrioState 会被「状态没变」挡掉而不打印
+            trioState = TrioState.SETTLE;
+            lastProgressTick = tick;
+            cooldown = PACE_STEP;
+        }
+        // V6.7p8：正在寻路且人真的在移动 → 算「有进展」。
+        // 否则「从很远处走去珍珠箱/柱子」这种正常的长距离移动会被 2 分钟看门狗误杀。
+        // 注意只认「真的移动了」：Baritone 卡住原地打转时不算，看门狗仍会报警。
+        if (trioState != TrioState.STUCK && PathManagers.get().isPathing() && lastPos != null
+            && !StashMoveLogic.isStalled(lastPos.x, lastPos.z, mc.player.getX(), mc.player.getZ(), 0.05)) {
+            progress();
         }
         if (trioState != TrioState.STUCK && tick - lastProgressTick > 2400) {
             enterStuck("长时间没有进展（2 分钟无有效动作）");
@@ -1317,7 +1372,11 @@ public class StashMover extends Module {
     }
 
     private void trioRestock() {
-        BlockPos chestPos = trioPearlChest.get();
+        BlockPos chestPos = zonePearlChest();
+        if (chestPos == null || chestPos.equals(BlockPos.ORIGIN)) {
+            enterStuck("请设置" + zoneName() + "的珍珠箱位置（或「通用珍珠箱」）");
+            return;
+        }
         int have = countPearls();
         int target = Math.max(restockTarget.get(), restockThreshold.get());
         int need = StashPearlLogic.missingToTarget(have, restockThreshold.get(), target);
@@ -1337,7 +1396,11 @@ public class StashMover extends Module {
                 return;
             }
             if (distSq > 400) {
-                if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(chestPos, true);
+                // 用 pathTo 而不是裸 moveTo：带「同目标不重复下发 + 240 tick 重设」的保护
+                pathTo(chestPos, true);
+                if (debug.get() && tick % 40 == 0) {
+                    info("[补珍珠] 珍珠箱在 " + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外，走过去");
+                }
                 return;
             }
             openChestAt(chestPos);
@@ -1410,6 +1473,26 @@ public class StashMover extends Module {
             : trioZone == StashMoveLogic.Zone.STORE ? "存储箱区" : "未知区域";
     }
 
+    /**
+     * 本区该用的珍珠箱（V6.7p8）。
+     *
+     * <p>优先用本区专用坐标，没填就回退「通用珍珠箱」（兼容只放了一个箱子的老配置）。
+     * 这样补珍珠永远在本区内完成，不会出现「人在 2 号点、珍珠箱在 3 号点」跨区补货的死结。
+     *
+     * @return 珍珠箱坐标；两处都没填时返回 {@link BlockPos#ORIGIN}
+     */
+    private BlockPos zonePearlChest() {
+        BlockPos own = trioZone == StashMoveLogic.Zone.SOURCE ? sourcePearlChest.get() : storePearlChest.get();
+        BlockPos common = trioPearlChest.get();
+        boolean ownSet = own != null && !own.equals(BlockPos.ORIGIN);
+        boolean commonSet = common != null && !common.equals(BlockPos.ORIGIN);
+        return switch (StashMoveLogic.pickPearlChestSlot(ownSet, commonSet)) {
+            case StashMoveLogic.PEARL_CHEST_ZONE -> own;
+            case StashMoveLogic.PEARL_CHEST_COMMON -> common;
+            default -> BlockPos.ORIGIN;
+        };
+    }
+
     /** 当前所在区的活板门坐标。 */
     private BlockPos trioTrapdoor() {
         return trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
@@ -1442,19 +1525,25 @@ public class StashMover extends Module {
             return;
         }
         faceColumn();
-        if (settlePosition(stand)) {
-            debugMsg("[脱离] 已站稳在 " + mc.player.getBlockPos().toShortString() + "，确认没踩水柱/活板门");
-            setTrioState(TrioState.RESTOCK, "已脱离气泡柱");
+        // V6.7p8：这里只做「脱困」，不再把远处的人硬拽到柱子边。
+        // 启动时 1 号可能站在 2 号点或 3 号点的任意位置（珍珠箱旁、存储箱旁），
+        // 先走去柱子毫无意义——补珍珠要先去珍珠箱，投珍珠时才需要走到柱子（由 THROW 负责）。
+        if (escapeIfNeeded(stand)) {
+            debugMsg("[脱离] 没在水里/活板门上，无需脱困（位置 " + mc.player.getBlockPos().toShortString() + "）");
+            setTrioState(TrioState.RESTOCK, "脱困检查通过，本区珍珠箱=" + zonePearlChest().toShortString());
             cooldown = PACE_SETTLE_DONE;
         }
     }
 
     /**
-     * 玩家若站在活板门/水格/水里，走到最近的实心安全格。
+     * 只做「脱困」：人在气泡柱里 / 站在活板门格上时先爬出来，别的一概不动。
      *
-     * @return true = 已站好（并记下“原位”，投完退回这里）
+     * <p>V6.7p8 从 {@link #settlePosition} 里拆出来的：启动时人不一定在柱子旁，
+     * 「走去柱子」属于投掷阶段，不该在启动第一步就执行（否则会柱子→珍珠箱→柱子白跑两趟）。
+     *
+     * @return true = 已不在水里/活板门格上，可以继续下一步
      */
-    private boolean settlePosition(BlockPos trapdoorPos) {
+    private boolean escapeIfNeeded(BlockPos trapdoorPos) {
         if (mc.player == null) return false;
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
@@ -1518,12 +1607,34 @@ public class StashMover extends Module {
             mc.options.jumpKey.setPressed(false);
             mc.options.backKey.setPressed(false);
         }
+        return true;
+    }
 
-        // ② 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
+    /**
+     * 走到柱子旁并确认站位（投掷前用）。
+     *
+     * <p>V6.7p8：脱困拆出去后，这里只负责「已脱困 → 走回柱子旁的安全格 → 记下原位」。
+     *
+     * @return true = 已站好（并记下“原位”，投完退回这里）
+     */
+    private boolean settlePosition(BlockPos trapdoorPos) {
+        if (mc.player == null) return false;
+        if (!escapeIfNeeded(trapdoorPos)) return false;
+        BlockPos feet = mc.player.getBlockPos();
+
+        // 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
         if (feet.getSquaredDistance(trapdoorPos) > 9) {
             BlockPos far = pearlStandSpot(trapdoorPos);
-            if (far != null && !PathManagers.get().isPathing()) {
-                PathManagers.get().moveToPrecise(far);
+            if (far == null) {
+                // 找不到可站的岸边就不再无限重试，直接报出来（附现场）
+                dumpStandSpotFailure(trapdoorPos);
+                enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
+                return false;
+            }
+            walkToPrecise(far);
+            if (debug.get() && tick % 40 == 0) {
+                info("[走近] 距柱子 " + String.format(Locale.ROOT, "%.1f",
+                    Math.sqrt(feet.getSquaredDistance(trapdoorPos))) + " 格，正在走过去");
             }
             return false;
         }
@@ -1814,6 +1925,26 @@ public class StashMover extends Module {
                 enterStuck("等待被拉走超时（已重发 3 次）");
             }
         }
+    }
+
+    /**
+     * 离「最近的那个区」有多远（水平距离，格）。
+     *
+     * <p>锚点用两个区的基准坐标：待搬运箱位置、存储箱位置（与 {@link #initialZone()} 判区用的是同一对，
+     * 保证「判定所在区」和「距离检查」不会各说各话）。
+     *
+     * @return 两处坐标都没设置时返回 {@link Double#MAX_VALUE}
+     */
+    private double nearestZoneDistanceXZ() {
+        if (mc.player == null) return Double.MAX_VALUE;
+        BlockPos s = sourceTarget.get();
+        BlockPos t = trioStoreChest.get();
+        boolean hasS = s != null && !s.equals(BlockPos.ORIGIN);
+        boolean hasT = t != null && !t.equals(BlockPos.ORIGIN);
+        return StashMoveLogic.nearestZoneDistance(
+            mc.player.getX(), mc.player.getZ(),
+            hasS ? s.getX() + 0.5 : 0, hasS ? s.getZ() + 0.5 : 0, hasS,
+            hasT ? t.getX() + 0.5 : 0, hasT ? t.getZ() + 0.5 : 0, hasT);
     }
 
     private StashMoveLogic.Zone initialZone() {
@@ -2377,6 +2508,29 @@ public class StashMover extends Module {
      * 重新计算路径（等于永远走不完），表现就是“人站着不动、箱子离远一点就永远点不开”。
      * 这里加守卫：同一目标正在走就不重复下发；走太久没到才重设，最多 2 次。
      */
+    /**
+     * 精确走到某个点（V6.7p8）。
+     *
+     * <p>和 {@link #pathTo} 的区别：这里用 {@code moveToPrecise}（站位要准，比如柱子旁的岸边格），
+     * 并且**目标一变就先停掉旧路径**——否则「刚走完珍珠箱、又要走去柱子」时会继续沿着上一条路跑。
+     * 同一目标不重复下发，Baritone 自己停下来时隔 20 tick 再试。
+     */
+    private void walkToPrecise(BlockPos pos) {
+        if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
+        if (!pos.equals(pathTarget)) {
+            pathTarget = pos;
+            pathStartTick = tick;
+            pathRetries = 0;
+            if (PathManagers.get().isPathing()) PathManagers.get().stop();
+            PathManagers.get().moveToPrecise(pos);
+            return;
+        }
+        if (!PathManagers.get().isPathing() && tick - pathStartTick > 20) {
+            pathStartTick = tick;
+            PathManagers.get().moveToPrecise(pos);
+        }
+    }
+
     private void pathTo(BlockPos pos, boolean ignoreY) {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
         if (!pos.equals(pathTarget)) {

@@ -180,4 +180,49 @@ class StashMoveLogicTest {
         // Z 偏移更大 → 南/北
         assertEquals(StashMoveLogic.FACE_SOUTH, StashMoveLogic.pickClickFace(0.5, 0.5, 3, false));
     }
+
+    // ==================== V6.7p8：启动距离门槛 + 珍珠箱回退 ====================
+
+    @Test
+    void 距最近区取两区中的较小值() {
+        // 玩家在 (0,0)，待搬运箱 (10,0) 距 10，存储箱 (0,20) 距 20 → 取 10
+        assertEquals(10.0, StashMoveLogic.nearestZoneDistance(0, 0, 10, 0, true, 0, 20, true), 1e-9);
+        // 反过来：存储箱更近
+        assertEquals(5.0, StashMoveLogic.nearestZoneDistance(0, 0, 30, 0, true, 0, 5, true), 1e-9);
+    }
+
+    @Test
+    void 只设置一个区时按那个区算距离() {
+        assertEquals(7.0, StashMoveLogic.nearestZoneDistance(0, 0, 7, 0, true, 0, 0, false), 1e-9);
+        assertEquals(9.0, StashMoveLogic.nearestZoneDistance(0, 0, 0, 0, false, 9, 0, true), 1e-9);
+    }
+
+    @Test
+    void 两个区都没设置时返回最大值() {
+        // 调用方据此判「请先设置坐标」，别把「没配置」当成「距离 0，就在脚边」
+        assertEquals(Double.MAX_VALUE,
+            StashMoveLogic.nearestZoneDistance(0, 0, 0, 0, false, 0, 0, false));
+    }
+
+    @Test
+    void 站在锚点上距离为零() {
+        assertEquals(0.0, StashMoveLogic.nearestZoneDistance(12.5, -3.5, 12.5, -3.5, true, 0, 0, false), 1e-9);
+    }
+
+    @Test
+    void 珍珠箱本区专用优先于通用() {
+        assertEquals(StashMoveLogic.PEARL_CHEST_ZONE, StashMoveLogic.pickPearlChestSlot(true, true));
+        assertEquals(StashMoveLogic.PEARL_CHEST_ZONE, StashMoveLogic.pickPearlChestSlot(true, false));
+    }
+
+    @Test
+    void 本区专用没填时回退通用珍珠箱() {
+        // 关键回归点：只放了一个珍珠箱的老配置必须继续能用
+        assertEquals(StashMoveLogic.PEARL_CHEST_COMMON, StashMoveLogic.pickPearlChestSlot(false, true));
+    }
+
+    @Test
+    void 两个珍珠箱都没填时返回未设置() {
+        assertEquals(StashMoveLogic.PEARL_CHEST_NONE, StashMoveLogic.pickPearlChestSlot(false, false));
+    }
 }
