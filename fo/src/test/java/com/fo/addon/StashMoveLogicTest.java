@@ -225,4 +225,35 @@ class StashMoveLogicTest {
     void 两个珍珠箱都没填时返回未设置() {
         assertEquals(StashMoveLogic.PEARL_CHEST_NONE, StashMoveLogic.pickPearlChestSlot(false, false));
     }
+
+    // ==================== V6.7p11：居中计数（照 PearlDrop 的 APPROACH） ====================
+
+    @Test
+    void 站着不动且贴近柱心才算居中() {
+        // 没动 + 距离 0.8 < 1.2 → 累加
+        assertEquals(1, StashMoveLogic.nextCenterStreak(0, false, 0.8, 1.2));
+        assertEquals(3, StashMoveLogic.nextCenterStreak(2, false, 1.19, 1.2));
+    }
+
+    @Test
+    void 被挡住但离柱子远不算居中() {
+        // 关键回归点：被箱子腿/门框挡住时人也不动，但离柱子还有 3 格，不能判"已居中"
+        assertEquals(0, StashMoveLogic.nextCenterStreak(5, false, 3.0, 1.2));
+    }
+
+    @Test
+    void 还在移动就清零() {
+        assertEquals(0, StashMoveLogic.nextCenterStreak(4, true, 0.5, 1.2));
+    }
+
+    @Test
+    void 连续居中够六次才允许投() {
+        int streak = 0;
+        for (int i = 0; i < 5; i++) {
+            streak = StashMoveLogic.nextCenterStreak(streak, false, 0.6, 1.2);
+            assertFalse(StashMoveLogic.readyToThrow(streak, 6), "第 " + (i + 1) + " 次不该允许投");
+        }
+        streak = StashMoveLogic.nextCenterStreak(streak, false, 0.6, 1.2);
+        assertTrue(StashMoveLogic.readyToThrow(streak, 6), "第 6 次才允许投");
+    }
 }

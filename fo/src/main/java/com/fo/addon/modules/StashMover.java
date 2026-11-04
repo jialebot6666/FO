@@ -30,6 +30,7 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.entity.SignBlockEntity;
@@ -611,6 +612,22 @@ public class StashMover extends Module {
     private static final int PACE_RESTOCK_DONE = 10;    // 补珍珠完成 → 投掷
     private static final int PACE_TRAPDOOR_CLICK = 14;  // 点活板门后等方块状态同步
 
+    // ===== V6.7p11：照 PearlDrop 校准的一套判定阈值与超时 =====
+    /** 判定「已居中」的最大水平距离（格）。超过说明还没到边缘。 */
+    private static final double TRIO_CENTER_DIST = 1.2;
+    /** 判定「已居中」需要连续满足的 tick 数（PearlDrop centerStallTicks）。 */
+    private static final int TRIO_CENTER_STALL_TICKS = 6;
+    /** 单次投掷确认超时（tick）。PearlDrop throwTimeoutTicks。 */
+    private static final int TRIO_THROW_TIMEOUT = 40;
+    /** 投掷重试上限。 */
+    private static final int TRIO_MAX_THROW_RETRIES = 3;
+    /** 退回安全距离（格）。PearlDrop retreatDistance —— 原来我们用的 2.5 太远。 */
+    private static final double TRIO_RETREAT_DISTANCE = 1.0;
+    /** 走近柱子的超时（tick）。 */
+    private static final int TRIO_APPROACH_TIMEOUT = 120;
+    /** 退回超时（tick）。 */
+    private static final int TRIO_RETREAT_TIMEOUT = 80;
+
     /**
      * 防卡参数（V6.7p9，照搬 ZenithProxy futa 插件 AntiStuck 的判定思路）。
      *
@@ -681,9 +698,13 @@ public class StashMover extends Module {
     // 最后 1 格「潜行贴到边缘」的计数
     private int edgeTicks;
     private int edgeStuckTicks;
+    /** 连续满足「走不动 + 离柱心 <1.2」的 tick 数（PearlDrop 的 centerStallTicks）。 */
+    private int edgeCentered;
     private int edgePhase;
     private double edgeLastX;
     private double edgeLastZ;
+    /** 投掷前记录的背包珍珠数：数量下降 = 投出去了（V6.7p11，PearlDrop 的判定方式）。 */
+    private int pearlCountBefore;
     /** 走到目标格中心的判定半径（格）。 */
     private static final double STEP_ARRIVE_EPS = 0.35;
     /** 挂起的交互动作：等本 tick 的移动包（带新朝向）发完再执行。 */
@@ -1671,6 +1692,30 @@ public class StashMover extends Module {
         turnTo(yp[0], yp[1]);
     }
 
+    /** 朝目标点的 pitch（度，向下为负），yaw 保持不变。 */
+    private float pitchTo(Vec3d target) {
+        return FacingLogic.yawPitchTo(target.x, target.y, target.z,
+            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ())[1];
+    }
+
+    /**
+     * 柱子「腔底」中心（V6.7p11，照 PearlDrop 的 `pitchToSoulSand`）。
+     *
+     * <p>从水面那格往下走，直到第一格不是水/气泡柱的方块（通常就是灵魂沙），返回它的中心。
+     * 瞄腔底比瞄最上面那格水更垂直，不容易被柱壁/门框吃掉。找不到腔底就退回水面格中心。
+     */
+    private Vec3d columnAimPoint(BlockPos water) {
+        if (mc.world == null) return Vec3d.ofCenter(water);
+        BlockPos p = water;
+        for (int i = 0; i < 64; i++) {
+            var st = mc.world.getBlockState(p);
+            boolean waterLike = !st.getFluidState().isEmpty() || st.isOf(Blocks.BUBBLE_COLUMN);
+            if (!waterLike) break;
+            p = p.down();
+        }
+        return Vec3d.ofCenter(p);
+    }
+
     /** 真实转头看向方块中心，并在本 tick 移动包发出后点击它（顺序：朝向 → 交互）。 */
     private void realClick(BlockPos pos) {
         if (pos == null) return;
@@ -1749,16 +1794,21 @@ public class StashMover extends Module {
         var state = mc.world.getBlockState(trapdoor);
         Direction facing = state.getBlock() instanceof TrapdoorBlock ? state.get(TrapdoorBlock.FACING) : null;
 
+        // V6.7p11（照 PearlDrop 的 findRim）：先试活板门那一层，再试上面一层。
+        // 「落在活板门上/卡在门沿」时，只有 +1 层能站——这是用户实机反馈过的落点之一。
         BlockPos best = null;
-        double bestScore = Double.MAX_VALUE;
-        for (Direction d : HORIZONTALS) {
-            BlockPos p = trapdoor.offset(d);
-            if (p.equals(water) || !isStandable(p)) continue;
-            double score = p.getSquaredDistance(mc.player.getBlockPos());
-            if (facing != null && d == facing) score += 1000;   // 贴住那一侧排最后
-            if (score < bestScore) {
-                bestScore = score;
-                best = p;
+        for (int level = 0; level <= 1 && best == null; level++) {
+            int feetY = trapdoor.getY() + level;
+            double bestScore = Double.MAX_VALUE;
+            for (Direction d : HORIZONTALS) {
+                BlockPos p = new BlockPos(trapdoor.getX() + d.getOffsetX(), feetY, trapdoor.getZ() + d.getOffsetZ());
+                if (p.equals(water) || !isStandable(p)) continue;
+                double score = p.getSquaredDistance(mc.player.getBlockPos());
+                if (facing != null && d == facing) score += 1000;   // 贴住那一侧排最后
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = p;
+                }
             }
         }
         if (best == null) best = pearlStandSpot(trapdoor);
@@ -1913,10 +1963,10 @@ public class StashMover extends Module {
      */
     private int sneakStepToEdge(BlockPos water, int maxTicks) {
         sneakForThrow();
-        Vec3d c = Vec3d.ofCenter(water);
-        float yaw = (float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0);
+        Vec3d aim = columnAimPoint(water);
+        float yaw = (float) (Math.toDegrees(Math.atan2(aim.z - mc.player.getZ(), aim.x - mc.player.getX())) - 90.0);
         mc.player.setYaw(yaw);
-        turnTo(yaw, 90f);
+        turnTo(yaw, pitchTo(aim));
 
         if (mc.player.isTouchingWater()) {
             mc.options.forwardKey.setPressed(false);
@@ -1928,14 +1978,29 @@ public class StashMover extends Module {
         boolean moved = !StashMoveLogic.isStalled(edgeLastX, edgeLastZ, mc.player.getX(), mc.player.getZ(), 0.02);
         edgeLastX = mc.player.getX();
         edgeLastZ = mc.player.getZ();
-        edgeStuckTicks = moved ? 1 : edgeStuckTicks + 1;
+        double hd = Math.hypot(aim.x - mc.player.getX(), aim.z - mc.player.getZ());
 
-        if (edgeStuckTicks >= 3 || edgeTicks > maxTicks) {
+        // V6.7p11（照 PearlDrop 的 APPROACH）：**走不动 + 离柱心 < 1.2 格**同时满足才算「居中」，
+        // 连续 6 tick 才允许投。只判「走不动」会在被箱子腿/门框挡住时误判成"到边缘了"，然后投偏。
+        edgeStuckTicks = (moved ? 0 : edgeStuckTicks + 1);
+        edgeCentered = StashMoveLogic.nextCenterStreak(edgeCentered, moved, hd, TRIO_CENTER_DIST);
+
+        if (StashMoveLogic.readyToThrow(edgeCentered, TRIO_CENTER_STALL_TICKS)) {
             mc.options.forwardKey.setPressed(false);
             forwardHeld = false;
             edgeTicks = 0;
             edgeStuckTicks = 0;
+            edgeCentered = 0;
             return 1;
+        }
+        if (edgeTicks > maxTicks) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            edgeTicks = 0;
+            edgeStuckTicks = 0;
+            edgeCentered = 0;
+            // 超时兜底（同 PearlDrop）：够近就投，否则退回去重站
+            return hd < 1.3 ? 1 : 2;
         }
 
         edgePhase = (edgePhase + 1) % 4;
@@ -1992,6 +2057,7 @@ public class StashMover extends Module {
                     setThrowSub(3, "活板门已开，潜行贴到边缘");
                     edgeTicks = 0;
                     edgeStuckTicks = 0;
+                    edgeCentered = 0;
                     edgePhase = 0;
                     edgeLastX = mc.player.getX();
                     edgeLastZ = mc.player.getZ();
@@ -1999,6 +2065,10 @@ public class StashMover extends Module {
                     return;
                 }
                 // 关着 → 必须先自己打开（用户口径：大部分时间都是关的）
+                // ⚠️ V6.7p11 刻意偏离：PearlDrop 反编译源码里是**反过来**的
+                //   （`closeOpenTrapdoor=true`：投之前把开着的活板门关掉）。
+                //   但用户明确指出「门关着珍珠就进不去柱子」，且其实机做法是**开着投**。
+                //   别为了"对齐参考实现"把这里改成关闭——那是另一种腔体结构。
                 if (trapdoorClickAttempts >= 8) {
                     enterStuck("连续 8 次都打不开活板门 " + stand.toShortString()
                         + "（眼睛距=" + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(Vec3d.ofCenter(stand)))
@@ -2017,7 +2087,7 @@ public class StashMover extends Module {
             case 3 -> {
                 // V6.7p10：站位已经由 settlePosition 站到「柱子旁那一格中心」，
                 // 这里只做最后 1 格的潜行贴边（蹲着不会掉进柱子里），走不动就说明到边缘了。
-                int r = sneakStepToEdge(water, 60);
+                int r = sneakStepToEdge(water, TRIO_APPROACH_TIMEOUT);
                 if (r == 1) {
                     setThrowSub(4, "已到柱子边缘，低头投掷");
                     cooldown = PACE_STEP;
@@ -2040,8 +2110,10 @@ public class StashMover extends Module {
                     return;
                 }
                 sneakForThrow();
-                debugMsg("[投掷] 按住 Shift 投出（快捷栏槽位 " + slot + "）");
-                doThrowPearl(slot, Vec3d.ofCenter(water));
+                // V6.7p11：投之前记一次背包珍珠数，投完用「数量是否下降」判定成功（PearlDrop 的做法）
+                pearlCountBefore = countPearls();
+                debugMsg("[投掷] 按住 Shift 投出（快捷栏槽位 " + slot + "，现有珍珠 " + pearlCountBefore + "）");
+                doThrowPearl(slot, columnAimPoint(water));
                 setThrowSub(5, "已投出，准备后退");
                 cooldown = PACE_STEP;
             }
@@ -2053,16 +2125,28 @@ public class StashMover extends Module {
                 }
             }
             case 6 -> {
-                if (ownPearlInColumn(water)) {
+                // V6.7p11（照 PearlDrop）：**背包珍珠数下降 = 投出去了**。
+                // 之前用「柱里能扫到自己的珍珠实体」判定，客户端实体同步一慢就误判成失败 → 重投 → 一次少两颗。
+                boolean thrown = countPearls() < pearlCountBefore;
+                if (thrown) {
                     lastPearlThrowTick = tick;
-                    debugMsg("[校验] 气泡柱里已有自己的珍珠，投掷成功");
-                    finishTrioThrow();
-                } else if (tick - verifyStartTick > 80) {
-                    throwRetries++;
-                    if (throwRetries >= 3) {
-                        enterStuck("投掷珍珠 3 次失败（气泡柱里没有检测到自己的珍珠）");
+                    boolean inColumn = ownPearlInColumn(water);
+                    if (inColumn) {
+                        debugMsg("[校验] 投掷成功：珍珠数 " + pearlCountBefore + " → " + countPearls()
+                            + "，柱内也已检测到");
                     } else {
-                        debugMsg("[校验] 柱里没珍珠，第 " + throwRetries + " 次重试");
+                        // 数量下降只证明"扔出去了"，落点是否进柱另说（客户端实体可能还没同步）。
+                        // 这里只提示，不重投——真没进柱的话，发「拉我」之前那次校验会拦住。
+                        warning("珍珠已投出（数量 " + pearlCountBefore + " → " + countPearls()
+                            + "），但柱内暂未检测到，若下趟回不来请检查落点");
+                    }
+                    finishTrioThrow();
+                } else if (tick - verifyStartTick > TRIO_THROW_TIMEOUT) {
+                    throwRetries++;
+                    if (throwRetries >= TRIO_MAX_THROW_RETRIES) {
+                        enterStuck("投掷珍珠 " + TRIO_MAX_THROW_RETRIES + " 次都没确认投出（珍珠数没变）");
+                    } else {
+                        debugMsg("[校验] 珍珠数没变，第 " + throwRetries + " 次重投");
                         setThrowSub(2, "校验失败，重开活板门重投");
                         cooldown = PACE_STEP;
                     }
@@ -2099,7 +2183,7 @@ public class StashMover extends Module {
         Vec3d center = Vec3d.ofCenter(water);
         double dist = Math.hypot(center.x - mc.player.getX(), center.z - mc.player.getZ());
 
-        if (StashMoveLogic.needMoreBackoff(dist, 2.5)) {
+        if (StashMoveLogic.needMoreBackoff(dist, TRIO_RETREAT_DISTANCE)) {
             // 还没退够：继续按 S（tick 处理器会在 backoffTicks 归零时松开）
             if (backoffTicks <= 0) {
                 backoffTicks = 20;
@@ -2441,7 +2525,7 @@ public class StashMover extends Module {
             releaseSneak();   // Shift 保持到真正投出之后再松（用户口径：蹲着投）
         };
 
-        backoffTicks = 60;   // 投完按 S 后退（实际按“离柱心 ≥2.5 格”提前停，60 只是上限）
+        backoffTicks = TRIO_RETREAT_TIMEOUT;   // 投完按 S 后退（实际按“离柱心 ≥1.0 格”提前停，这里只是上限）
         cooldown = 3;
         progress();
     }

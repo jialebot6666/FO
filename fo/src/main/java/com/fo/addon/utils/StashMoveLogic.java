@@ -104,6 +104,30 @@ public final class StashMoveLogic {
     public static final int PEARL_CHEST_NONE = 2;
 
     /**
+     * 「已居中」计数（V6.7p11，照 ZenithProxy PearlDrop 的 APPROACH 相位）。
+     *
+     * <p>规则：**没移动 且 离柱心 &lt; maxDist** 才算居中，连续累加；任何一条不满足就清零。
+     *
+     * <p>为什么不能只看「走不动」：被箱子腿、门框、台阶挡住时人也不会动，
+     * 但那时离柱子可能还有 3 格，这时候投出去必偏——这是实机上「投掷失败」的常见来源。
+     *
+     * @param streak   当前连续居中 tick 数
+     * @param moved    这一 tick 有没有位移（&gt; 0.02 格）
+     * @param hd       到柱心的水平距离（格）
+     * @param maxDist  判定居中的最大水平距离（PearlDrop 用 1.2）
+     * @return 新的连续居中 tick 数
+     */
+    public static int nextCenterStreak(int streak, boolean moved, double hd, double maxDist) {
+        if (moved) return 0;
+        return hd < maxDist ? streak + 1 : 0;
+    }
+
+    /** 连续居中够久了没（够久才允许投）。 */
+    public static boolean readyToThrow(int streak, int needTicks) {
+        return streak >= needTicks;
+    }
+
+    /**
      * 卸货过滤（V6.7p1 修复）：哪些物品允许存进存储箱。     *
      * <ul>
      *   <li>末影珍珠<b>永远不入库</b>——三号模式的珍珠是随身携带的“回程票”，

@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p10`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p10-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p11`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p11-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -479,6 +479,28 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - 测试：全仓 **51 套件 418 测试全绿**（本轮改动是朝向/走位的实时耦合逻辑，无新增纯逻辑）。
   - ⚠️ 已知取舍：真实转头会**接管玩家视角**（每 tick 强行设 yaw/pitch），
     开着模块时手动转视角会被拽回——这是用户明确要的效果。关模块后立即恢复自由。
+- ✅ 6.7p11 已修复：**按 PearlDrop 反编译源码校准投掷判定**（用户提供 `comet-stashmove-spec.zip`）。
+  - **材料说明**：该包里 `PearlDrop` 是 CFR 反编译的完整源码（`[实证-JAR]`，等价原实现）；
+    `StashMove` 只有骨架（SPEC 自己标了 G1–G6 缺口，明令不许填"合理默认值"）→ 只借鉴前者。
+  - ① **投掷成功判定改成「背包珍珠数下降」**（PearlDrop 的行为指纹）：
+    `pearlCountBefore = countPearls()` → 投完 `countPearls() < pearlCountBefore` 即成功。
+    ⚠️ 原来用 `ownPearlInColumn()`（扫客户端实体 + 判 owner），实体同步一慢就误判成"没投出去"
+    → 重投 → 一次少两颗。现在实体检测降级为**事后核验/日志**，不再参与成败判定。
+  - ② **居中判定**（PearlDrop APPROACH）：抽成纯逻辑 `StashMoveLogic.nextCenterStreak` /
+    `readyToThrow`——必须**「没位移」且「离柱心 <1.2 格」连续 6 tick**才允许投。
+    只判"走不动"会在被箱子腿/门框挡住时误判成到边缘，然后投偏。
+  - ③ **站位候选试两层高度**（PearlDrop findRim）：先 `trapdoorY` 再 `trapdoorY+1`，
+    低层优先——覆盖用户反馈的「落在活板门上 / 卡在门沿」。
+  - ④ **瞄腔底而不是瞄水面**（PearlDrop pitchToSoulSand）：新增 `columnAimPoint()`，
+    从水面往下走到第一格非水方块（灵魂沙）再算 pitch，角度更垂直、不易被柱壁吃掉。
+  - ⑤ **阈值/超时统一**：`TRIO_CENTER_DIST=1.2`、`TRIO_CENTER_STALL_TICKS=6`、
+    `TRIO_THROW_TIMEOUT=40`、`TRIO_MAX_THROW_RETRIES=3`、`TRIO_APPROACH_TIMEOUT=120`、
+    `TRIO_RETREAT_TIMEOUT=80`；**退回距离 2.5 → 1.0 格**（PearlDrop retreatDistance）。
+  - ⚠️ **刻意不抄的一条**：PearlDrop 在投之前会把**开着**的活板门**关掉**（`closeOpenTrapdoor=true`）。
+    用户明确指出「门关着珍珠就进不去柱子」，且其实机做法是**开着投**。本条保持现状（开→投），
+    并在代码注释里标注为「刻意偏离」，避免以后有人"对齐参考实现"给改回去。
+  - 测试：新增 `StashMoveLogicTest` 里 4 个用例（居中计数/被挡不算/移动清零/6 tick 才投），
+    全仓 **51 套件 422 测试全绿**。
   - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
