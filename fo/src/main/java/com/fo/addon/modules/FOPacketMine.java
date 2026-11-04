@@ -18,7 +18,6 @@ import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.entity.SortPriority;
 import meteordevelopment.meteorclient.utils.entity.TargetUtils;
-import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
@@ -168,7 +167,7 @@ public class FOPacketMine extends Module {
     );
 
     /** 当前目标（HUD 信息用）。 */
-    private LivingEntity target;
+    private PlayerEntity target;
     /** 当前会话正在挖的方块；null = 没有在挖。 */
     private BlockPos current;
     /** 上一次发包的方块（会话标识）。 */
@@ -205,9 +204,12 @@ public class FOPacketMine extends Module {
         if (pauseOnUse.get() && mc.player.isUsingItem()) return;
 
         // 选目标（跳过自己/好友/创造/死人，范围内按排序取第一）
-        LivingEntity t = TargetUtils.getPlayerTarget(targetRange.get(), sortPriority.get());
-        if (t == null || !PlayerUtils.isAlive(t)) return;
-        if (ignoreCreative.get() && ((PlayerEntity) t).isCreative()) return;
+        // 注：彗星端 TargetUtils.getPlayerTarget 返回 LivingEntity，但语义就是玩家；
+        //     PlayerUtils.isAlive() 不带参（只查自己），实体用 isAlive()
+        LivingEntity lt = TargetUtils.getPlayerTarget(targetRange.get(), sortPriority.get());
+        if (lt == null || !lt.isAlive()) return;
+        PlayerEntity t = (PlayerEntity) lt;
+        if (ignoreCreative.get() && t.isCreative()) return;
         if (Friends.get().isFriend(t)) return;
         target = t;
 
