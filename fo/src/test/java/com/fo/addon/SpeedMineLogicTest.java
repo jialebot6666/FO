@@ -65,4 +65,26 @@ class SpeedMineLogicTest {
         assertEquals(60, SpeedMineLogic.lerpColor(red, green, 2)[0]);
         assertEquals(255, SpeedMineLogic.lerpColor(red, green, -1)[0]);
     }
+
+    // ── Grim 绕过时序（上游 alP() / xt() FX 分支）──
+
+    @Test
+    void inSessionCooldown_280ms内_冷却() {
+        // 上游常量：上次 STOP 后 280ms 内不开新会话
+        assertTrue(SpeedMineLogic.inSessionCooldown(1000, 800, 280));
+        assertTrue(SpeedMineLogic.inSessionCooldown(1280, 1000, 280)); // 恰好等于边界：仍算冷却
+        assertFalse(SpeedMineLogic.inSessionCooldown(1281, 1000, 280));
+        // 很久没发过 STOP（lastStopTime=0）：不冷却
+        assertFalse(SpeedMineLogic.inSessionCooldown(5000, 0, 280));
+    }
+
+    @Test
+    void timeModeStopAllowed_差值小于25ms才放行() {
+        // 期望耗时 1000ms，已挖 990ms：差 10 < 25 → 放行
+        assertTrue(SpeedMineLogic.timeModeStopAllowed(1000, 990, 25));
+        // 已挖 960ms：差 40 >= 25 → 等待
+        assertFalse(SpeedMineLogic.timeModeStopAllowed(1000, 960, 25));
+        // 超时（挖过头）：放行
+        assertTrue(SpeedMineLogic.timeModeStopAllowed(1000, 1100, 25));
+    }
 }

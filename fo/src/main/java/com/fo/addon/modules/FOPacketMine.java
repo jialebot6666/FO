@@ -10,6 +10,7 @@ import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -24,7 +25,6 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
-import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -34,33 +34,42 @@ import net.minecraft.util.math.Direction;
 import java.util.List;
 
 /**
- * FO 发包挖掘（移植自 Hachimi V2 SpeedMine；源码类 {@code BlockPosBoxMultitask}，1083 行）。
+ * FO 发包挖掘（移植自 Hachimi V2 SpeedMine；源码类 {@code BlockPosBoxMultitask} +
+ * {@code BlockPosPlayerHelper}，Packet 模式完整协议）。
  *
  * <p>用法：对准要挖的方块<b>左键点一下</b>，模块接管该方块的挖掘——客户端自己累计破坏进度，
- * 达到「挖掘进度」（Speed，3C3U 实战 0.7）就直接发 {@code STOP_DESTROY_BLOCK} 包破坏，
- * 不需要按住左键，也不受原版挖掘动画/冷却约束。再点别的方块即切换目标。</p>
+ * 达到「挖掘进度」（Speed）就发 {@code STOP_DESTROY_BLOCK} 包破坏，不需要按住左键。</p>
  *
- * <p>核心机制（与原版对齐）：
+ * <p><b>Grim 绕过协议（3C3U 实战依赖，逐包对齐上游）：</b>
  * <ul>
- *   <li>接管方式对齐原版 {@code onAttackBlock}：拦截攻击方块事件、取消原版挖掘、进发包队列。</li>
- *   <li>进度判定对齐原版 {@code shouldBreak}：{@code calcBlockBreakingDelta} 累计到 Speed 即破坏；
- *       一击即碎的方块直接发。</li>
- *   <li>「自动切换」开挖时自动切热栏里最快工具（对齐 SwapAction=Hotbar + AutoSwitch=true）。</li>
- *   <li>快捷键：暂停键（按住暂停发包）、取消键（放弃当前目标），对齐原版 Pause/Cancel。</li>
- *   <li>聊天提示：破坏后聊天栏报坐标（Notify）。</li>
- *   <li>渲染：进度色方块（开始/结束色与线框色渐变，实战值青色→深青、粉红线框）+ 方块轮廓。</li>
+ *   <li>{@code NewDisabler}（实战值）：会话开始连发 START(真实位置) →
+ *       START(0,-999,0)（伪造包把服务端/Grim 的挖掘位置追踪重指向假方块）→
+ *       DoubleBreak 开时再补一个 STOP（双进度漏洞）。这样后续真实的 STOP 不受
+ *       服务端 vanilla 1.21.2+ 快挖防护与 Grim fastbreak 检查约束。</li>
+ *   <li>{@code Disabler}：START 前先发一个 STOP。</li>
+ *   <li>{@code 时间校验}（上游 Strict/Time）：不做伪造，STOP 发出前等待
+ *       {@code ceil(1/最大单tick进度)*50ms} 的真实挖掘时间（只差 25ms 以内才放行）。</li>
+ *   <li>所有模式共用：上次 STOP 后 <b>280ms 冷却</b>内不开新会话（上游 alP()）。</li>
+ *   <li>所有挖掘包都带正确的 block-change sequence（与仓库 {@code BlockClicker} 同款
+ *       accesswidener 取号，不再发 sequence=0 的裸包）。</li>
  * </ul></p>
  *
- * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
- * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、
- * Notify 开（聊天提示）、OnlyOnGround/PauseOnFlying/PauseInFluid 全关、
- * 渲染色 StartSide=0x3f7e7ef5 / EndSide=0x066e6ee1 / StartLine=EndLine=0xff9595ff。</p>
+ * <p>进度模型对齐上游 {@code xs()}：{@code delta / Speed} 累计到 1.0 即破坏；
+ * 实战配置 CheckGround/CheckFly 均为 true，与直接用原版
+ * {@code calcBlockBreakingDelta}（内部按真实 onGround/鞘翅/水中衰减）等价。</p>
  *
- * <p>刻意不移植（依赖上游私有体系或需实机调试，需要时单独立项）：
- * Grim「NewDisabler」快速挖绕过、Desync 破坏去同步、InstantMine/DoubleBreak 原版漏洞、
- * NoReset/NoCollision、EnderChest 按键、Multitask 并发挖掘体系。
- * ⚠️ 因此 Grim 服上「挖掘进度」可以正常压到 0.7 发包，但没有针对 Grim 快速挖检测的对策，
- * 实机被拦截时优先把 Speed 往上调（0.85~0.95），仍不行再回来一起做绕过。</p>
+ * <p>其余对齐：STOP 发出后方块未消失，等「重试等待」tick 后重开整个会话（RetryTicks）；
+ * 「即时重破」开启时破坏完成后继续对原位置补发 STOP 流（上游 InstantMine：方块被刷新回
+ * 来时立即再破，最多持续 RetryTicks tick）。</p>
+ *
+ * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
+ * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、Grim=NewDisabler、
+ * DoubleBreak=true、RetryTicks=10、InstantMine=true、Notify 开（聊天提示）、
+ * OnlyOnGround/PauseOnFlying/PauseInFluid 全关、渲染色实战 hex。</p>
+ *
+ * <p>刻意不移植（依赖上游私有体系）：Hold/HoldTicks 换持握回切（本模块自动切换后全程持工具，
+ * 不做屏幕容器级回切）、Desync 客户端假破块、NoCollision 挖掘格无碰撞、MineAir、
+ * EnderChest 按键、Multitask 并发体系。Grim 服被拦时优先换 Grim 模式或调高「挖掘进度」。</p>
  */
 public class FOPacketMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -131,6 +140,28 @@ public class FOPacketMine extends Module {
         .build()
     );
 
+    // Grim 绕过（3C3U 实战核心）
+
+    private final Setting<GrimMode> grimMode = sgGeneral.add(new EnumSetting.Builder<GrimMode>()
+        .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。实战 NewDisabler")
+        .defaultValue(GrimMode.NewDisabler).build()
+    );
+
+    private final Setting<Boolean> doubleBreak = sgGeneral.add(new BoolSetting.Builder()
+        .name("双重破坏").description("会话开始即补发一个 STOP（原版双挖掘进度漏洞，DoubleBreak）。实战开启")
+        .defaultValue(true).build()
+    );
+
+    private final Setting<Integer> retryTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("重试等待").description("STOP 发出后方块仍未消失，等待该 tick 数后重开会话（RetryTicks）。实战 10")
+        .defaultValue(10).min(0).sliderMax(60).build()
+    );
+
+    private final Setting<Boolean> instantMine = sgGeneral.add(new BoolSetting.Builder()
+        .name("即时重破").description("破坏完成后继续对原位置补发 STOP 流，方块被刷新回来时立即再破（InstantMine）。实战开启")
+        .defaultValue(true).build()
+    );
+
     // 暂停条件（实战值全关，按需打开）
 
     private final Setting<Boolean> onlyOnGround = sgGuard.add(new BoolSetting.Builder()
@@ -185,15 +216,36 @@ public class FOPacketMine extends Module {
         .defaultValue(true).build()
     );
 
+    /** 上游 alP()：NewDisabler/Time 模式下两次会话的最小间隔。 */
+    private static final long SESSION_COOLDOWN_MS = 280;
+    /** 上游 xt()：Time 模式放行 STOP 的剩余时间阈值。 */
+    private static final double TIME_MODE_SLACK_MS = 25.0;
+
+    // 会话状态
+
     /** 当前正在发包挖的方块；null = 空闲。 */
     private BlockPos current;
     /** 当前目标方块的破坏面。 */
     private Direction currentDir;
-    /** 已累计的破坏进度（0~1）。 */
+    /** 已累计的破坏进度（0~1，= vanilla delta 累计 / Speed）。 */
     private float progress;
+    /** 是否已发过 START 序列。 */
+    private boolean started;
+    /** 是否已发过破坏 STOP，等待服务端确认。 */
+    private boolean breakSent;
+    /** STOP 发出后等待服务端破坏的 tick 计数（RetryTicks）。 */
+    private int waitTicks;
+    /** 即时重破流已发的 tick 数。 */
+    private int rebreakTicks;
+    /** 本会话最大单 tick 破坏进度（Time 模式估时用，上游 p）。 */
+    private float maxDelta;
+    /** START 发出时刻（Time 模式用，上游 j）。 */
+    private long startTime;
+    /** 上次 STOP 发出时刻（会话冷却用，上游 i）。 */
+    private long lastStopTime;
 
     public FOPacketMine() {
-        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 SpeedMine：对准方块左键接管，自动发包快挖（进度阈值 0.7），支持自动切工具/暂停/取消/进度渲染。");
+        super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 SpeedMine：对准方块左键接管，自动发包快挖，带 Grim NewDisabler 绕过（3C3U 实战协议）。");
     }
 
     @Override
@@ -226,6 +278,13 @@ public class FOPacketMine extends Module {
         startSession(pos, hit.getSide());
     }
 
+    /** 开始挖一格：记录目标与破坏面，START 序列由 tick 循环发（冷却后）。 */
+    private void startSession(BlockPos pos, Direction dir) {
+        cancelSession();
+        current = pos;
+        currentDir = dir;
+    }
+
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (pauseKey.get().isPressed()) return;
@@ -240,9 +299,48 @@ public class FOPacketMine extends Module {
 
         if (current == null) return;
 
-        // 服务端已经破坏了这格 → 收工
         BlockState state = mc.world.getBlockState(current);
-        if (state.isAir()) {
+
+        // ── 阶段一：还没发 START 序列 ──
+        if (!started) {
+            if (state.isAir()) { // 目标没了（被别人挖掉）
+                cancelSession();
+                return;
+            }
+            // 会话冷却（上游 alP()：NewDisabler/时间校验模式下 280ms 内不开新会话）
+            if (grimMode.get() != GrimMode.无 && grimMode.get() != GrimMode.Disabler
+                && SpeedMineLogic.inSessionCooldown(System.currentTimeMillis(), lastStopTime, SESSION_COOLDOWN_MS)) {
+                return;
+            }
+            if (autoSwitch.get()) switchToBestTool(state);
+            sendStartSequence();
+            return;
+        }
+
+        // ── 阶段三：STOP 已发，等服务端破坏 ──
+        if (breakSent) {
+            if (state.isAir()) {
+                // 破坏成功。即时重破（上游 InstantMine）：继续对原位置每 tick 补发 STOP，
+                // 方块若被刷新回来会被流里的包直接破掉
+                if (instantMine.get() && rebreakTicks < retryTicks.get()) {
+                    rebreakTicks++;
+                    sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir);
+                    lastStopTime = System.currentTimeMillis();
+                } else {
+                    cancelSession();
+                }
+                return;
+            }
+            waitTicks++;
+            if (waitTicks > retryTicks.get()) {
+                // 服务端一直没破（被拦/回弹）：整个会话重来
+                restartSession();
+            }
+            return;
+        }
+
+        // ── 阶段二：已 START，累计进度 ──
+        if (state.isAir()) { // 服务端已破坏
             cancelSession();
             return;
         }
@@ -252,43 +350,87 @@ public class FOPacketMine extends Module {
         }
 
         float delta = state.calcBlockBreakingDelta(mc.player, mc.world, current);
+        if (delta > maxDelta) maxDelta = delta;
+
         if (SpeedMineLogic.shouldBreak(progress, delta, speed.get().floatValue())) {
-            // 到阈值：直接发 STOP_DESTROY_BLOCK 包破坏（发包挖掘的核心一步）
-            mc.player.networkHandler.sendPacket(
-                new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir));
-            if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND);
-            if (notify.get()) info("发包挖掘：已破坏 (px, %d, %d, %d)", current.getX(), current.getY(), current.getZ());
-            // 客户端状态复位，避免原版残留半截挖掘进度
-            mc.interactionManager.cancelBlockBreaking();
-            progress = 0;
-            current = null;
+            progress = 1;
+            // Time 模式：STOP 前必须等够真实挖掘时间（上游 xt() 的 FX 分支）
+            if (grimMode.get() == GrimMode.时间校验) {
+                double expected = Math.ceil(1.0 / Math.max(maxDelta, 1e-6)) * 50.0;
+                if (!SpeedMineLogic.timeModeStopAllowed(expected, System.currentTimeMillis() - startTime, TIME_MODE_SLACK_MS)) {
+                    return;
+                }
+            }
+            sendBreakPacket();
         } else {
             progress = SpeedMineLogic.accumulate(progress, delta);
         }
     }
 
-    /** 开始挖一格：切工具 → 转向（可选）→ 发 START 包。 */
-    private void startSession(BlockPos pos, Direction dir) {
-        cancelSession();
-
-        if (autoSwitch.get()) switchToBestTool(mc.world.getBlockState(pos));
-
-        currentDir = dir;
+    /**
+     * 会话开始发包序列（逐包对齐上游 {@code BlockPosPlayerHelper.xr()}，Packet 模式分支）：
+     * Disabler: STOP(真实) → START(真实)；NewDisabler: START(真实) → START(0,-999,0) →
+     * DoubleBreak 开时补 STOP(真实)；时间校验/无: 仅 START(真实)。
+     */
+    private void sendStartSequence() {
         progress = 0;
+        maxDelta = 0;
+        waitTicks = 0;
+        rebreakTicks = 0;
 
-        Runnable start = () -> mc.interactionManager.attackBlock(pos, currentDir);
+        Runnable start = this::sendStartPackets;
         if (startRotate.get()) {
-            Rotations.rotate(Rotations.getYaw(pos.toCenterPos()), Rotations.getPitch(pos.toCenterPos()), start);
+            Rotations.rotate(Rotations.getYaw(current.toCenterPos()), Rotations.getPitch(current.toCenterPos()), start);
         } else {
             start.run();
         }
+    }
 
-        current = pos;
+    private void sendStartPackets() {
+        Direction dir = currentDir;
+
+        if (grimMode.get() == GrimMode.Disabler) {
+            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, dir);
+        }
+        sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, current, dir);
+        startTime = System.currentTimeMillis();
+
+        if (grimMode.get() == GrimMode.NewDisabler) {
+            // 伪造包：把服务端/Grim 的挖掘位置追踪重指向不存在的方块（上游 xE）
+            sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP);
+        }
+        if (doubleBreak.get()) {
+            // 原版双挖掘进度漏洞（上游 xD，DoubleBreak=true 实战开启）
+            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, dir);
+        }
+
+        started = true;
+    }
+
+    /** 发破坏 STOP（上游 xt() 的发包部分）。 */
+    private void sendBreakPacket() {
+        sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir);
+        if (swing.get()) mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+        if (notify.get()) info("发包挖掘：已破坏 (px, %d, %d, %d)", current.getX(), current.getY(), current.getZ());
+        mc.interactionManager.cancelBlockBreaking();
+        breakSent = true;
+        waitTicks = 0;
+        lastStopTime = System.currentTimeMillis();
+    }
+
+    /** 带正确 block-change sequence 的挖掘包（与仓库 BlockClicker 同款取号，上游 SequencedPacketCreator）。 */
+    private void sendDig(PlayerActionC2SPacket.Action action, BlockPos pos, Direction dir) {
+        if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
+        int sequence;
+        var pending = mc.world.getPendingUpdateManager().incrementSequence();
+        sequence = pending.sequence;
+        pending.close();
+        mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(action, pos, dir, sequence));
     }
 
     /** 自动切换：热栏里对该方块最快的工具（Meteor 现成 findFastestTool，对齐 SwapAction=Hotbar）。 */
     private void switchToBestTool(BlockState state) {
-        meteordevelopment.meteorclient.utils.player.FindItemResult tool = InvUtils.findFastestTool(state);
+        var tool = InvUtils.findFastestTool(state);
         if (tool.found() && tool.slot() != mc.player.getInventory().getSelectedSlot()) {
             InvUtils.swap(tool.slot(), false);
         }
@@ -311,12 +453,27 @@ public class FOPacketMine extends Module {
         }
     }
 
+    /** STOP 没生效：整会话重置，下个 tick 重新走冷却 → START 序列。 */
+    private void restartSession() {
+        started = false;
+        breakSent = false;
+        progress = 0;
+        maxDelta = 0;
+        waitTicks = 0;
+        rebreakTicks = 0;
+    }
+
     private void cancelSession() {
-        if (current != null && mc.interactionManager != null) {
+        if (current != null && mc.interactionManager != null && started && !breakSent) {
             mc.interactionManager.cancelBlockBreaking();
         }
         current = null;
         progress = 0;
+        started = false;
+        breakSent = false;
+        waitTicks = 0;
+        rebreakTicks = 0;
+        maxDelta = 0;
     }
 
     @EventHandler
@@ -343,5 +500,10 @@ public class FOPacketMine extends Module {
 
     public enum FilterMode {
         全部, 仅黑名单, 仅白名单
+    }
+
+    /** 上游 DisablerNewDisablerMode（Strict 与 Time 行为相同，合并为时间校验）。 */
+    public enum GrimMode {
+        无, Disabler, NewDisabler, 时间校验
     }
 }

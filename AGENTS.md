@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p3`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p3-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p4`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p4-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -15,7 +15,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
-  10. FO 发包挖掘（`modules/FOPacketMine`，6.8p2 新增：移植 Hachimi V2 SpeedMine——对准方块左键接管，客户端自算破坏进度、到阈值（3C3U 实战 0.7）直接发 STOP_DESTROY_BLOCK 包破坏；自动切最快工具、暂停/取消快捷键、聊天提示（Notify）、进度色渲染；纯逻辑 `utils/SpeedMineLogic`，单测 `SpeedMineLogicTest`。⚠️ 刻意不移植：Grim NewDisabler 绕过、Desync、InstantMine/DoubleBreak 漏洞、EnderChest 按键、Multitask 并发体系（模块头注释有记录）；Grim 实机拦截时先调高「挖掘进度」）
+  10. FO 发包挖掘（`modules/FOPacketMine`，6.8p2 新增、6.8p4 补全 Grim 协议：移植 Hachimi V2 SpeedMine——对准方块左键接管，客户端自算破坏进度、到阈值（3C3U 实战 0.7）直接发 STOP_DESTROY_BLOCK 包破坏；Grim 绕过四模式（无/Disabler/NewDisabler/时间校验，实战 NewDisabler：START 后补发 START(0,-999,0) 伪造包重指向服务端挖掘追踪 + DoubleBreak 补 STOP）、280ms 会话冷却、RetryTicks 重开会话、InstantMine 即时重破 STOP 流、自动切最快工具、暂停/取消快捷键、聊天提示（Notify）、进度色渲染；全部挖掘包带 accesswidener 取的 block-change sequence（与 BlockClicker 同款）；纯逻辑 `utils/SpeedMineLogic`，单测 `SpeedMineLogicTest`。刻意不移植：Hold/HoldTicks 换持回切、Desync、NoCollision、MineAir、EnderChest 按键、Multitask 并发体系）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
@@ -231,6 +231,25 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p4 已完成：**FOPacketMine 补全 Grim 绕过协议**（用户实测 3C3U 挖不掉——6.8p3
+    只做了"进度到 0.7 发裸 STOP"，被 Grim fastbreak 拦截；通读上游 BlockPosBoxMultitask
+    + BlockPosPlayerHelper 后把 Packet 模式的完整协议逐包移植）：
+    - 新增「Grim绕过」设置（无/Disabler/NewDisabler/时间校验，默认 NewDisabler=实战值）：
+      NewDisabler 在 START 后补发 START(0,-999,0) 伪造包把服务端/Grim 的挖掘位置追踪
+      重指向假方块，真实 STOP 不再受 vanilla 1.21.2+ 快挖防护与 Grim fastbreak 约束；
+      Disabler 在 START 前先发 STOP；时间校验（上游 Strict/Time 合并）STOP 前等够
+      ceil(1/最大单tick进度)*50ms 真实时间（差 25ms 内放行）。
+    - 新增「双重破坏」（DoubleBreak，实战 true）：会话开始补一个 STOP（原版双进度漏洞）。
+    - 新增「重试等待」（RetryTicks，实战 10）：STOP 发出后方块未消失，超时重开整个会话；
+      新增「即时重破」（InstantMine，实战 true）：破坏完成后每 tick 对原位置补发 STOP 流
+      （方块被刷新回来立即再破），窗口=RetryTicks。
+    - 280ms 会话冷却（上游 alP()，NewDisabler/时间校验生效）。
+    - 所有挖掘包改带正确 block-change sequence（复用 fo.accesswidener 已有的
+      getPendingUpdateManager/sequence 条目，与 BlockClicker 同款取号）——此前发的是
+      sequence=0 裸包。
+    - 纯逻辑新增 `SpeedMineLogic.inSessionCooldown` / `timeModeStopAllowed`，单测 +4 用例。
+    - 刻意不移植（本版仍不做）：Hold/HoldTicks 换持回切、Desync、NoCollision、MineAir、
+      EnderChest 按键、Multitask 并发体系。
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
   - ⚠️ 已知与参考实现的偏差（我们按 MC 本体语义实现，是刻意修正）：参考实现的 `enchant_with_levels` 忽略 options

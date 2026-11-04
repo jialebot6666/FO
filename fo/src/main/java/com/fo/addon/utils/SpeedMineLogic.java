@@ -32,6 +32,22 @@ public final class SpeedMineLogic {
     }
 
     /**
+     * 会话冷却判定（上游 alP()）：NewDisabler/时间校验模式下，
+     * 距离上次发 STOP 未满冷却时长时不开新会话。
+     */
+    public static boolean inSessionCooldown(long now, long lastStopTime, long cooldownMs) {
+        return now - lastStopTime <= cooldownMs;
+    }
+
+    /**
+     * 时间校验模式的 STOP 放行判定（上游 xt() 的 FX 分支）：
+     * 期望挖掘耗时（ceil(1/最大单tick进度)*50ms）与实际已耗时之差小于放行余量才发 STOP。
+     */
+    public static boolean timeModeStopAllowed(double expectedMs, double elapsedMs, double slackMs) {
+        return expectedMs - elapsedMs < slackMs;
+    }
+
+    /**
      * 渲染颜色渐变：start（刚开始挖，红）→ end（即将破坏，绿），
      * 对齐原版 StartSide k(255,0) / EndSide k(0,255) 的语义。
      *
