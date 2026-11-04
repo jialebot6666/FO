@@ -47,12 +47,14 @@ import java.util.List;
  *       一击即碎的方块直接发。</li>
  *   <li>「自动切换」开挖时自动切热栏里最快工具（对齐 SwapAction=Hotbar + AutoSwitch=true）。</li>
  *   <li>快捷键：暂停键（按住暂停发包）、取消键（放弃当前目标），对齐原版 Pause/Cancel。</li>
- *   <li>渲染：进度色方块（红→绿渐变，对齐 StartSide/EndSide 语义）+ 方块轮廓。</li>
+ *   <li>聊天提示：破坏后聊天栏报坐标（Notify）。</li>
+ *   <li>渲染：进度色方块（开始/结束色与线框色渐变，实战值青色→深青、粉红线框）+ 方块轮廓。</li>
  * </ul></p>
  *
  * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
  * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、
- * OnlyOnGround/PauseOnFlying/PauseInFluid 全关。</p>
+ * Notify 开（聊天提示）、OnlyOnGround/PauseOnFlying/PauseInFluid 全关、
+ * 渲染色 StartSide=0x3f7e7ef5 / EndSide=0x066e6ee1 / StartLine=EndLine=0xff9595ff。</p>
  *
  * <p>刻意不移植（依赖上游私有体系或需实机调试，需要时单独立项）：
  * Grim「NewDisabler」快速挖绕过、Desync 破坏去同步、InstantMine/DoubleBreak 原版漏洞、
@@ -90,6 +92,11 @@ public class FOPacketMine extends Module {
     private final Setting<Boolean> startRotate = sgGeneral.add(new BoolSetting.Builder()
         .name("开挖转向").description("开挖前把视角转向目标方块（实战关闭）")
         .defaultValue(false).build()
+    );
+
+    private final Setting<Boolean> notify = sgGeneral.add(new BoolSetting.Builder()
+        .name("聊天提示").description("发包破坏方块后在聊天栏提示坐标（Notify，实战开启）")
+        .defaultValue(true).build()
     );
 
     private final Setting<Keybind> pauseKey = sgGeneral.add(new KeybindSetting.Builder()
@@ -154,13 +161,23 @@ public class FOPacketMine extends Module {
     );
 
     private final Setting<SettingColor> startColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("开始颜色").description("刚开挖的颜色（StartSide，红）")
-        .defaultValue(new SettingColor(255, 60, 60, 80)).build()
+        .name("开始颜色").description("刚开挖的颜色（StartSide，实战 0x3f7e7ef5 青色）")
+        .defaultValue(new SettingColor(63, 126, 126, 245)).build()
     );
 
     private final Setting<SettingColor> endColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
-        .name("结束颜色").description("即将破坏的颜色（EndSide，绿）")
-        .defaultValue(new SettingColor(60, 255, 60, 120)).build()
+        .name("结束颜色").description("即将破坏的颜色（EndSide，实战 0x066e6ee1 深青）")
+        .defaultValue(new SettingColor(6, 110, 110, 225)).build()
+    );
+
+    private final Setting<SettingColor> startLineColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
+        .name("开始线条").description("刚开挖的线框颜色（StartLine，实战 0xff9595ff 粉红）")
+        .defaultValue(new SettingColor(255, 149, 149, 255)).build()
+    );
+
+    private final Setting<SettingColor> endLineColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
+        .name("结束线条").description("即将破坏的线框颜色（EndLine，实战 0xff9595ff 粉红）")
+        .defaultValue(new SettingColor(255, 149, 149, 255)).build()
     );
 
     private final Setting<Boolean> blockOutline = sgRender.add(new BoolSetting.Builder()
@@ -240,6 +257,7 @@ public class FOPacketMine extends Module {
             mc.player.networkHandler.sendPacket(
                 new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir));
             if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND);
+            if (notify.get()) info("发包挖掘：已破坏 (px, %d, %d, %d)", current.getX(), current.getY(), current.getZ());
             // 客户端状态复位，避免原版残留半截挖掘进度
             mc.interactionManager.cancelBlockBreaking();
             progress = 0;
@@ -306,16 +324,21 @@ public class FOPacketMine extends Module {
         if (!render.get() || current == null) return;
         if (mc.world.getBlockState(current).isAir()) return;
 
-        int[] c = SpeedMineLogic.lerpColor(
+        int[] side = SpeedMineLogic.lerpColor(
             new int[]{startColor.get().r, startColor.get().g, startColor.get().b, startColor.get().a},
             new int[]{endColor.get().r, endColor.get().g, endColor.get().b, endColor.get().a},
             progress
         );
-        SettingColor side = new SettingColor(c[0], c[1], c[2], c[3]);
-        SettingColor line = new SettingColor(c[0], c[1], c[2], Math.min(255, c[3] + 100));
+        int[] line = SpeedMineLogic.lerpColor(
+            new int[]{startLineColor.get().r, startLineColor.get().g, startLineColor.get().b, startLineColor.get().a},
+            new int[]{endLineColor.get().r, endLineColor.get().g, endLineColor.get().b, endLineColor.get().a},
+            progress
+        );
+        SettingColor sideColor = new SettingColor(side[0], side[1], side[2], side[3]);
+        SettingColor lineColor = new SettingColor(line[0], line[1], line[2], line[3]);
 
         Box box = new Box(current);
-        event.renderer.box(box, side, line, shapeMode.get(), blockOutline.get() ? 0 : -1);
+        event.renderer.box(box, sideColor, lineColor, shapeMode.get(), blockOutline.get() ? 0 : -1);
     }
 
     public enum FilterMode {

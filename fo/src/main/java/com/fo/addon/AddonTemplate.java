@@ -10,7 +10,6 @@ import com.fo.addon.modules.AutoMining;
 import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
-import com.fo.addon.modules.FOAutoMine;
 import com.fo.addon.modules.FOKillAura;
 import com.fo.addon.modules.FOPacketMine;
 import com.fo.addon.modules.StashMover;
@@ -125,7 +124,6 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoMineSand());
         Modules.get().add(new AutoMining());
         Modules.get().add(new FOKillAura());
-        Modules.get().add(new FOAutoMine());
         Modules.get().add(new FOPacketMine());
         Modules.get().add(new FOAncientCitySearch());
         Modules.get().add(new StashMover());
