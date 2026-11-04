@@ -10,9 +10,11 @@ import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StringMapSetting;
+import com.fo.addon.utils.TeleportFloodDetector;
 import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -36,6 +38,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
@@ -608,6 +611,18 @@ public class StashMover extends Module {
     private static final int PACE_RESTOCK_DONE = 10;    // 补珍珠完成 → 投掷
     private static final int PACE_TRAPDOOR_CLICK = 14;  // 点活板门后等方块状态同步
 
+    /**
+     * 防卡参数（V6.7p9，照搬 ZenithProxy futa 插件 AntiStuck 的判定思路）。
+     *
+     * <p>原理：人一旦被卡住（挤在方块里/被水柱顶住），服务端会不停发位置校正包
+     * （{@link PlayerPositionLookS2CPacket}），客户端每收一个就回一个确认包。
+     * 所以「5 秒内收到 6 次」基本就等于卡住了——正常玩不会这么频繁。
+     * 检测到之后：松键 → 停寻路 → 等 20 tick 让状态稳定 → 寻路到最近的能站人的格子。
+     */
+    private static final int ANTI_STUCK_TRIGGER = 6;
+    private static final long ANTI_STUCK_WINDOW_MS = 5000;
+    private static final int ANTI_STUCK_SETTLE_TICKS = 20;
+
     private long tick;
     private int cooldown;
 
@@ -622,6 +637,8 @@ public class StashMover extends Module {
     /** 当前寻路目标（寻路守卫：同一目标不重复下发，避免每 tick 重置 Baritone 路径）。 */
     private BlockPos pathTarget;
     private long pathStartTick;
+    /** 同一个精确走位目标开始的时间（用于 20 秒超时判定，不随每次重发归零）。 */
+    private long pathToSince;
     private int pathRetries;
     private boolean finalTrip;
     private int pullCount;
@@ -650,9 +667,6 @@ public class StashMover extends Module {
     private int throwSub;
     private int throwRetries;
     private BlockPos throwSafeSpot;
-    private int stallTicks;
-    private int walkTicks;
-    private int walkPhase;
     private int escapeTicks;
     /** 脱困目标格（每 20 tick 重算，玩家在水里浮沉时目标会变）。 */
     private BlockPos escapeTarget;
@@ -660,8 +674,6 @@ public class StashMover extends Module {
     private final java.util.Map<StashMoveLogic.Zone, BlockPos> zoneSafeSpot = new java.util.HashMap<>();
     private int restockRetries;
     private long nextPearlCheckTick;
-    private double lastWalkX;
-    private double lastWalkZ;
     private StashMoveLogic.Zone trioZone = StashMoveLogic.Zone.UNKNOWN;
     private long teleportWaitStart;
     private Vec3d lastPos;
@@ -677,6 +689,19 @@ public class StashMover extends Module {
     private long lastHeartbeatPrintTick;
     /** 上一次打印的状态/子步骤，用于“只在变化时打印”。 */
     private String lastHeartbeatSummary = "";
+
+    // ===== 防卡（V6.7p9，照搬 ZenithProxy futa 插件 AntiStuck 的判定思路）=====
+    /** 位置校正包洪泛检测：5 秒内 6 次 = 卡脚。 */
+    private final TeleportFloodDetector teleportFlood =
+        new TeleportFloodDetector(ANTI_STUCK_WINDOW_MS, ANTI_STUCK_TRIGGER);
+    /** >=0 表示防卡流程正在进行（此时状态机让路）。 */
+    private int antiStuckTicks = -1;
+    /** 防卡冷却截止时间（毫秒），避免连续触发。 */
+    private long antiStuckCooldownUntil;
+    /** 本次防卡已经救过几次（用于日志/诊断）。 */
+    private int antiStuckCount;
+    /** 网络线程发现「疑似卡脚」时置位，由客户端线程（onTick）接手处理。 */
+    private volatile boolean antiStuckPending;
 
     // 拉珍珠
     private boolean pullActive;
@@ -739,9 +764,6 @@ public class StashMover extends Module {
         throwSub = 0;
         throwRetries = 0;
         throwSafeSpot = null;
-        stallTicks = 0;
-        walkTicks = 0;
-        walkPhase = 0;
         escapeTicks = 0;
         escapeTarget = null;
         zoneSafeSpot.clear();
@@ -752,6 +774,11 @@ public class StashMover extends Module {
         lastHeartbeatTick = 0;
         lastHeartbeatPrintTick = 0;
         lastHeartbeatSummary = "";
+        teleportFlood.clear();
+        antiStuckTicks = -1;
+        antiStuckCooldownUntil = 0;
+        antiStuckCount = 0;
+        antiStuckPending = false;
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
@@ -777,6 +804,90 @@ public class StashMover extends Module {
         // 用户口径：断线/退服清零本次搬运统计（关模块不清）
         StashStats.get().reset();
         pullActive = false;
+        teleportFlood.clear();
+    }
+
+    // ==================== 防卡（V6.7p9） ====================
+
+    /**
+     * 统计服务端位置校正包的频率，判断是否「卡脚」。
+     *
+     * <p>人卡住时服务端会不停把你拉回原位（每拉一次就是一个位置包），
+     * 5 秒内 6 次基本等于卡死。正常跑图/被珍珠拉一次都不会到这个量。
+     */
+    @EventHandler
+    private void onPacketReceive(PacketEvent.Receive event) {
+        if (!(event.packet instanceof PlayerPositionLookS2CPacket)) return;
+        if (!isMoverRole()) return;
+
+        // ⚠️ 这个回调在**网络线程**：只记时间戳 + 置标志，绝不碰玩家/按键/寻路。
+        // 真正的处理放到 onTick（客户端线程），见 tickAntiStuck 的调用点。
+        if (teleportFlood.record(System.currentTimeMillis())) {
+            antiStuckPending = true;
+        }
+    }
+
+    private void startAntiStuck() {
+        antiStuckTicks = 0;
+        antiStuckCount++;
+        releaseMovementKeys();
+        PathManagers.get().stop();
+        pathTarget = null;
+        BlockPos at = mc.player.getBlockPos();
+        warning("检测到频繁传送（5 秒内 " + teleportFlood.count(System.currentTimeMillis())
+            + " 次），判定卡脚，开始脱困");
+        info("我卡住了！我在：" + at.toShortString());
+        if (debug.get()) {
+            info("[防卡] 第 " + antiStuckCount + " 次，状态=" + trioState + "，在水里="
+                + (mc.player.isTouchingWater() ? "是" : "否") + "，碰撞=" + mc.player.horizontalCollision);
+        }
+    }
+
+    /** 防卡流程：等 20 tick 稳住 → 找最近的安全落脚点 → 寻路过去。 */
+    private void tickAntiStuck() {
+        antiStuckTicks++;
+        if (antiStuckTicks < ANTI_STUCK_SETTLE_TICKS) return;
+
+        BlockPos safe = findAntiStuckSpot();
+        if (safe != null) {
+            info("尝试移动到安全位置 " + safe.toShortString());
+            pathTarget = safe;
+            pathStartTick = tick;
+            pathToSince = tick;
+            pathRetries = 0;
+            PathManagers.get().stop();
+            PathManagers.get().moveToPrecise(safe);
+        } else {
+            warning("附近 5 格内找不到能站的格子，请手动处理");
+        }
+
+        antiStuckTicks = -1;
+        antiStuckCooldownUntil = System.currentTimeMillis() + ANTI_STUCK_WINDOW_MS;
+        teleportFlood.clear();
+        antiStuckPending = false;
+        cooldown = PACE_STEP;
+    }
+
+    /**
+     * 找最近的安全落脚点（脚下实心、身体两格无碰撞、不在流体里）。
+     *
+     * <p>先在原地上下试，再逐圈向外扩到 5 格——和 ZenithProxy 的 `findSafePosition` 一个思路。
+     */
+    private BlockPos findAntiStuckSpot() {
+        BlockPos base = mc.player.getBlockPos();
+        int[] dyOrder = {0, -1, 1, -2, 2, -3, 3};
+        for (int r = 1; r <= 5; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;
+                    for (int dy : dyOrder) {
+                        BlockPos p = base.add(dx, dy, dz);
+                        if (isStandable(p)) return p;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // ==================== 主循环 ====================
@@ -795,6 +906,21 @@ public class StashMover extends Module {
             mc.options.backKey.setPressed(true);
             backoffTicks--;
             if (backoffTicks <= 0) mc.options.backKey.setPressed(false);
+        }
+
+        // V6.7p9：防卡流程优先，进行中时状态机整体让路（否则一边救一边按原逻辑走，越救越卡）
+        if (antiStuckTicks >= 0) {
+            tickAntiStuck();
+            return;
+        }
+        // 网络线程只置标志，真正的判定/动作在这里（客户端线程）做
+        if (antiStuckPending) {
+            antiStuckPending = false;
+            long now = System.currentTimeMillis();
+            if (tick >= 100 && now >= antiStuckCooldownUntil) {
+                startAntiStuck();
+                return;
+            }
         }
 
         if (cooldown > 0) {
@@ -1587,8 +1713,13 @@ public class StashMover extends Module {
             mc.player.setYaw((float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0));
             mc.options.forwardKey.setPressed(true);
             forwardHeld = true;
-            if (mc.player.isTouchingWater() || escape.getY() > feet.getY()) {
+            // V6.7p9：不在水里但被边沿卡住时（脚顶着一格高的坎），原地推是推不上去的，
+            // 必须周期性按跳；这也是「卡脚」最常见的形态之一。
+            boolean hop = !mc.player.isTouchingWater() && escapeTicks > 10 && (escapeTicks % 12) < 3;
+            if (mc.player.isTouchingWater() || escape.getY() > feet.getY() || hop) {
                 mc.options.jumpKey.setPressed(true);
+            } else if (mc.options != null) {
+                mc.options.jumpKey.setPressed(false);
             }
             escapeTicks++;
             if (escapeTicks > 120) {
@@ -1686,11 +1817,7 @@ public class StashMover extends Module {
                         debugMsg("[活板门] 已确认打开（点了 " + trapdoorClickAttempts + " 次）");
                     }
                     trapdoorClickAttempts = 0;
-                    setThrowSub(3, "活板门已开，开始潜行走近");
-                    walkTicks = 0;
-                    stallTicks = 0;
-                    lastWalkX = mc.player.getX();
-                    lastWalkZ = mc.player.getZ();
+                    setThrowSub(3, "活板门已开，确认站位");
                     cooldown = PACE_STEP;
                     return;
                 }
@@ -1711,15 +1838,26 @@ public class StashMover extends Module {
                 cooldown = PACE_TRAPDOOR_CLICK;
             }
             case 3 -> {
-                int r = walkToColumnCenter(stand);
-                if (r == 1) {
-                    setThrowSub(4, "已走到柱边");
-                    cooldown = PACE_STEP;
-                } else if (r == 2) {
+                // V6.7p9：这里**不再「潜行 + 按住前进走到走不动」**——那是卡脚的主因
+                // （顶着箱子/水柱边缘一直推，服务端不停把位置拉回来）。
+                // 现在只做两件事：确认没踩进水里、确认离柱心够近；不够近就交给寻路重新站位。
+                Vec3d waterCenter = Vec3d.ofCenter(water);
+                double distToColumn = Math.hypot(waterCenter.x - mc.player.getX(), waterCenter.z - mc.player.getZ());
+                if (mc.player.isTouchingWater()) {
                     debugMsg("[走近] 踩进气泡柱了，先退开再重试");
                     setThrowSub(5, "走近时踩进水里");
                     cooldown = PACE_STEP;
+                    return;
                 }
+                if (distToColumn > 3.0) {
+                    debugMsg("[走近] 离柱心 " + String.format(Locale.ROOT, "%.1f", distToColumn) + " 格，重新站位");
+                    setThrowSub(1, "离柱子太远，重新走近");
+                    cooldown = PACE_STEP;
+                    return;
+                }
+                sneakForThrow();
+                setThrowSub(4, "已在柱子旁 " + String.format(Locale.ROOT, "%.1f", distToColumn) + " 格，准备投掷");
+                cooldown = PACE_STEP;
             }
             case 4 -> {
                 int slot = findPearlHotbarSlot();
@@ -1784,57 +1922,6 @@ public class StashMover extends Module {
         var state = mc.world.getBlockState(pos);
         if (!(state.getBlock() instanceof TrapdoorBlock)) return true;
         return state.get(TrapdoorBlock.OPEN);
-    }
-
-    /**
-     * ③ 按住 shift + pitch 90，朝气泡柱中心按前进键，直到走不动。
-     *
-     * <p>停滞判定：连续 3 tick 水平位移 &lt; 0.05 格；另加 60 tick 上限保护。
-     * V6.7p7：点按节奏从「每 3 tick 走 1 tick」放到「每 4 tick 走 1 tick」，上限 45 → 60 tick
-     * （用户口径：不要那么紧凑，一步一步来）；同时把视角锁在柱心（第一人称真的转头）。
-     *
-     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退
-     */
-    private int walkToColumnCenter(BlockPos trapdoorPos) {
-        sneakForThrow();
-        Vec3d center = Vec3d.ofCenter(trapdoorPos.down(1));
-        float yaw = (float) (Math.toDegrees(Math.atan2(center.z - mc.player.getZ(), center.x - mc.player.getX())) - 90.0);
-        // setYaw 决定「前进键往哪走」（服务端视角由下面的 Rotations 负责）
-        mc.player.setYaw(yaw);
-        mc.player.setPitch(90f);
-        Rotations.rotate(yaw, 90f, 5);
-
-        // 踩进气泡柱了：立刻停手，交给后退阶段（V6.7p4）
-        if (mc.player.isTouchingWater()) {
-            mc.options.forwardKey.setPressed(false);
-            forwardHeld = false;
-            return 2;
-        }
-
-        // 慢速点按：每 4 tick 只按 1 tick，走一小步就重新判定（原来每 tick 按住容易冲过头）
-        walkPhase = (walkPhase + 1) % 4;
-        boolean press = walkPhase == 0;
-        mc.options.forwardKey.setPressed(press);
-        forwardHeld = press;
-        walkTicks++;
-
-        boolean stalled = StashMoveLogic.isStalled(lastWalkX, lastWalkZ, mc.player.getX(), mc.player.getZ(), 0.05);
-        lastWalkX = mc.player.getX();
-        lastWalkZ = mc.player.getZ();
-        if (stallTicks == 0) {
-            stallTicks = 1;
-            return 0;
-        }
-        stallTicks = stalled ? stallTicks + 1 : 1;
-
-        if (stallTicks >= 3 || walkTicks >= 60) {
-            mc.options.forwardKey.setPressed(false);
-            forwardHeld = false;
-            walkTicks = 0;
-            stallTicks = 0;
-            return 1;
-        }
-        return 0;
     }
 
     /** ④ 松开 shift、按 S 退离气泡柱（退到离柱心 ≥2.5 格），再回到投掷前的原位。 */
@@ -2520,9 +2607,15 @@ public class StashMover extends Module {
         if (!pos.equals(pathTarget)) {
             pathTarget = pos;
             pathStartTick = tick;
+            pathToSince = tick;
             pathRetries = 0;
             if (PathManagers.get().isPathing()) PathManagers.get().stop();
             PathManagers.get().moveToPrecise(pos);
+            return;
+        }
+        // 同一个目标走太久还没到 → 别再无限重试，直接报出来（坐标 + 目标）
+        if (tick - pathToSince > 400) {
+            enterStuck("走去 " + pos.toShortString() + " 超时（20 秒没到），请检查路是否被堵");
             return;
         }
         if (!PathManagers.get().isPathing() && tick - pathStartTick > 20) {

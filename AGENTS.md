@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p8`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p8-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p9`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p9-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -438,6 +438,26 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - ⑦ 顺手修 UI 文案：提示里的 `请先设置SOURCE/STORE的活板门位置` 是英文枚举名，改走 `zoneName()`（中文）。
   - 测试：全仓 **50 套件 405 测试全绿**（本次改动全是 Minecraft 客户端时序/世界耦合路径，
     无新增纯逻辑；断言未变，故测试数不变）。
+- ✅ 6.7p9 已修复：**「卡脚」**（用户实机反馈；对照 ZenithProxy futa 插件 `AntiStuck` 的做法重做）。
+  - **参考来源**：用户给的 `appfuta.zip` 是 GraalVM **编译产物**（不是源码），但包名 `com.github.futa` 可查，
+    公开源码在 `xperiavnc/futa-plugin`（旧版，缺 StashMove/PearlDrop，但 `AntiStuck`/`PearlPlusModule` 在）。
+    从中确认两条关键做法：**① 从不用手动按方向键走路，全程 `BARITONE.pathTo(...)` + 完成回调；
+    ② 用「位置校正包频率」判定卡脚**（5 秒 ≥6 次 `ServerboundAcceptTeleportationPacket` → 去最近安全点）。
+  - ① **新增防卡机制** `TeleportFloodDetector`（纯逻辑可单测）：统计
+    `PlayerPositionLookS2CPacket`（服务端位置校正）在 5 秒窗口内的次数，≥6 判定卡脚。
+    ⚠️ 收包回调在**网络线程**，内部只 `record` + 置 `antiStuckPending`，真正处理放 `onTick`（客户端线程）。
+    触发后：松键 → 停寻路 → 等 20 tick 稳住 → 在 5 格内找最近的 `isStandable` 格子精确寻路过去 →
+    冷却 5 秒；同时打印 `我卡住了！我在：x,y,z`（照抄参考实现给用户看的定位信息）。
+  - ② **删掉「潜行 + 按住前进走到走不动」**（`walkToColumnCenter`，卡脚主因：顶着箱子/水柱边沿一直推，
+    服务端不停把位置拉回来）。投掷第 3 子步骤改为**只做校验**：在水里 → 退回；离柱心 >3 格 → 回第 1 步
+    用寻路重新站位；否则直接进投掷。全局不再有「按住前进键硬顶」的走位。
+  - ③ 脱困（`escapeIfNeeded`）加了**周期性按跳**：不在水里但被一格高边沿卡住时，原地推是推不上去的，
+    每 12 tick 跳 3 tick。
+  - ④ `walkToPrecise()` 增加 20 秒超时（同一目标），超时直接报警带坐标，不再无限重试。
+  - 测试：新增 `TeleportFloodDetectorTest` 6 个用例（阈值/窗口裁剪/边界/清空），
+    全仓 **51 套件 418 测试全绿**。
+  - ⚠️ 未能核实：ZenithProxy 的 `StashMoveModule` / `PearlDrop` 只在编译产物里（公开仓库是旧版），
+    本次只对齐了「防卡」与「不手动推着走」两条可确证的做法，其余仍按用户口述的流程。
   - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
