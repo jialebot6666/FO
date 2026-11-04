@@ -225,6 +225,11 @@ public class FOPacketMine extends Module {
         .defaultValue(true).build()
     );
 
+    private final Setting<Boolean> swingHand = sgGeneral.add(new BoolSetting.Builder()
+        .name("挥手").description("发包破坏/开挖时挥手（Swing）。实战=None 关闭，多余挥手包可能与 Grim 状态不同步")
+        .defaultValue(false).build()
+    );
+
     private final Setting<Boolean> ignoreBroken = sgGeneral.add(new BoolSetting.Builder()
         .name("忽略已破坏").description("已被破坏（空）的方块不成为挖掘目标（IgnoreBroken）")
         .defaultValue(false).build()
@@ -715,10 +720,11 @@ public class FOPacketMine extends Module {
             sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir);
 
             // 新版绕过（NewDisabler）：补发 START(0,-999,0) 伪造包，
-            // 把服务端 vanilla 1.21.2+ 快挖防护与 Grim 的挖掘位置追踪重指向假方块（上游 xE）
+            // 把服务端 vanilla 1.21.2+ 快挖防护与 Grim 的挖掘位置追踪重指向假方块（上游 xE）。
+            // ⚠️ 必须带正确 block-change sequence（上游 xE 是 SequencedPacketCreator，
+            //    6.8p7 重写时误用裸包 sequence=0 导致 Grim 不认伪造包、STOP 被拒 = 回弹，6.8p9 修复）
             if (grimMode.get() == GrimMode.新版绕过) {
-                mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
-                    PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP));
+                sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP);
             }
 
             // 双重破坏：会话开始补一个 STOP（上游 xD），并建镜像会话（第二条进度线）
@@ -1034,7 +1040,8 @@ public class FOPacketMine extends Module {
     }
 
     private void swing() {
-        mc.player.swingHand(Hand.MAIN_HAND);
+        // 实战 Swing=None：默认不挥手（上游 SwingMode.avX 由设置驱动）
+        if (swingHand.get()) mc.player.swingHand(Hand.MAIN_HAND);
     }
 
     /** 发包破坏后的统一收尾：假破块 + 聊天提示（上游 xz/xA/xC 的 Desync 分支）。 */

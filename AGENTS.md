@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p8`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p8-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p9`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p9-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -231,6 +231,16 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p9 已完成：**修复 6.8p7 起的挖掘回弹（Grim 拒包）**（用户实测 6.8p5 完美、6.8p7 经常回弹，diff 两版+上游逐包比对定位）：
+    - **根因：NewDisabler 伪造包 START(0,-999,0) 在 6.8p7 全量重写时误用裸 new（sequence=0）**。
+      上游 xE 是 SequencedPacketCreator（`new PlayerActionC2SPacket(START, (0,-999,0), UP, n2)`，
+      经 iQ() 取号）——伪造包必须带正确 block-change sequence，否则 Grim 不认伪造追踪包，
+      后续 STOP 落回 vanilla 1.21.2+ 快挖防护 → 拒绝 = 回弹。6.8p5 用 sendDig（带号）所以完美。
+      修复：改回 sendDig。
+    - 次因：6.8p7 无条件挥手（实战 Swing=None）。新增「挥手」设置默认关，swing() 受其控制。
+    - 排除项：进度累计的持错工具线性缩放误差方向偏保守（STOP 偏晚不偏早）；假破块门控
+      （markBreak/Desync=SetAir，上游靠它挡住 STOP 重发）6.8p7 已正确实现；280ms 冷却、
+      sequence 的 START/DoubleBreak/STOP 均与 6.8p5 一致。
   - ✅ 6.8p8 已完成：**静默换持（SwapMode.Screen 容器级换持）移植**（用户要求全面移植）：
     - 新设置「换持方式」（SwapActionMode：快捷栏/静默换持，手动切换时隐藏）。
     - 快捷栏 = 原 Hotbar 直切（InvUtils.swap，UpdateSelectedSlot）。
