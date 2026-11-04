@@ -5,8 +5,6 @@ import com.fo.addon.pathing.PathManagers;
 import com.fo.addon.utils.BlockClicker;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.PeerMessageLogic;
-import com.fo.addon.utils.Rotation;
-import com.fo.addon.utils.RotationManager;
 import com.fo.addon.utils.StashMoveLogic;
 import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
@@ -27,6 +25,7 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.ChestBlock;
@@ -150,9 +149,14 @@ public class StashMover extends Module {
         WALK_STORE, UNLOAD, SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
-    /** 三号模式 1 号搬运端的阶段（V6.7p3 重排：校正 → 补货 → 投珍珠 → 取货/存货 → 私信）。 */
+    /**
+     * 三号模式 1 号搬运端的阶段（V6.7p3 重排：校正 → 补货 → 投珍珠 → 取货/存货 → 私信）。
+     *
+     * <p>V6.7p7 在最前面插入 {@link #ARRIVE_WAIT}：被拉过来后先停 2 秒等区块加载再动手
+     * （用户实机反馈：以前一落地就立刻开活板门/脱离，地形还没同步，判断全乱）。
+     */
     private enum TrioState {
-        SETTLE, RESTOCK, THROW, LOOT, UNLOAD, SEND, WAIT_TELEPORT, STUCK
+        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, UNLOAD, SEND, WAIT_TELEPORT, STUCK
     }
 
     // ==================== 设置 ====================
@@ -566,6 +570,19 @@ public class StashMover extends Module {
 
     // ==================== 运行时状态 ====================
 
+    /**
+     * 三号模式节奏常量（V6.7p7，用户口径「一步一步来，不要那么紧凑」）。
+     *
+     * <p>全部以 tick 计（20 tick = 1 秒）。原来各步骤之间只隔 2~5 tick，
+     * 服务端还没把结果同步回来就进了下一步，表现就是「跳步、看起来没等」。
+     */
+    private static final int ARRIVE_WAIT_TICKS = 40;    // 被拉过来后先等 2 秒（区块/实体加载）
+    private static final int PACE_SETTLE_DONE = 10;     // 脱离完成 → 下一步
+    private static final int PACE_STEP = 6;             // 投掷子步骤之间
+    private static final int PACE_THROW_DONE = 10;      // 投完 → 取货/存货
+    private static final int PACE_RESTOCK_DONE = 10;    // 补珍珠完成 → 投掷
+    private static final int PACE_TRAPDOOR_CLICK = 14;  // 点活板门后等方块状态同步
+
     private long tick;
     private int cooldown;
 
@@ -623,6 +640,18 @@ public class StashMover extends Module {
     private StashMoveLogic.Zone trioZone = StashMoveLogic.Zone.UNKNOWN;
     private long teleportWaitStart;
     private Vec3d lastPos;
+
+    // V6.7p7：到达后等待 + 逐步诊断
+    /** 被拉过来后开始等待的 tick（ARRIVE_WAIT 截止点）。 */
+    private long arriveWaitStart;
+    /** 连续点活板门没打开的累计次数（换目标/打开成功即归零）。 */
+    private int trapdoorClickAttempts;
+    /** 调试心跳：上次打印摘要的 tick。 */
+    private long lastHeartbeatTick;
+    /** 心跳摘要真正打印出去的 tick（内容不变时用它控制「仍在…」的间隔）。 */
+    private long lastHeartbeatPrintTick;
+    /** 上一次打印的状态/子步骤，用于“只在变化时打印”。 */
+    private String lastHeartbeatSummary = "";
 
     // 拉珍珠
     private boolean pullActive;
@@ -693,6 +722,11 @@ public class StashMover extends Module {
         zoneSafeSpot.clear();
         restockRetries = 0;
         nextPearlCheckTick = 0;
+        arriveWaitStart = 0;
+        trapdoorClickAttempts = 0;
+        lastHeartbeatTick = 0;
+        lastHeartbeatPrintTick = 0;
+        lastHeartbeatSummary = "";
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
@@ -1151,12 +1185,14 @@ public class StashMover extends Module {
                 enterStuck("请先设置待搬运箱与存储箱坐标");
                 return;
             }
-            trioState = TrioState.SETTLE;
+            setTrioState(TrioState.SETTLE, "启动时已确定所在区");
         }
         if (trioState != TrioState.STUCK && tick - lastProgressTick > 2400) {
             enterStuck("长时间没有进展（2 分钟无有效动作）");
             return;
         }
+
+        trioHeartbeat();
 
         // V6.7p4：取货/存货期间每 5 秒确认一次本区珍珠还在（被踩掉就回去重投）
         if ((trioState == TrioState.LOOT || trioState == TrioState.UNLOAD)
@@ -1166,9 +1202,9 @@ public class StashMover extends Module {
                 closeScreen();
                 releaseMovementKeys();
                 info("检测到本区珍珠消失（可能踩到气泡柱），重新投掷");
-                throwSub = 0;
+                setThrowSub(0, "珍珠没了");
                 throwRetries = 0;
-                trioState = TrioState.THROW;
+                setTrioState(TrioState.THROW, "本区珍珠消失了");
                 return;
             }
         }
@@ -1181,6 +1217,7 @@ public class StashMover extends Module {
         }
 
         switch (trioState) {
+            case ARRIVE_WAIT -> trioArriveWait();
             case SETTLE -> trioSettle();
             case RESTOCK -> trioRestock();
             case THROW -> trioThrow();
@@ -1192,17 +1229,40 @@ public class StashMover extends Module {
         }
     }
 
+    /**
+     * 到达等待（V6.7p7，用户口径）：被拉过来后先原地停 2 秒。
+     *
+     * <p>为什么不直接干活：刚传送落地时区块还没同步完、脚下方块可能还是空气，
+     * 立刻判断「站没站稳 / 活板门开没开」必然全是错的，然后就一路错下去。
+     * 这 2 秒里只做三件事：松键、停寻路、什么都不碰。
+     */
+    private void trioArriveWait() {
+        releaseMovementKeys();
+        if (PathManagers.get().isPathing()) PathManagers.get().stop();
+        long waited = tick - arriveWaitStart;
+        if (debug.get() && waited % 20 == 0) {
+            info("[三号][到达] 等待加载 " + (waited / 20) + "/" + (ARRIVE_WAIT_TICKS / 20) + " 秒");
+        }
+        if (waited < ARRIVE_WAIT_TICKS) return;
+        setTrioState(TrioState.SETTLE, "等待结束，开始脱离");
+        cooldown = PACE_STEP;
+    }
+
     private void trioLoot() {
         if (inventoryFull()) {
             closeScreen();
-            trioState = TrioState.SEND;   // V6.7p3：取货完成 → 发私信拉珍珠
+            debugMsg("[取货] 背包已满，结束取货");
+            setTrioState(TrioState.SEND, "背包已满，取货结束");
             return;
         }
         if (containerOpen()) {
             if (takeFromContainer()) return;
+            debugMsg("[取货] 这个箱子取完了，拉黑并找下一个");
             closeScreen();
             blacklistChest(openChest);
             openChest = null;
+            trapdoorClickAttempts = 0;
+            cooldown = PACE_STEP;
             return;
         }
         BlockPos chest = nextLootChest();
@@ -1224,7 +1284,8 @@ public class StashMover extends Module {
             if (!hasItemsToUnload()) {
                 if (unloadedSomething) StashStats.get().addTrip();
                 unloadedSomething = false;
-                trioState = TrioState.SEND;   // V6.7p3：存货完成 → 发私信拉珍珠
+                debugMsg("[存货] 没有可卸物品，结束存货");
+                setTrioState(TrioState.SEND, "存货完成");
                 return;
             }
             if (!(mc.world.getBlockState(store).getBlock() instanceof ChestBlock)) {
@@ -1245,7 +1306,8 @@ public class StashMover extends Module {
             closeScreen();
             if (unloadedSomething) StashStats.get().addTrip();
             unloadedSomething = false;
-            trioState = TrioState.SEND;   // V6.7p3：存货完成 → 发私信拉珍珠
+            debugMsg("[存货] 背包里没有可卸的物品了");
+            setTrioState(TrioState.SEND, "存货完成");
             return;
         }
         unloadedSomething = true;
@@ -1260,7 +1322,9 @@ public class StashMover extends Module {
         int target = Math.max(restockTarget.get(), restockThreshold.get());
         int need = StashPearlLogic.missingToTarget(have, restockThreshold.get(), target);
         if (need == 0) {
-            trioState = TrioState.THROW;
+            debugMsg("[补珍珠] 珍珠 " + have + " 颗已够（阈值 " + restockThreshold.get() + "），不用补");
+            setTrioState(TrioState.THROW, "珍珠数量已够");
+            cooldown = PACE_RESTOCK_DONE;
             return;
         }
         // V6.7p4：取消 64 格距离闸——珍珠不够就寻路过去补（走不过去由看门狗报警）
@@ -1285,6 +1349,8 @@ public class StashMover extends Module {
             restockStepsLeft = need;
             restockChestSlot = findPearlSlotInContainer();
             restockInvSlot = findPearlSlotInInventory();
+            debugMsg("[补珍珠] 开始补货：差 " + need + " 颗，箱内槽位=" + restockChestSlot
+                + " 背包槽位=" + restockInvSlot);
             if (restockChestSlot < 0) {
                 // V6.7p4：诊断 + 空读重试（排除槽位同步延迟 / 开错容器）
                 var handler = containerHandler();
@@ -1302,7 +1368,8 @@ public class StashMover extends Module {
                 restockRetries = 0;
                 if (have > 0) {
                     info("珍珠箱里没有珍珠了，先用剩余 " + have + " 颗");
-                    trioState = TrioState.THROW;
+                    setTrioState(TrioState.THROW, "珍珠箱空了，用剩余珍珠");
+                    cooldown = PACE_RESTOCK_DONE;
                 } else {
                     enterStuck("珍珠箱里没有珍珠");
                 }
@@ -1331,8 +1398,16 @@ public class StashMover extends Module {
             // 余量放回箱子原槽
             clickSlot(restockChestSlot, SlotActionType.PICKUP);
             closeScreen();
-            trioState = TrioState.THROW;
+            debugMsg("[补珍珠] 补货完成，现在有 " + countPearls() + " 颗");
+            setTrioState(TrioState.THROW, "补货完成");
+            cooldown = PACE_RESTOCK_DONE;
         }
+    }
+
+    /** 当前所在区的中文名（提示消息里不要出现 SOURCE / STORE 这种英文枚举名）。 */
+    private String zoneName() {
+        return trioZone == StashMoveLogic.Zone.SOURCE ? "待搬运箱区"
+            : trioZone == StashMoveLogic.Zone.STORE ? "存储箱区" : "未知区域";
     }
 
     /** 当前所在区的活板门坐标。 */
@@ -1341,18 +1416,36 @@ public class StashMover extends Module {
     }
 
     /**
+     * 每 tick 把视角转向本区气泡柱（V6.7p7，用户口径「全程都要转头」）。
+     *
+     * <p>用 Meteor 的 {@link Rotations}，第一人称真的会转（miku 的 RotationManager 只改第三人称身体朝向，
+     * 6.7p5 已踩过这个坑）。优先级给 5：低于开箱/点活板门的 60，不会被它们覆盖。
+     */
+    private void faceColumn() {
+        if (mc.player == null) return;
+        BlockPos td = trioTrapdoor();
+        if (td == null || td.equals(BlockPos.ORIGIN)) return;
+        Vec3d c = Vec3d.ofCenter(td.down(1));
+        float[] yp = FacingLogic.yawPitchTo(c.x, c.y, c.z,
+            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
+        Rotations.rotate(yp[0], yp[1], 5);
+    }
+
+    /**
      * ① 校正站位（V6.7p3，用户口径）：被拉过来后先走离气泡柱/活板门，
      * 站到最近的实心安全格，确认没踩在水柱或活板门上。
      */
     private void trioSettle() {
         BlockPos stand = trioTrapdoor();
-        if (stand.equals(BlockPos.ORIGIN)) {
-            enterStuck("请先设置" + trioZone + "的活板门位置");
+        if (stand == null || stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置" + zoneName() + "的活板门位置");
             return;
         }
+        faceColumn();
         if (settlePosition(stand)) {
-            trioState = TrioState.RESTOCK;
-            cooldown = 5;
+            debugMsg("[脱离] 已站稳在 " + mc.player.getBlockPos().toShortString() + "，确认没踩水柱/活板门");
+            setTrioState(TrioState.RESTOCK, "已脱离气泡柱");
+            cooldown = PACE_SETTLE_DONE;
         }
     }
 
@@ -1439,50 +1532,82 @@ public class StashMover extends Module {
     }
 
     /**
-     * 投掷子流程（V6.7p3）：检珍珠 → 校正站位 → 开活板门 → 潜行走近 → 投掷 → 退回 → 校验（失败重试 3 次）。
+     * 投掷子流程（V6.7p3 建立，V6.7p7 按用户口径重排节奏）：
+     * 检珍珠 → 校正站位 → <b>确认脱离</b> → <b>开活板门（大部分时候是关的，必须自己点开并确认）</b>
+     * → 按住 Shift 走近 → 投掷 → 退回安全格 → 校验（失败重试 3 次）。
+     *
+     * <p>V6.7p7 改动：每个子步骤之间留 6 tick（原来 2 tick）、点完活板门等 14 tick 让服务端同步方块状态、
+     * 校验超时 60 → 80 tick；每 tick 都调用 {@link #faceColumn()} 把视角锁在气泡柱上（全程转头）。
      */
     private void trioThrow() {
         BlockPos stand = trioTrapdoor();
-        if (stand.equals(BlockPos.ORIGIN)) {
-            enterStuck("请先设置" + trioZone + "的活板门位置");
+        if (stand == null || stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置" + zoneName() + "的活板门位置");
             return;
         }
         BlockPos water = stand.down(1);
 
+        // 每 tick 都把视角对准气泡柱（用户口径：全程都要转头）。
+        // 唯独「正在投掷」这一 tick 不叠加：doThrowPearl 会以更高优先级登记精确瞄准，
+        // 这里再压一条低优先级旋转会把镜头拽回柱心，干扰投掷视角。
+        if (throwSub != 4) faceColumn();
+
         switch (throwSub) {
             case 0 -> {
                 if (ownPearlInColumn(water)) {
-                    debugMsg("气泡柱里已有自己的珍珠，跳过投掷");
+                    debugMsg("[投掷] 气泡柱里已有自己的珍珠，跳过投掷");
                     finishTrioThrow();
                     return;
                 }
                 throwRetries = 0;
-                throwSub = 1;
+                setThrowSub(1, "柱里没珍珠，准备投一颗");
             }
             case 1 -> {
-                if (settlePosition(stand)) throwSub = 2;
+                if (settlePosition(stand)) {
+                    debugMsg("[投掷] 站位已确认：" + mc.player.getBlockPos().toShortString());
+                    setThrowSub(2, "脱离完成，开始检查活板门");
+                    cooldown = PACE_STEP;
+                }
             }
             case 2 -> {
                 if (trapdoorIsOpenOrAbsent(stand)) {
-                    throwSub = 3;
+                    if (trapdoorClickAttempts > 0) {
+                        debugMsg("[活板门] 已确认打开（点了 " + trapdoorClickAttempts + " 次）");
+                    }
+                    trapdoorClickAttempts = 0;
+                    setThrowSub(3, "活板门已开，开始潜行走近");
                     walkTicks = 0;
                     stallTicks = 0;
                     lastWalkX = mc.player.getX();
                     lastWalkZ = mc.player.getZ();
-                } else {
-                    BlockClicker.clickBlockFacingPlayer(stand, true, Hand.MAIN_HAND);
-                    cooldown = 10;
+                    cooldown = PACE_STEP;
+                    return;
                 }
+                // 关着 → 必须先自己打开（用户口径：大部分时间都是关的）
+                if (trapdoorClickAttempts >= 8) {
+                    enterStuck("连续 8 次都打不开活板门 " + stand.toShortString()
+                        + "（眼睛距=" + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(Vec3d.ofCenter(stand)))
+                        + "，请手动确认这个坐标是不是活板门、有没有被方块挡住）");
+                    return;
+                }
+                if (!approachForOpen(stand)) {
+                    debugMsg("[活板门] 离得还远，先走近");
+                    return;
+                }
+                trapdoorClickAttempts++;
+                debugMsg("[活板门] 关着 → 点击打开（第 " + trapdoorClickAttempts + " 次）");
+                BlockClicker.clickBlockFacingPlayer(stand, true, Hand.MAIN_HAND);
+                cooldown = PACE_TRAPDOOR_CLICK;
             }
             case 3 -> {
                 int r = walkToColumnCenter(stand);
                 if (r == 1) {
-                    throwSub = 4;
-                    cooldown = 2;
+                    setThrowSub(4, "已走到柱边");
+                    cooldown = PACE_STEP;
                 } else if (r == 2) {
-                    debugMsg("走近时踩进气泡柱，先退开再重试");
-                    throwSub = 5;
-                    cooldown = 2;
+                    debugMsg("[走近] 踩进气泡柱了，先退开再重试");
+                    setThrowSub(5, "走近时踩进水里");
+                    cooldown = PACE_STEP;
                 }
             }
             case 4 -> {
@@ -1491,35 +1616,38 @@ public class StashMover extends Module {
                     int inv = findPearlIndexMainInventory();
                     if (inv >= 0) {
                         InvUtils.move().from(inv).toHotbar(mc.player.getInventory().getSelectedSlot());
-                        cooldown = 5;
+                        cooldown = PACE_STEP;
                         return;
                     }
                     enterStuck("快捷栏里没有末影珍珠");
                     return;
                 }
                 sneakForThrow();
+                debugMsg("[投掷] 按住 Shift 投出（快捷栏槽位 " + slot + "）");
                 doThrowPearl(slot, Vec3d.ofCenter(water));
-                throwSub = 5;
-                cooldown = 5;
+                setThrowSub(5, "已投出，准备后退");
+                cooldown = PACE_STEP;
             }
             case 5 -> {
                 if (backOffToSafe()) {
-                    throwSub = 6;
+                    setThrowSub(6, "已退到安全距离");
                     verifyStartTick = tick;
+                    cooldown = PACE_STEP;
                 }
             }
             case 6 -> {
                 if (ownPearlInColumn(water)) {
                     lastPearlThrowTick = tick;
+                    debugMsg("[校验] 气泡柱里已有自己的珍珠，投掷成功");
                     finishTrioThrow();
-                } else if (tick - verifyStartTick > 60) {
+                } else if (tick - verifyStartTick > 80) {
                     throwRetries++;
                     if (throwRetries >= 3) {
                         enterStuck("投掷珍珠 3 次失败（气泡柱里没有检测到自己的珍珠）");
                     } else {
-                        debugMsg("投掷校验失败，第 " + throwRetries + " 次重试");
-                        throwSub = 2;
-                        cooldown = 10;
+                        debugMsg("[校验] 柱里没珍珠，第 " + throwRetries + " 次重试");
+                        setThrowSub(2, "校验失败，重开活板门重投");
+                        cooldown = PACE_STEP;
                     }
                 }
             }
@@ -1532,8 +1660,11 @@ public class StashMover extends Module {
         releaseForward();
         throwSub = 0;
         throwRetries = 0;
-        trioState = trioZone == StashMoveLogic.Zone.STORE ? TrioState.UNLOAD : TrioState.LOOT;
-        cooldown = 5;
+        trapdoorClickAttempts = 0;
+        boolean toStore = trioZone == StashMoveLogic.Zone.STORE;
+        setTrioState(toStore ? TrioState.UNLOAD : TrioState.LOOT,
+            toStore ? "回程票已就位，开始存货" : "回程票已就位，开始取货");
+        cooldown = PACE_THROW_DONE;
         progress();
     }
 
@@ -1547,15 +1678,20 @@ public class StashMover extends Module {
     /**
      * ③ 按住 shift + pitch 90，朝气泡柱中心按前进键，直到走不动。
      *
-     * <p>停滞判定：连续 3 tick 水平位移 &lt; 0.05 格；另加 30 tick 上限保护。
+     * <p>停滞判定：连续 3 tick 水平位移 &lt; 0.05 格；另加 60 tick 上限保护。
+     * V6.7p7：点按节奏从「每 3 tick 走 1 tick」放到「每 4 tick 走 1 tick」，上限 45 → 60 tick
+     * （用户口径：不要那么紧凑，一步一步来）；同时把视角锁在柱心（第一人称真的转头）。
      *
-     * @return true = 已经到边缘/走不动，可以投掷
+     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退
      */
     private int walkToColumnCenter(BlockPos trapdoorPos) {
         sneakForThrow();
         Vec3d center = Vec3d.ofCenter(trapdoorPos.down(1));
-        mc.player.setYaw((float) (Math.toDegrees(Math.atan2(center.z - mc.player.getZ(), center.x - mc.player.getX())) - 90.0));
+        float yaw = (float) (Math.toDegrees(Math.atan2(center.z - mc.player.getZ(), center.x - mc.player.getX())) - 90.0);
+        // setYaw 决定「前进键往哪走」（服务端视角由下面的 Rotations 负责）
+        mc.player.setYaw(yaw);
         mc.player.setPitch(90f);
+        Rotations.rotate(yaw, 90f, 5);
 
         // 踩进气泡柱了：立刻停手，交给后退阶段（V6.7p4）
         if (mc.player.isTouchingWater()) {
@@ -1564,8 +1700,8 @@ public class StashMover extends Module {
             return 2;
         }
 
-        // 慢速点按：每 3 tick 只按 1 tick，走一小步就重新判定（原来每 tick 按住容易冲过头）
-        walkPhase = (walkPhase + 1) % 3;
+        // 慢速点按：每 4 tick 只按 1 tick，走一小步就重新判定（原来每 tick 按住容易冲过头）
+        walkPhase = (walkPhase + 1) % 4;
         boolean press = walkPhase == 0;
         mc.options.forwardKey.setPressed(press);
         forwardHeld = press;
@@ -1580,7 +1716,7 @@ public class StashMover extends Module {
         }
         stallTicks = stalled ? stallTicks + 1 : 1;
 
-        if (stallTicks >= 3 || walkTicks >= 45) {
+        if (stallTicks >= 3 || walkTicks >= 60) {
             mc.options.forwardKey.setPressed(false);
             forwardHeld = false;
             walkTicks = 0;
@@ -1629,9 +1765,9 @@ public class StashMover extends Module {
         // V6.7p4：发私信前再确认一次本区珍珠还在（被踩掉就不要发，回去重投）
         if (!ownPearlInColumn(trioTrapdoor().down(1))) {
             info("发私信前发现本区珍珠不在了，回去重投");
-            throwSub = 0;
+            setThrowSub(0, "珍珠不在了");
             throwRetries = 0;
-            trioState = TrioState.THROW;
+            setTrioState(TrioState.THROW, "发私信前发现珍珠没了");
             return;
         }
         String target = trioZone == StashMoveLogic.Zone.SOURCE ? peerStore.get().trim() : peerSource.get().trim();
@@ -1639,9 +1775,10 @@ public class StashMover extends Module {
             enterStuck(trioZone == StashMoveLogic.Zone.SOURCE ? "请填写 3号ID（存储箱端）" : "请填写 2号ID（待搬运箱端）");
             return;
         }
+        debugMsg("[私信] 向 " + target + " 发「拉我」");
         sendPullRequest(target);
         teleportWaitStart = tick;
-        trioState = TrioState.WAIT_TELEPORT;
+        setTrioState(TrioState.WAIT_TELEPORT, "已发拉我，等待被拉走");
     }
 
     private void trioWaitTeleport() {
@@ -1654,8 +1791,14 @@ public class StashMover extends Module {
             queueIndex = 0;
             throwSub = 0;
             throwRetries = 0;
-            trioState = TrioState.SETTLE;   // V6.7p3：到位后先走离气泡柱再干活
-            info("已到达" + trioZone);
+            trapdoorClickAttempts = 0;
+            throwSafeSpot = null;
+            // V6.7p7：先停 2 秒等区块加载，再开始脱离（用户口径：以前一落地就动手，判断全是错的）
+            arriveWaitStart = tick;
+            setTrioState(TrioState.ARRIVE_WAIT, "已到达" + zoneName());
+            releaseMovementKeys();
+            PathManagers.get().stop();
+            info("已到达" + zoneName() + "，等 2 秒让区块加载");
             progress();
             return;
         }
@@ -1884,8 +2027,9 @@ public class StashMover extends Module {
     /**
      * 朝指定点投一颗珍珠（用户口径：站着别踩气泡柱，视线看向气泡柱中心投，投完按 S 后退）。
      *
-     * <p>视角必须“服务端已看到”才算数：用 miku 的 RotationManager 先发带目标 yaw/pitch 的完整包，
-     * 再发交互包，最后 sync 回真实朝向（顺序：视角包 → 交互包 → 归位包）。
+     * <p>视角必须“服务端已看到”才算数。V6.7p7 起改用 Meteor 的 {@link Rotations}：
+     * 先让这一 tick 的移动包带上目标朝向，回调里再发交互包（顺序：移动包带朝向 → 交互包），
+     * 并且第一人称真的会把头转过去（miku 的 RotationManager 只改第三人称身体，6.7p5 已确认）。
      */
     private void doThrowPearl(int hotbarSlot, Vec3d aim) {
         closeScreen();
@@ -1900,13 +2044,13 @@ public class StashMover extends Module {
             yp = FacingLogic.yawPitchTo(aim.x, aim.y, aim.z,
                 mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
         }
-        RotationManager.getInstance().register(new Rotation(yp[0], yp[1]).setPriority(10));
+        // V6.7p7：改用 Meteor 的 Rotations（第一人称真的转头，见 6.7p5 的教训）；
+        // 回调里再发交互包——保证顺序是「移动包带目标朝向 → 服务端看到朝向 → 才收到投掷」。
         mc.player.setYaw(yp[0]);
         mc.player.setPitch(yp[1]);
+        Rotations.rotate(yp[0], yp[1], 60,
+            () -> mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND));
 
-        mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-
-        RotationManager.getInstance().sync();
         releaseSneak();
         backoffTicks = 60;   // 投完按 S 后退（实际按“离柱心 ≥2.5 格”提前停，60 只是上限）
         cooldown = 3;
@@ -2289,6 +2433,16 @@ public class StashMover extends Module {
 
     private void openChestAt(BlockPos pos) {
         if (pos == null) return;
+        // ⚠️ V6.7p7 修复：换目标必须重新计数。
+        // 原来 openAttempts 只在「容器真的打开」时归零，换到下一个箱子仍继续累加；
+        // 连着几个箱子各点两三次没开（比如站位略偏），凑够 8 次就误报
+        // 「连续 8 次都打不开箱子」并永久暂停 —— 这就是用户说的「有时候不会打开箱子」。
+        if (!pos.equals(openChest)) {
+            openAttempts = 0;
+            if (debug.get()) {
+                info("[开箱] 换目标 → " + pos.toShortString() + "，失败计数归零");
+            }
+        }
         openChest = pos;
         // 保险：调用方已经判过距离，这里再兜一次，避免别处漏判后隔空点击
         if (!approachForOpen(pos)) return;
@@ -2297,6 +2451,10 @@ public class StashMover extends Module {
             return;
         }
         openAttempts++;
+        Vec3d center = Vec3d.ofCenter(pos);
+        debugMsg("[开箱] 点击 " + pos.toShortString() + " 第 " + openAttempts + " 次"
+            + "（眼睛距 " + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(center))
+            + " / 阈值 " + OPEN_REACH + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
         BlockClicker.clickBlockFacingPlayer(pos, true, Hand.MAIN_HAND);
         cooldown = 15;
         progress();
@@ -2448,11 +2606,86 @@ public class StashMover extends Module {
         if (debug.get()) info(msg);
     }
 
+    // ==================== 三号模式调试（V6.7p7 重做） ====================
+    //
+    // 用户反馈：打开「调试输出」后看不出卡在哪一步。原来的输出只有零星几条，
+    // 状态切换完全没记录。现在改成「状态/子步骤一变就打印 + 每 2 秒一条心跳摘要」，
+    // 出问题时把聊天栏截图发过来就能直接定位到「哪个状态、哪个子步骤、什么数值」。
+
+    /** 三号模式状态切换（只在变化时打印，避免刷屏）。 */
+    private void setTrioState(TrioState next, String why) {
+        if (trioState == next) return;
+        TrioState prev = trioState;
+        trioState = next;
+        if (debug.get()) {
+            info("[三号][状态] " + prev + " → " + next + (why == null || why.isEmpty() ? "" : "（" + why + "）"));
+        }
+    }
+
+    /** 投掷子步骤切换（只在变化时打印）。 */
+    private void setThrowSub(int next, String why) {
+        if (throwSub == next) return;
+        int prev = throwSub;
+        throwSub = next;
+        if (debug.get()) {
+            info("[三号][投掷] 子步骤 " + prev + " → " + next + " " + THROW_SUB_NAMES[next]
+                + (why == null || why.isEmpty() ? "" : "（" + why + "）"));
+        }
+    }
+
+    private static final String[] THROW_SUB_NAMES = {
+        "开始/检珍珠", "校正站位", "开活板门", "潜行走近", "投掷", "退回安全格", "校验珍珠"
+    };
+
+    /**
+     * 每 2 秒打一条心跳摘要：区域 / 状态 / 子步骤 / 珍珠数 / 离柱心距离 / 活板门状态 / 是否在水里。
+     *
+     * <p>只在「调试输出」开启时打印；内容无变化时跳过，避免同一状态刷满屏。
+     */
+    private void trioHeartbeat() {
+        if (!debug.get()) return;
+        if (tick - lastHeartbeatTick < 40) return;
+        lastHeartbeatTick = tick;
+
+        BlockPos td = trioTrapdoor();
+        String zone = trioZone == StashMoveLogic.Zone.SOURCE ? "待搬运箱区"
+            : trioZone == StashMoveLogic.Zone.STORE ? "存储箱区" : "未知区";
+        String dist = "-";
+        String door = "-";
+        if (td != null && !td.equals(BlockPos.ORIGIN)) {
+            Vec3d c = Vec3d.ofCenter(td.down(1));
+            double d = Math.hypot(c.x - mc.player.getX(), c.z - mc.player.getZ());
+            dist = String.format(Locale.ROOT, "%.2f", d);
+            door = trapdoorIsOpenOrAbsent(td) ? "开" : "关";
+        }
+        String summary = zone + " 状态=" + trioState
+            + (trioState == TrioState.THROW ? "(子步骤" + throwSub + ":" + THROW_SUB_NAMES[Math.min(throwSub, 6)] + ")" : "")
+            + " 珍珠=" + countPearls()
+            + " 距柱心=" + dist
+            + " 活板门=" + door
+            + " 在水里=" + (mc.player.isTouchingWater() ? "是" : "否");
+
+        // 内容变了就打；内容没变则每 10 秒补一条「仍在…」，让人知道没死（也方便算卡了多久）
+        if (summary.equals(lastHeartbeatSummary)) {
+            if (tick - lastHeartbeatPrintTick < 200) return;
+            info("[三号][心跳] 仍在 " + summary);
+        } else {
+            info("[三号][心跳] " + summary);
+        }
+        lastHeartbeatSummary = summary;
+        lastHeartbeatPrintTick = tick;
+    }
+
     private void enterStuck(String reason) {
         stuckReason = reason;
         nextAlarmTick = tick;
-        if (mode.get() == Mode.TRIO) trioState = TrioState.STUCK;
-        else moverState = MoverState.STUCK;
+        if (mode.get() == Mode.TRIO) {
+            if (debug.get()) {
+                info("[卡住] 区域=" + zoneName() + " 状态=" + trioState + " 子步骤=" + throwSub
+                    + " 珍珠=" + countPearls() + " 原因：" + reason);
+            }
+            trioState = TrioState.STUCK;
+        } else moverState = MoverState.STUCK;
         releaseMovementKeys();
         PathManagers.get().stop();
         warning("自动搬运卡住：" + reason + "（已暂停，等手动处理）");

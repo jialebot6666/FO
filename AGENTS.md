@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p6`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p6-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p7`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p7-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -408,6 +408,37 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     脱困超时 60 → 120 tick；找不到格时先潜行后退 40 tick 兜底再报警；失败时把
     「玩家格/脚下方块/是否在水里/活板门开关状态/水格方块」打到调试输出。
   - 测试：全仓 **50 套件 405 测试全绿**（本次无新增纯逻辑，均为 Minecraft 世界相关判定）。
+- ✅ 6.7p7 已修复：**三号模式到达后不等、节奏太赶、全程不转头 + 调试输出看不到东西**（用户实机反馈）。
+  - ① **到达先等 2 秒**（根因：用户从 6.7 建模块起就反馈「被拉回来直接就开始开活板门/脱离」）。
+    新增状态 `TrioState.ARRIVE_WAIT`（插在 SETTLE 之前）：`trioWaitTeleport` 检测到传送后不再直接进 SETTLE，
+    而是先记 `arriveWaitStart`，40 tick（2 秒）内只做「松键 + 停寻路」，什么都不判断。
+    原因写清楚：刚落地时区块还没同步，脚下方块可能还是空气，此时判「站没站稳/活板门开没开」必然全错。
+  - ② **节奏整体放宽**（用户口径「一步一步来，不要那么紧凑」）：新增节奏常量
+    `PACE_SETTLE_DONE=10` / `PACE_STEP=6`（投掷子步骤，原 2）/ `PACE_TRAPDOOR_CLICK=14`（等方块状态同步）/
+    `PACE_THROW_DONE=10` / `PACE_RESTOCK_DONE=10`；走近点按 `%3 → %4`、上限 `45 → 60` tick、
+    投掷校验超时 `60 → 80` tick。
+  - ③ **全程转头**：新增 `faceColumn()`，每 tick 用 Meteor 的 `Rotations.rotate(yaw, pitch, 5)` 把视角
+    锁在本区气泡柱上（SETTLE / THROW 全流程）。⚠️ `throwSub==4`（正在投掷）那一 tick **跳过**，
+    否则低优先级旋转会盖掉 `doThrowPearl` 的高优先级瞄准。
+    `doThrowPearl` 也从 miku 的 `RotationManager` 换成 `Rotations.rotate(..., 60, callback)`，
+    回调里再发交互包（顺序：移动包带朝向 → 交互包），与 6.7p5 修 `BlockClicker` 的思路一致。
+  - ④ **活板门做成显式可确认的一步**：关着就点（用户口径：大部分时间都是关的），点完等 14 tick 再看结果，
+    连续 8 次打不开才报警，报警文案带「眼睛距」便于判断是不是坐标填错/被方块挡住。
+  - ⑤ **调试输出重做**（用户要求，下次实机测试要开）：
+    - `setTrioState()` / `setThrowSub()` 两个包装器接管所有状态与子步骤切换，
+      **一变就打印**（`[三号][状态] A → B（原因）`、`[三号][投掷] 子步骤 2 → 3 开活板门（原因）`）。
+    - `trioHeartbeat()`：每 2 秒一条摘要（区域/状态/子步骤/珍珠数/距柱心/活板门开关/是否在水里），
+      内容不变则每 10 秒补一条「仍在…」，既能看到进度又不会刷屏。
+    - `enterStuck()` 增加一行现场快照（区域/状态/子步骤/珍珠数/原因）。
+    - `openChestAt()` 每次点击打印目标、第几次、眼睛距（对比 `OPEN_REACH=3.5`）、当前界面类型。
+  - ⑥ **修「有时候不会打开箱子」的一个真实 bug**：`openAttempts`（连点失败计数）原来**只在容器真的打开时**
+    才归零，换到下一个箱子仍继续累加 —— 连着几个箱子各点两三次没开就凑够 8 次，误报
+    「连续 8 次都打不开箱子」并永久暂停，表现正是「有时候不给我开箱」。现在**换目标即归零**
+    （`if (!pos.equals(openChest)) openAttempts = 0`）。
+  - ⑦ 顺手修 UI 文案：提示里的 `请先设置SOURCE/STORE的活板门位置` 是英文枚举名，改走 `zoneName()`（中文）。
+  - 测试：全仓 **50 套件 405 测试全绿**（本次改动全是 Minecraft 客户端时序/世界耦合路径，
+    无新增纯逻辑；断言未变，故测试数不变）。
+  - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
 
 ## 硬性规范（每次改动必须执行）
 1. **每次改动完成后，都必须创建一个对应的 Git commit**，以便后续追踪和回滚。
