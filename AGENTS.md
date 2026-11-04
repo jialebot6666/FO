@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p5`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p5-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p6`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p6-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -231,6 +231,11 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p6 已完成：**删除长按自动接管（bugfix）**。6.8p5 的"按住攻击键自动接管"存在按键状态卡死漏洞——
+    按住左键时打开设置界面再松开，松键事件被界面吞掉，`attackKey.isPressed()` 永远为 true，
+    模块不点击也自动挖掘（用户实测触发）。删除该逻辑，恢复纯点击接管；DoAttackEvent 从无条件
+    cancel 改回仅有效目标 cancel（否则普通方块挖不动）。⚠️ 若未来重做"长按挖掘"，必须加：
+    屏幕打开守卫 + 松键守卫，且默认关闭。
   - ✅ 6.8p5 已完成：**长按持续发包 + 全中文界面 + 假破块**（用户反馈三项）：
     - 长按：按住攻击键时空闲即接管准星方块（对齐上游按住=连续发包挖掘），会话期间每 tick
       `cancelBlockBreaking()` 压制原版挖掘，不会回落到原版手动破坏；DoAttackEvent 改为

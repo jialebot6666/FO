@@ -275,12 +275,11 @@ public class FOPacketMine extends Module {
             || mc.crosshairTarget.getType() != HitResult.Type.BLOCK) return;
 
         BlockPos pos = hit.getBlockPos();
+        if (!isValidTarget(pos)) return;
 
-        // 对齐上游 onAttackBlock：Packet 模式下 event.aim() 无条件调用——
-        // 有效目标进发包队列，无效目标交给原版长按挖掘路径
+        // 只接管有效目标：无效目标放行原版挖掘（否则普通方块完全挖不动）
         event.cancel();
 
-        if (!isValidTarget(pos)) return;
         if (pos.equals(current)) return; // 已经在挖这格
         startSession(pos, hit.getSide());
     }
@@ -304,17 +303,9 @@ public class FOPacketMine extends Module {
         if (pauseOnFlying.get() && mc.player.getAbilities().flying) return;
         if (pauseInFluid.get() && mc.player.isTouchingWater()) return;
 
-        // 长按持续发包挖掘（对齐上游：按住攻击键时空闲即接管准星方块，
-        // 原版破坏被客户端压制，全程不会回落到原版手动挖掘）
-        if (current == null && mc.options.attackKey.isPressed()) {
-            if (mc.crosshairTarget instanceof BlockHitResult hit
-                && mc.crosshairTarget.getType() == HitResult.Type.BLOCK
-                && isValidTarget(hit.getBlockPos())) {
-                startSession(hit.getBlockPos(), hit.getSide());
-            }
-        }
-
         // 会话期间每 tick 清零原版挖掘进度：原版破坏由发包接管
+        // （6.8p6：删除 6.8p5 的"按住攻击键自动接管"——存在按键状态卡死漏洞，
+        //   打开界面后松键事件被吞，导致不点击也自动挖掘）
         if (current != null && mc.interactionManager != null) {
             mc.interactionManager.cancelBlockBreaking();
         }
