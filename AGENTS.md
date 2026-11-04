@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.9p0`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p0-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p7`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p7-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -231,7 +231,8 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
-  - ✅ 6.9p0 已完成：**SpeedMine 全量移植**（用户要求"全部移植包括渲染"）：
+  - ✅ 6.8p7 已完成：**SpeedMine 全量移植**（用户要求"全部移植包括渲染"；版本号按用户明确要求
+    沿用 6.8 系递进，不擅自升大版本）：
     - 渲染全套：盒子动画（随进度向中心收缩）+ 28 种中文缓动曲线枚举（utils/Easing，数学对齐上游）
       + 方块真实轮廓贴合 + tickDelta 帧间平滑。
     - 双会话 Multitask：主会话（左键/API 请求）+ DoubleBreak 镜像会话（1.0 速度第二进度线）；
