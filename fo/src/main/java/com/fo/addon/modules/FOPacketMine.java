@@ -64,7 +64,8 @@ import java.util.List;
  *
  * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
  * 仅黑名单（火/重生锚）、不挥手（Swing=None）、StartRotate/EndRotate 关、Grim=NewDisabler、
- * DoubleBreak=true、RetryTicks=10、InstantMine=true、Notify 开（聊天提示）、
+ * DoubleBreak=true、RetryTicks=10、InstantMine=true、Desync=SetAir（假破块）、
+ * Notify 开（聊天提示）、
  * OnlyOnGround/PauseOnFlying/PauseInFluid 全关、渲染色实战 hex。</p>
  *
  * <p>刻意不移植（依赖上游私有体系）：Hold/HoldTicks 换持握回切（本模块自动切换后全程持工具，
@@ -108,6 +109,11 @@ public class FOPacketMine extends Module {
         .defaultValue(true).build()
     );
 
+    private final Setting<DesyncMode> desync = sgGeneral.add(new EnumSetting.Builder<DesyncMode>()
+        .name("假破块").description("发破坏包后客户端本地立即移除方块，视觉上瞬间消失（上游 Desync=SetAir，实战开启）")
+        .defaultValue(DesyncMode.客户端清除).build()
+    );
+
     private final Setting<Keybind> pauseKey = sgGeneral.add(new KeybindSetting.Builder()
         .name("暂停键").description("按住时暂停发包挖掘（不丢当前目标）")
         .defaultValue(Keybind.none()).build()
@@ -143,8 +149,8 @@ public class FOPacketMine extends Module {
     // Grim 绕过（3C3U 实战核心）
 
     private final Setting<GrimMode> grimMode = sgGeneral.add(new EnumSetting.Builder<GrimMode>()
-        .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。实战 NewDisabler")
-        .defaultValue(GrimMode.NewDisabler).build()
+        .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。新版绕过=实战 NewDisabler，旧版绕过=Disabler")
+        .defaultValue(GrimMode.新版绕过).build()
     );
 
     private final Setting<Boolean> doubleBreak = sgGeneral.add(new BoolSetting.Builder()
@@ -186,9 +192,9 @@ public class FOPacketMine extends Module {
         .defaultValue(true).build()
     );
 
-    private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("形状模式").description("线框/填充方式（BoxMode）")
-        .defaultValue(ShapeMode.Both).build()
+    private final Setting<BoxMode> boxMode = sgRender.add(new EnumSetting.Builder<BoxMode>()
+        .name("形状模式").description("线框/填充方式（上游 BoxMode，实战 Both）")
+        .defaultValue(BoxMode.全部).build()
     );
 
     private final Setting<SettingColor> startColor = sgRender.add(new meteordevelopment.meteorclient.settings.ColorSetting.Builder()
@@ -269,11 +275,12 @@ public class FOPacketMine extends Module {
             || mc.crosshairTarget.getType() != HitResult.Type.BLOCK) return;
 
         BlockPos pos = hit.getBlockPos();
-        if (!isValidTarget(pos)) return;
 
-        // 接管：不让原版开始真挖掘
+        // 对齐上游 onAttackBlock：Packet 模式下 event.aim() 无条件调用——
+        // 有效目标进发包队列，无效目标交给原版长按挖掘路径
         event.cancel();
 
+        if (!isValidTarget(pos)) return;
         if (pos.equals(current)) return; // 已经在挖这格
         startSession(pos, hit.getSide());
     }
@@ -297,6 +304,21 @@ public class FOPacketMine extends Module {
         if (pauseOnFlying.get() && mc.player.getAbilities().flying) return;
         if (pauseInFluid.get() && mc.player.isTouchingWater()) return;
 
+        // 长按持续发包挖掘（对齐上游：按住攻击键时空闲即接管准星方块，
+        // 原版破坏被客户端压制，全程不会回落到原版手动挖掘）
+        if (current == null && mc.options.attackKey.isPressed()) {
+            if (mc.crosshairTarget instanceof BlockHitResult hit
+                && mc.crosshairTarget.getType() == HitResult.Type.BLOCK
+                && isValidTarget(hit.getBlockPos())) {
+                startSession(hit.getBlockPos(), hit.getSide());
+            }
+        }
+
+        // 会话期间每 tick 清零原版挖掘进度：原版破坏由发包接管
+        if (current != null && mc.interactionManager != null) {
+            mc.interactionManager.cancelBlockBreaking();
+        }
+
         if (current == null) return;
 
         BlockState state = mc.world.getBlockState(current);
@@ -308,7 +330,7 @@ public class FOPacketMine extends Module {
                 return;
             }
             // 会话冷却（上游 alP()：NewDisabler/时间校验模式下 280ms 内不开新会话）
-            if (grimMode.get() != GrimMode.无 && grimMode.get() != GrimMode.Disabler
+            if (grimMode.get() != GrimMode.无 && grimMode.get() != GrimMode.旧版绕过
                 && SpeedMineLogic.inSessionCooldown(System.currentTimeMillis(), lastStopTime, SESSION_COOLDOWN_MS)) {
                 return;
             }
@@ -389,13 +411,13 @@ public class FOPacketMine extends Module {
     private void sendStartPackets() {
         Direction dir = currentDir;
 
-        if (grimMode.get() == GrimMode.Disabler) {
+        if (grimMode.get() == GrimMode.旧版绕过) {
             sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, dir);
         }
         sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, current, dir);
         startTime = System.currentTimeMillis();
 
-        if (grimMode.get() == GrimMode.NewDisabler) {
+        if (grimMode.get() == GrimMode.新版绕过) {
             // 伪造包：把服务端/Grim 的挖掘位置追踪重指向不存在的方块（上游 xE）
             sendDig(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, new BlockPos(0, -999, 0), Direction.UP);
         }
@@ -411,7 +433,11 @@ public class FOPacketMine extends Module {
     private void sendBreakPacket() {
         sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, current, currentDir);
         if (swing.get()) mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-        if (notify.get()) info("发包挖掘：已破坏 (px, %d, %d, %d)", current.getX(), current.getY(), current.getZ());
+        // 假破块（上游 Desync=SetAir）：客户端本地立即移除，视觉瞬间消失
+        if (desync.get() == DesyncMode.客户端清除) {
+            mc.world.removeBlock(current, false);
+        }
+        if (notify.get()) info("发包挖掘：已破坏 %d %d %d", current.getX(), current.getY(), current.getZ());
         mc.interactionManager.cancelBlockBreaking();
         breakSent = true;
         waitTicks = 0;
@@ -495,15 +521,33 @@ public class FOPacketMine extends Module {
         SettingColor lineColor = new SettingColor(line[0], line[1], line[2], line[3]);
 
         Box box = new Box(current);
-        event.renderer.box(box, sideColor, lineColor, shapeMode.get(), blockOutline.get() ? 0 : -1);
+        event.renderer.box(box, sideColor, lineColor, boxMode.get().toShapeMode(), blockOutline.get() ? 0 : -1);
     }
 
     public enum FilterMode {
         全部, 仅黑名单, 仅白名单
     }
 
-    /** 上游 DisablerNewDisablerMode（Strict 与 Time 行为相同，合并为时间校验）。 */
+    /** 上游 BoxMode 的中文化（Meteor 的 ShapeMode 枚举值是英文，GUI 会露英文）。 */
+    public enum BoxMode {
+        全部, 仅线框, 仅填充;
+
+        public ShapeMode toShapeMode() {
+            return switch (this) {
+                case 全部 -> ShapeMode.Both;
+                case 仅线框 -> ShapeMode.Lines;
+                default -> ShapeMode.Sides;
+            };
+        }
+    }
+
+    /** 上游 NoneNormalMode 的中文化（Desync）。 */
+    public enum DesyncMode {
+        无, 客户端清除
+    }
+
+    /** 上游 DisablerNewDisablerMode（旧版绕过=Disabler、新版绕过=NewDisabler；Strict 与 Time 行为相同，合并为时间校验）。 */
     public enum GrimMode {
-        无, Disabler, NewDisabler, 时间校验
+        无, 旧版绕过, 新版绕过, 时间校验
     }
 }

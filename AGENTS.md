@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p4`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p4-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p5`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p5-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -231,6 +231,16 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p5 已完成：**长按持续发包 + 全中文界面 + 假破块**（用户反馈三项）：
+    - 长按：按住攻击键时空闲即接管准星方块（对齐上游按住=连续发包挖掘），会话期间每 tick
+      `cancelBlockBreaking()` 压制原版挖掘，不会回落到原版手动破坏；DoAttackEvent 改为
+      无条件 cancel（对齐上游 Packet 模式 aim() 无条件调用，无效目标交给原版长按路径）。
+    - 全中文：GrimMode 枚举值改 无/旧版绕过/新版绕过/时间校验（原 Disabler/NewDisabler 英文）；
+      形状模式改自建中文枚举 BoxMode（全部/仅线框/仅填充）映射 Meteor ShapeMode
+      （其 Both/Lines/Sides 是英文）；聊天提示去掉 "px" 英文残留。
+    - 新增「假破块」（上游 Desync=SetAir，实战开启）：发 STOP 后客户端本地 removeBlock，
+      方块视觉瞬间消失。Desync 由此从"刻意不移植"清单移除。
+    - 仍未移植：Hold/HoldTicks 换持回切、NoCollision、MineAir、EnderChest 按键、Multitask。
   - ✅ 6.8p4 已完成：**FOPacketMine 补全 Grim 绕过协议**（用户实测 3C3U 挖不掉——6.8p3
     只做了"进度到 0.7 发裸 STOP"，被 Grim fastbreak 拦截；通读上游 BlockPosBoxMultitask
     + BlockPosPlayerHelper 后把 Packet 模式的完整协议逐包移植）：
