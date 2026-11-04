@@ -13,7 +13,6 @@ import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
-import meteordevelopment.meteorclient.settings.BlockSetting;
 import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.entity.SortPriority;
@@ -46,10 +45,15 @@ import java.util.List;
  *   <li>Face：挖目标头顶的方块。</li>
  *   <li>Surround：挖目标脚下包的围城方块；「检查支撑」开启时只挖
  *       下面是黑曜石/基岩的邻位（对齐原版 {@code ary()} 的支撑判定）。</li>
- *   <li>白名单/黑名单/全部 三档过滤；默认黑名单蜘蛛网。</li>
+ *   <li>白名单/黑名单/全部 三档过滤，默认仅黑名单（3C3U 实战名单，见下）。</li>
  *   <li>好友同步：好友正在挖的方块跳过（原版 FriendSync，依赖的"谁在挖哪格"状态
  *       彗星端拿不到，移植版降级为不做——见「与原版差异」）。</li>
  * </ul></p>
+ *
+ * <p>默认参数对齐 3C3U 实战配置（cheng.json AutoMine 段实测值）：目标范围 6、挖掘范围 6、
+ * 仅黑名单模式（梯子/基岩/脚手架/火/蜘蛛网/15 色床/重生锚）、排序最近角度、
+ * 挖脚里+挖围城开、挖头顶关、聊天提示开。CheckSelf/FriendSync/Priority 为上游
+ * Multitask 体系专属，不适用本移植版（见下方差异说明）。</p>
  *
  * <p>与原版的刻意差异（反编译语义无法完全确认的部分，保守处理）：
  * <ul>
@@ -70,7 +74,7 @@ public class FOPacketMine extends Module {
 
     private final Setting<Double> targetRange = sgTarget.add(new DoubleSetting.Builder()
         .name("目标范围").description("搜索目标玩家的最大距离")
-        .defaultValue(8).min(1).sliderMax(16).build()
+        .defaultValue(6).min(1).sliderMax(16).build()
     );
 
     private final Setting<SortPriority> sortPriority = sgTarget.add(new EnumSetting.Builder<SortPriority>()
@@ -87,7 +91,7 @@ public class FOPacketMine extends Module {
 
     private final Setting<Double> mineRange = sgMine.add(new DoubleSetting.Builder()
         .name("挖掘范围").description("离目标方块超过该距离就不挖（原版 MineRange）")
-        .defaultValue(4.5).min(1).sliderMax(6).build()
+        .defaultValue(6).min(1).sliderMax(8).build()
     );
 
     private final Setting<Boolean> mineBurrow = sgMine.add(new BoolSetting.Builder()
@@ -127,19 +131,34 @@ public class FOPacketMine extends Module {
 
     private final Setting<FilterMode> filterMode = sgMine.add(new EnumSetting.Builder<FilterMode>()
         .name("过滤模式").description("目标方块的过滤规则")
-        .defaultValue(FilterMode.全部).build()
+        .defaultValue(FilterMode.仅黑名单).build()
     );
+
+    private final Setting<Boolean> notify = sgMine.add(new BoolSetting.Builder()
+        .name("聊天提示").description("锁定新目标时在聊天栏提示（对齐原版 Notify）")
+        .defaultValue(true).build()
+    );
+
+    /** 黑名单默认值：照搬 3C3U 实战配置（cheng.json AutoMine.Blacklist）。 */
+    private static final Block[] DEFAULT_BLACKLIST = {
+        Blocks.LADDER, Blocks.BEDROCK, Blocks.SCAFFOLDING, Blocks.FIRE, Blocks.COBWEB,
+        Blocks.ORANGE_BED, Blocks.MAGENTA_BED, Blocks.LIGHT_BLUE_BED, Blocks.YELLOW_BED,
+        Blocks.LIME_BED, Blocks.PINK_BED, Blocks.GRAY_BED, Blocks.LIGHT_GRAY_BED,
+        Blocks.CYAN_BED, Blocks.PURPLE_BED, Blocks.BLUE_BED, Blocks.BROWN_BED,
+        Blocks.GREEN_BED, Blocks.RED_BED, Blocks.BLACK_BED, Blocks.RESPAWN_ANCHOR
+    };
 
     private final Setting<List<Block>> blacklist = sgMine.add(new BlockListSetting.Builder()
         .name("黑名单").description("过滤模式下不挖的方块")
-        .defaultValue(Blocks.COBWEB)
+        .defaultValue(DEFAULT_BLACKLIST)
         .visible(() -> filterMode.get() != FilterMode.仅白名单)
         .build()
     );
 
+    /** 白名单默认值：照搬 3C3U 实战配置（cheng.json AutoMine.Whitelist）。 */
     private final Setting<List<Block>> whitelist = sgMine.add(new BlockListSetting.Builder()
         .name("白名单").description("过滤模式下只挖的方块")
-        .defaultValue(Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN, Blocks.ANCIENT_DEBRIS, Blocks.NETHERITE_BLOCK, Blocks.RESPAWN_ANCHOR, Blocks.ENDER_CHEST, Blocks.ENCHANTING_TABLE, Blocks.ANVIL, Blocks.BEACON)
+        .defaultValue(Blocks.OBSIDIAN, Blocks.ENDER_CHEST)
         .visible(() -> filterMode.get() == FilterMode.仅白名单)
         .build()
     );
@@ -176,6 +195,8 @@ public class FOPacketMine extends Module {
     private int packets;
     /** 重复发包计数器。 */
     private int resendTimer;
+    /** 上一次聊天提示过的目标名（避免每 tick 刷屏）。 */
+    private String lastNotifyName;
 
     public FOPacketMine() {
         super(AddonTemplate.CATEGORY, "FO 发包挖掘", "移植自 Hachimi V2 AutoMine：自动发包挖目标玩家的脚里(Burrow)/头顶(Face)/围城(Surround)方块。");
@@ -187,6 +208,7 @@ public class FOPacketMine extends Module {
         current = null;
         packets = 0;
         resendTimer = 0;
+        lastNotifyName = null;
     }
 
     @Override
@@ -212,6 +234,15 @@ public class FOPacketMine extends Module {
         if (ignoreCreative.get() && t.isCreative()) return;
         if (Friends.get().isFriend(t)) return;
         target = t;
+
+        // 锁定新目标时提示一次（对齐原版 Notify）
+        if (notify.get()) {
+            String name = t.getName().getString();
+            if (!name.equals(lastNotifyName)) {
+                info("发包挖掘目标: " + name);
+                lastNotifyName = name;
+            }
+        }
 
         // 收集候选方块
         List<BlockPos> candidates = collectCandidates(t);
