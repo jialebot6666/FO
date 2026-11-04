@@ -114,4 +114,34 @@ class SpeedMineLogicTest {
         // 超时（挖过头）：放行
         assertTrue(SpeedMineLogic.timeModeStopAllowed(1000, 1100, 25));
     }
+
+    // ── 静默换持选槽（6.8p8，上游 xw）──
+
+    @Test
+    void fastestScreenSlot_没有快于徒手的工具_返回负一() {
+        // 全是空手/杂项（速度 ≤1.0）：不换持
+        assertEquals(-1, SpeedMineLogic.fastestScreenSlot(java.util.List.of(1.0f, 1.0f, 0.8f)));
+        assertEquals(-1, SpeedMineLogic.fastestScreenSlot(java.util.List.of()));
+    }
+
+    @Test
+    void fastestScreenSlot_选最快的槽位() {
+        // playerScreenHandler 布局：0=合成结果 1~4=合成 5~8=盔甲 9~35=主背包 36~44=快捷栏 45=副手
+        // 挖黑曜石：快捷栏 40 号（下标 40）的钻石镐 8.0 最快
+        int best = SpeedMineLogic.fastestScreenSlot(
+            java.util.List.of(1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 2f, 1f, 1f, 8f));
+        assertEquals(12, best);
+    }
+
+    @Test
+    void fastestScreenSlot_并列取先出现的() {
+        // 两把同为 6.0 的镐：取先遍历到的（上游 > 严格比较，后到的并列不替换）
+        assertEquals(1, SpeedMineLogic.fastestScreenSlot(java.util.List.of(1f, 6f, 6f)));
+    }
+
+    @Test
+    void fastestScreenSlot_徒手速度被忽略() {
+        // 徒手对泥土 1.0 以下也常见；速度恰为 1.0 不算"快于徒手"
+        assertEquals(-1, SpeedMineLogic.fastestScreenSlot(java.util.List.of(1f, 1.0f, 1f)));
+    }
 }

@@ -1,5 +1,7 @@
 package com.fo.addon.utils;
 
+import java.util.List;
+
 /**
  * FO 发包挖掘——纯逻辑（可单测，不依赖 Minecraft 运行时状态）。
  *
@@ -84,5 +86,29 @@ public final class SpeedMineLogic {
             out[i] = (int) Math.round(start[i] + (end[i] - start[i]) * t);
         }
         return out;
+    }
+
+    /**
+     * 静默换持的选槽逻辑（上游 xw 的纯逻辑版）：
+     * 从整表挖掘速度里选最快且快于徒手（&gt;1.0）的槽位下标。
+     *
+     * <p>静默换持遍历整个 ScreenHandler（无界面时 = playerScreenHandler，
+     * 覆盖背包 36 格 + 副手；有界面时还包括已打开容器的全部槽位），
+     * 与快捷栏直切只看 1~9 号栏不同。</p>
+     *
+     * @param speeds 每个槽位的挖掘速度（列表顺序即 ScreenHandler 槽位顺序）
+     * @return 最快槽位下标；没有任何槽位快于徒手返回 -1
+     */
+    public static int fastestScreenSlot(List<Float> speeds) {
+        int best = -1;
+        float bestSpeed = 1.0f;
+        for (int i = 0; i < speeds.size(); i++) {
+            float speed = speeds.get(i);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                best = i;
+            }
+        }
+        return best;
     }
 }

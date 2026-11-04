@@ -31,6 +31,8 @@ import net.minecraft.block.LadderBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.screen.slot.Slot;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -40,6 +42,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -78,7 +81,9 @@ import java.util.List;
  *
  * <p>与上游的刻意差异（依赖 Hachimi 私有体系，无法等价移植）：</p>
  * <ul>
- *   <li>SwapMode 仅 Hotbar 直切（上游 Screen/Inventory 容器级换持不做）；</li>
+ *   <li>换持方式（SwapMode）：快捷栏（Hotbar 直切 1~9）与静默换持（Screen 容器级，
+ *       6.8p8 移植——遍历整个 ScreenHandler 找最快工具，用 ClickSlot(SWAP) 容器点击包换持，
+ *       不发选栏包，带 syncId 环境守卫；上游 Pick 不移植）；</li>
  *   <li>MainHand/Blink/AutoAnchor 联动不适用（Hachimi 专属模块）；</li>
  *   <li>长按持续挖掘不做（6.8p5 的按键状态卡死漏洞已删，见 AGENTS.md 6.8p6）。</li>
  * </ul>
@@ -117,6 +122,18 @@ public class FOPacketMine extends Module {
     /** 上游 NoneNormalMode（Desync：无 / 正常破坏=客户端完整破坏 / 假破块=本地移除）。 */
     public enum DesyncMode {
         无, 正常破坏, 假破块
+    }
+
+    /**
+     * 上游 SwapMode（快捷栏=Hotbar 直切 / 静默换持=Screen 容器级；Pick 不移植）。
+     *
+     * <p>快捷栏：只在快捷栏 1~9 找最快工具，发 UpdateSelectedSlot 直切（手会明显切栏）。
+     * 静默换持：遍历整个 ScreenHandler（含背包 36 格、副手、已打开容器的所有槽位）找最快工具，
+     * 用 ClickSlot(SWAP) 容器点击包把它与当前选中快捷栏位对调——不发选栏包，
+     * 选栏位不变，服务端视角只看到一次容器交换（真·鬼手）。</p>
+     */
+    public enum SwapActionMode {
+        快捷栏, 静默换持
     }
 
     /** 上游 BoxMode 的中文化（Meteor 的 ShapeMode 枚举值是英文，GUI 会露英文）。 */
@@ -189,6 +206,13 @@ public class FOPacketMine extends Module {
     private final Setting<Boolean> manual = sgGeneral.add(new BoolSetting.Builder()
         .name("手动切换").description("不自动换工具，自己手动切（Manual）")
         .defaultValue(false).build()
+    );
+
+    private final Setting<SwapActionMode> swapAction = sgGeneral.add(new EnumSetting.Builder<SwapActionMode>()
+        .name("换持方式").description("快捷栏=直切1~9号栏；静默换持=容器级换持，从整个背包/已打开容器换工具，只发容器点击包（Screen，真鬼手）")
+        .defaultValue(SwapActionMode.快捷栏)
+        .visible(() -> !manual.get())
+        .build()
     );
 
     private final Setting<Integer> holdTicks = sgGeneral.add(new IntSetting.Builder()
@@ -393,6 +417,10 @@ public class FOPacketMine extends Module {
     /** 保持换持：发包后等待切回的旧槽位。 */
     private int revertSlot = -1;
     private int revertTicks;
+    /** 保持换持（静默换持）：切回用的 ScreenHandler 槽位号、SWAP 按钮（目标快捷栏位）与捕获时的 syncId。 */
+    private int revertScreenSlot = -1;
+    private int revertScreenButton = -1;
+    private int revertScreenSyncId = -1;
     /** 原版加速模式：NoReset 进度快照。 */
     private ItemStack lastHeldStack;
     private float lastDamageProgress;
@@ -455,6 +483,35 @@ public class FOPacketMine extends Module {
             && pos.equals(mainSession.pos);
     }
 
+    // ── 静默换持（上游 SwapMode.Screen / xw / InventoryTracker.SWAP）──
+
+    /**
+     * 静默换持选槽：遍历整个 ScreenHandler 找最快工具（上游 xw）。
+     * 无界面时 ScreenHandler = playerScreenHandler（覆盖背包 36 格 + 副手）；
+     * 打开容器时还包括该容器的所有槽位。选槽判定走 {@link SpeedMineLogic#fastestScreenSlot}。
+     *
+     * @param state 目标方块状态
+     * @return ScreenHandler 槽位号；没有快于徒手的工具返回 -1
+     */
+    private int findFastestScreenSlot(BlockState state) {
+        List<Float> speeds = new ArrayList<>(mc.player.currentScreenHandler.slots.size());
+        for (Slot slot : mc.player.currentScreenHandler.slots) {
+            speeds.add(slot.getStack().getMiningSpeedMultiplier(state));
+        }
+        int index = SpeedMineLogic.fastestScreenSlot(speeds);
+        return index != -1 ? mc.player.currentScreenHandler.slots.get(index).id : -1;
+    }
+
+    /**
+     * 静默换持执行：ClickSlot(SWAP) 把 slotId 槽位与 button 号快捷栏位对调
+     * （上游 InventoryTracker/MainHand 的 {@code clickSlot(syncId, slot, button, SWAP, player)} 语义）。
+     * 不发 UpdateSelectedSlot——选栏位不变，客户端视觉与服务端背包同时交换，旁观者看不出切栏。
+     */
+    private void screenSwap(int slotId, int button) {
+        mc.interactionManager.clickSlot(
+            mc.player.currentScreenHandler.syncId, slotId, button, SlotActionType.SWAP, mc.player);
+    }
+
     // ── 事件 ──
 
     @Override
@@ -462,6 +519,7 @@ public class FOPacketMine extends Module {
         mainSession = null;
         mirrorSession = null;
         revertSlot = -1;
+        revertScreenSlot = -1;
         lastHeldStack = null;
         lastDamageProgress = 0;
     }
@@ -504,14 +562,25 @@ public class FOPacketMine extends Module {
         // ── 发包挖掘（Packet）模式 ──
 
         // 保持换持：等方块消失或到持握上限再切回（上游 xB/HoldTicks）
-        if (revertSlot != -1) {
+        if (revertSlot != -1 || revertScreenSlot != -1) {
             revertTicks++;
             boolean blockGone = mainSession == null
                 || mc.world.getBlockState(mainSession.pos).isAir();
             if (blockGone || revertTicks > holdTicks.get()) {
-                InvUtils.swap(revertSlot, false);
-                revertSlot = -1;
-                revertTicks = 0;
+                if (revertScreenSlot != -1) {
+                    // 静默换持切回：syncId 守卫——界面环境变了（开/关容器）就等下一个 tick 再试（上游 xy/xB 守卫）
+                    if (mc.player.currentScreenHandler.syncId == revertScreenSyncId) {
+                        screenSwap(revertScreenSlot, revertScreenButton);
+                        revertScreenSlot = -1;
+                        revertScreenButton = -1;
+                        revertScreenSyncId = -1;
+                        revertTicks = 0;
+                    }
+                } else {
+                    InvUtils.swap(revertSlot, false);
+                    revertSlot = -1;
+                    revertTicks = 0;
+                }
             }
         }
 
@@ -686,11 +755,17 @@ public class FOPacketMine extends Module {
                 return;
             }
 
-            // 最快工具（Hotbar，上游 xv；SwapMode 只移植 Hotbar）
+            // 最快工具：快捷栏=只看 1~9（上游 xv）；静默换持=遍历整个 ScreenHandler（上游 xw）
             if (!manual.get()) {
-                FindItemResult fir = InvUtils.findFastestTool(state);
-                bestSlot = fir.found() ? fir.slot() : -1;
-                bestStack = fir.found() ? mc.player.getInventory().getStack(bestSlot) : null;
+                if (swapAction.get() == SwapActionMode.静默换持) {
+                    bestSlot = findFastestScreenSlot(state);
+                    bestStack = bestSlot != -1
+                        ? mc.player.currentScreenHandler.getSlot(bestSlot).getStack() : null;
+                } else {
+                    FindItemResult fir = InvUtils.findFastestTool(state);
+                    bestSlot = fir.found() ? fir.slot() : -1;
+                    bestStack = fir.found() ? mc.player.getInventory().getStack(bestSlot) : null;
+                }
             }
 
             if (!started) return;
@@ -736,7 +811,28 @@ public class FOPacketMine extends Module {
 
             if (!manual.get() && bestSlot != -1
                 && (bestStack == null || !ItemStack.areEqual(bestStack, held))) {
-                if (!hold.get()) {
+                if (swapAction.get() == SwapActionMode.静默换持) {
+                    // 静默换持：ClickSlot(SWAP) 换上 → 发 STOP → 换回，包序与直切一致；
+                    // 不发 UpdateSelectedSlot，选栏位不变（上游 SwapMode.Screen）
+                    int slotId = bestSlot;
+                    int button = mc.player.getInventory().getSelectedSlot();
+                    int syncId = mc.player.currentScreenHandler.syncId;
+                    screenSwap(slotId, button);
+                    if (endRotate.get()) rotateTo(pos);
+                    breakAttempts++;
+                    sendStop();
+                    swing();
+                    if (hold.get()) {
+                        // 保持换持：不切回，等方块消失或持握上限（上游 Hold/xB + syncId 守卫）
+                        revertScreenSlot = slotId;
+                        revertScreenButton = button;
+                        revertScreenSyncId = syncId;
+                        revertSlot = -1;
+                        revertTicks = 0;
+                    } else {
+                        screenSwap(slotId, button);
+                    }
+                } else if (!hold.get()) {
                     // 直切：换上→发 STOP→自动换回（上游 ba/xA/bb）
                     InvUtils.swap(bestSlot, true);
                     if (endRotate.get()) rotateTo(pos);
@@ -783,11 +879,21 @@ public class FOPacketMine extends Module {
                 }
                 // 额外切换：进度满但没拿最快工具 → 换上发包再换回（上游 AutoSwitch 分支）
                 if (autoSwitch.get() && !manual.get() && bestSlot != -1) {
-                    InvUtils.swap(bestSlot, true);
-                    if (endRotate.get()) rotateTo(pos);
-                    breakAttempts++;
-                    sendStop();
-                    swing();
+                    if (swapAction.get() == SwapActionMode.静默换持) {
+                        int button = mc.player.getInventory().getSelectedSlot();
+                        screenSwap(bestSlot, button);
+                        if (endRotate.get()) rotateTo(pos);
+                        breakAttempts++;
+                        sendStop();
+                        swing();
+                        screenSwap(bestSlot, button);
+                    } else {
+                        InvUtils.swap(bestSlot, true);
+                        if (endRotate.get()) rotateTo(pos);
+                        breakAttempts++;
+                        sendStop();
+                        swing();
+                    }
                     return breakAttempts > miningTicks.get();
                 }
                 return false;
