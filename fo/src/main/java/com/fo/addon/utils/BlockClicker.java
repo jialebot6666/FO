@@ -71,6 +71,30 @@ public final class BlockClicker {
     }
 
     /**
+     * 只发交互包，<b>完全不碰视角</b>（V6.7p10）。
+     *
+     * <p>配合调用方的「真实转头」使用：先把玩家 yaw/pitch 真的转过去，等本 tick 的移动包
+     * 把朝向带给服务端之后，再调这个方法发包——顺序才是「朝向 → 交互」。
+     * 这也是参考实现（RustElytraClient 的 `lookAt` + `delay(3)`）的做法。
+     */
+    public static void clickBlockNoRotate(BlockPos pos, Hand hand) {
+        if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
+        clickBlockNoRotate(pos, pickFace(pos), hand);
+    }
+
+    /** 指定面 + 不碰视角的点击（需要固定点某一面时用，比如从上方点活板门）。 */
+    public static void clickBlockNoRotate(BlockPos pos, Direction side, Hand hand) {
+        if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
+        Vec3d hitVec = new Vec3d(
+            pos.getX() + 0.5 + side.getVector().getX() * 0.5,
+            pos.getY() + 0.5 + side.getVector().getY() * 0.5,
+            pos.getZ() + 0.5 + side.getVector().getZ() * 0.5
+        );
+        swingHand(hand);
+        sendSequencedPacket(hand, new BlockHitResult(hitVec, side, pos, false));
+    }
+
+    /**
      * 选一个“够得着”的面：优先水平四个侧面，其次顶面，<b>绝不选底面</b>。
      *
      * <p>旧实现直接 {@code Direction.getFacing(eye - center)}：玩家站在箱子斜上方时会选顶面，

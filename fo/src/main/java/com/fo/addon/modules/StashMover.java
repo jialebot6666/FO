@@ -12,6 +12,7 @@ import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StringMapSetting;
 import com.fo.addon.utils.TeleportFloodDetector;
 import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
+import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
@@ -27,7 +28,6 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.ChestBlock;
@@ -667,9 +667,32 @@ public class StashMover extends Module {
     private int throwSub;
     private int throwRetries;
     private BlockPos throwSafeSpot;
-    private int escapeTicks;
-    /** 脱困目标格（每 20 tick 重算，玩家在水里浮沉时目标会变）。 */
-    private BlockPos escapeTarget;
+
+    // ===== V6.7p10：短按键站位（1 格级不再调寻路）=====
+    /** 柱子旁「该站的那一格」，按区缓存。 */
+    private BlockPos throwStandCache;
+    private BlockPos stepTarget;
+    private int stepTicks;
+    private int stepStuckTicks;
+    private int stepPhase;
+    private double stepLastX;
+    private double stepLastZ;
+    private int stepFailCount;
+    // 最后 1 格「潜行贴到边缘」的计数
+    private int edgeTicks;
+    private int edgeStuckTicks;
+    private int edgePhase;
+    private double edgeLastX;
+    private double edgeLastZ;
+    /** 走到目标格中心的判定半径（格）。 */
+    private static final double STEP_ARRIVE_EPS = 0.35;
+    /** 挂起的交互动作：等本 tick 的移动包（带新朝向）发完再执行。 */
+    private Runnable afterMoveAction;
+    /** 四个水平方向（站位候选 / 活板门朝向判断用）。 */
+    private static final Direction[] HORIZONTALS = {
+        Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
+    };
+
     /** 每个区第一次找到的安全站位（缓存后复用，避免每次传送过来都重新搜一遍）。 */
     private final java.util.Map<StashMoveLogic.Zone, BlockPos> zoneSafeSpot = new java.util.HashMap<>();
     private int restockRetries;
@@ -764,8 +787,6 @@ public class StashMover extends Module {
         throwSub = 0;
         throwRetries = 0;
         throwSafeSpot = null;
-        escapeTicks = 0;
-        escapeTarget = null;
         zoneSafeSpot.clear();
         restockRetries = 0;
         nextPearlCheckTick = 0;
@@ -1624,20 +1645,60 @@ public class StashMover extends Module {
         return trioZone == StashMoveLogic.Zone.SOURCE ? sourceTrapdoor.get() : storeTrapdoor.get();
     }
 
+    // ==================== 真实转头（V6.7p10） ====================
+    //
+    // 参考实现（RustElytraClient 的 SupplyTask.lookAt）：
+    //     player.setYaw(yaw); player.setPitch(pitch);   // 直接改真实朝向，不恢复
+    //     ... delay(3) ...                              // 转完等几 tick 再交互
+    //
+    // Meteor 的 Rotations.rotate 是**静默转头**：发包前改朝向、发完立刻恢复原值，
+    // 所以画面上只有一帧闪动，看起来跟没转一样（用户反馈「不是真的转头」）。
+    // 这里改成：TickEvent.Pre 里真的把 yaw/pitch 设过去 → 本 tick 的移动包自然带上它 →
+    // 移动包发完（SendMovementPacketsEvent.Post）再发交互包，顺序 = 朝向 → 交互。
+
+    /** 真实转头：直接改玩家朝向并保持（不会自动恢复）。 */
+    private void turnTo(float yaw, float pitch) {
+        if (mc.player == null) return;
+        mc.player.setYaw(yaw);
+        mc.player.setPitch(pitch);
+    }
+
+    /** 真实转头看向某个坐标。 */
+    private void lookAt(Vec3d target) {
+        if (mc.player == null) return;
+        float[] yp = FacingLogic.yawPitchTo(target.x, target.y, target.z,
+            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
+        turnTo(yp[0], yp[1]);
+    }
+
+    /** 真实转头看向方块中心，并在本 tick 移动包发出后点击它（顺序：朝向 → 交互）。 */
+    private void realClick(BlockPos pos) {
+        if (pos == null) return;
+        lookAt(Vec3d.ofCenter(pos));
+        afterMoveAction = () -> BlockClicker.clickBlockNoRotate(pos, Hand.MAIN_HAND);
+    }
+
+    /** 本 tick 的移动包（带朝向）发完之后再执行挂起的交互动作。 */
+    @EventHandler
+    private void onMovementPost(SendMovementPacketsEvent.Post event) {
+        if (afterMoveAction == null) return;
+        Runnable action = afterMoveAction;
+        afterMoveAction = null;
+        action.run();
+    }
+
     /**
-     * 每 tick 把视角转向本区气泡柱（V6.7p7，用户口径「全程都要转头」）。
+     * 每 tick 把视角转向本区气泡柱（用户口径「全程都要转头」）。
      *
-     * <p>用 Meteor 的 {@link Rotations}，第一人称真的会转（miku 的 RotationManager 只改第三人称身体朝向，
-     * 6.7p5 已踩过这个坑）。优先级给 5：低于开箱/点活板门的 60，不会被它们覆盖。
+     * <p>V6.7p10 起改成**真实转头**（见上面的说明）；坑：`throwSub == 4`（正在投掷）那一 tick 要跳过，
+     * 否则这里会把刚瞄准好的投掷视角拽回柱心。
      */
     private void faceColumn() {
         if (mc.player == null) return;
         BlockPos td = trioTrapdoor();
         if (td == null || td.equals(BlockPos.ORIGIN)) return;
         Vec3d c = Vec3d.ofCenter(td.down(1));
-        float[] yp = FacingLogic.yawPitchTo(c.x, c.y, c.z,
-            mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
-        Rotations.rotate(yp[0], yp[1], 5);
+        lookAt(c);
     }
 
     /**
@@ -1651,126 +1712,237 @@ public class StashMover extends Module {
             return;
         }
         faceColumn();
-        // V6.7p8：这里只做「脱困」，不再把远处的人硬拽到柱子边。
-        // 启动时 1 号可能站在 2 号点或 3 号点的任意位置（珍珠箱旁、存储箱旁），
-        // 先走去柱子毫无意义——补珍珠要先去珍珠箱，投珍珠时才需要走到柱子（由 THROW 负责）。
-        if (escapeIfNeeded(stand)) {
-            debugMsg("[脱离] 没在水里/活板门上，无需脱困（位置 " + mc.player.getBlockPos().toShortString() + "）");
-            setTrioState(TrioState.RESTOCK, "脱困检查通过，本区珍珠箱=" + zonePearlChest().toShortString());
+        // V6.7p8：这里只处理「人就在柱子附近」的情况，不把远处的人硬拽过来
+        //（启动时可能站在珍珠箱/存储箱旁，先走去柱子毫无意义；投掷阶段才需要站位）。
+        Vec3d t = Vec3d.ofCenter(stand);
+        double dist = Math.hypot(t.x - mc.player.getX(), t.z - mc.player.getZ());
+        if (dist > 8.0) {
+            setTrioState(TrioState.RESTOCK, "离柱子 " + Math.round(dist) + " 格，先去补珍珠");
+            cooldown = PACE_SETTLE_DONE;
+            return;
+        }
+        // V6.7p10：1~8 格这段用短按键走到「柱子旁那一格中心」，不调寻路
+        if (settlePosition(stand)) {
+            debugMsg("[脱离] 已站到柱子旁 " + mc.player.getBlockPos().toShortString());
+            setTrioState(TrioState.RESTOCK, "已站到柱子旁，本区珍珠箱=" + zonePearlChest().toShortString());
             cooldown = PACE_SETTLE_DONE;
         }
     }
 
-    /**
-     * 只做「脱困」：人在气泡柱里 / 站在活板门格上时先爬出来，别的一概不动。
-     *
-     * <p>V6.7p8 从 {@link #settlePosition} 里拆出来的：启动时人不一定在柱子旁，
-     * 「走去柱子」属于投掷阶段，不该在启动第一步就执行（否则会柱子→珍珠箱→柱子白跑两趟）。
-     *
-     * @return true = 已不在水里/活板门格上，可以继续下一步
-     */
-    private boolean escapeIfNeeded(BlockPos trapdoorPos) {
-        if (mc.player == null) return false;
-        BlockPos feet = mc.player.getBlockPos();
-        BlockPos water = trapdoorPos.down(1);
+    // ==================== 站位（V6.7p10：短按键，1 格级不再调寻路） ====================
 
-        // ① 先脱困（V6.7p4）：被活板门压住 / 泡在气泡柱里时，必须先开活板门再往外挪
-        boolean insideTrapdoor = feet.equals(trapdoorPos)
-            || mc.world.getBlockState(feet).getBlock() instanceof TrapdoorBlock
-            || mc.world.getBlockState(feet.down()).getBlock() instanceof TrapdoorBlock;
-        boolean inWater = mc.player.isTouchingWater() || feet.equals(water)
-            || !mc.world.getBlockState(feet.down()).getFluidState().isEmpty();
-        if (insideTrapdoor || inWater) {
-            if (!trapdoorIsOpenOrAbsent(trapdoorPos)) {
-                debugMsg("脱困：先打开活板门");
-                BlockClicker.clickBlockFacingPlayer(trapdoorPos, true, Hand.MAIN_HAND);
-                cooldown = 10;
-                return false;
-            }
-            // 每 20 tick 重新找一次（玩家在水里会上下浮，目标格会变）；
-            // 优先用本区上次找到的安全格（结构没变就一直有效，省得每次重搜）
-            if (escapeTarget == null || tick % 20 == 0) {
-                BlockPos cached = zoneSafeSpot.get(trioZone);
-                escapeTarget = (cached != null && isStandable(cached)) ? cached : pearlStandSpot(trapdoorPos);
-            }
-            BlockPos escape = escapeTarget;
-            if (escape == null) {
-                dumpStandSpotFailure(trapdoorPos);
-                // 兜底：真的没有可站格时，先按住 shift + 后退贴离水柱（不再直接停下等人）
-                if (escapeTicks < 40) {
-                    sneakForThrow();
-                    mc.options.backKey.setPressed(true);
-                    escapeTicks++;
-                    if (escapeTicks == 1) debugMsg("脱困：没找到可站格，先潜行后退离开水柱");
-                    return false;
-                }
-                releaseMovementKeys();
-                enterStuck("气泡柱周围找不到可站的实心格，请手动站到旁边");
-                return false;
-            }
-            // 手动脱困：朝安全格方向游/走（水里或目标在上方时同时按跳）
-            Vec3d c = Vec3d.ofCenter(escape);
-            mc.player.setYaw((float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0));
-            mc.options.forwardKey.setPressed(true);
-            forwardHeld = true;
-            // V6.7p9：不在水里但被边沿卡住时（脚顶着一格高的坎），原地推是推不上去的，
-            // 必须周期性按跳；这也是「卡脚」最常见的形态之一。
-            boolean hop = !mc.player.isTouchingWater() && escapeTicks > 10 && (escapeTicks % 12) < 3;
-            if (mc.player.isTouchingWater() || escape.getY() > feet.getY() || hop) {
-                mc.options.jumpKey.setPressed(true);
-            } else if (mc.options != null) {
-                mc.options.jumpKey.setPressed(false);
-            }
-            escapeTicks++;
-            if (escapeTicks > 120) {
-                releaseMovementKeys();
-                dumpStandSpotFailure(trapdoorPos);
-                enterStuck("无法脱离气泡柱（120 tick 未脱困），请手动处理");
-            }
-            if (debug.get() && escapeTicks % 20 == 1) {
-                debugMsg("脱困中：目标=" + escape.toShortString() + " (" + escapeTicks + "/120)");
-            }
-            return false;
+    /**
+     * 柱子旁边「该站哪一格」（V6.7p10，用户口径：只有一侧贴住走不过去，其余能站）。
+     *
+     * <p>不把方向写死：四个邻格逐个用碰撞箱判（{@link #isStandable}），站得了的才算候选；
+     * 活板门朝向（`FACING`）只用来把那一侧的**优先级压低**（贴住/门轴那侧通常站不了）。
+     * 四邻格都不行时，退回半径 1~4 的 {@link #pearlStandSpot}。
+     *
+     * <p>结果按区缓存：结构没变就一直用同一格，避免每趟重算。
+     */
+    private BlockPos throwStandSpot(BlockPos trapdoor) {
+        if (mc.world == null || mc.player == null) return null;
+        BlockPos water = trapdoor.down(1);
+        if (throwStandCache != null && !throwStandCache.equals(water) && isStandable(throwStandCache)) {
+            return throwStandCache;
         }
-        escapeTicks = 0;
-        escapeTarget = null;
+        var state = mc.world.getBlockState(trapdoor);
+        Direction facing = state.getBlock() instanceof TrapdoorBlock ? state.get(TrapdoorBlock.FACING) : null;
+
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (Direction d : HORIZONTALS) {
+            BlockPos p = trapdoor.offset(d);
+            if (p.equals(water) || !isStandable(p)) continue;
+            double score = p.getSquaredDistance(mc.player.getBlockPos());
+            if (facing != null && d == facing) score += 1000;   // 贴住那一侧排最后
+            if (score < bestScore) {
+                bestScore = score;
+                best = p;
+            }
+        }
+        if (best == null) best = pearlStandSpot(trapdoor);
+        throwStandCache = best;
+        return best;
+    }
+
+    /**
+     * 朝目标格中心「短按」走过去（V6.7p10，替代 1 格级的寻路）。
+     *
+     * <p>为什么不用 Baritone：它是按「到附近」设计的（容差大、到点会自己跳/贴边），
+     * 旁边再按着前进键就是两套输入打架——用户反馈的「卡脚 → 珍珠投掷失败」就是这么来的。
+     * 这里改成：面向中心 → 按 2 tick 松 2 tick → 用位移反馈判断到位/被挡，被挡就跳。
+     *
+     * @return 0=还在走 1=已到位 2=被挡或超时
+     */
+    private int stepToward(BlockPos target, int maxTicks) {
+        if (target == null || mc.player == null) return 2;
+        Vec3d c = Vec3d.ofCenter(target);
+        double dist = Math.hypot(c.x - mc.player.getX(), c.z - mc.player.getZ());
+        if (dist <= STEP_ARRIVE_EPS) {
+            releaseStepKeys();
+            return 1;
+        }
+        if (!target.equals(stepTarget)) {
+            stepTarget = target;
+            stepTicks = 0;
+            stepStuckTicks = 0;
+            stepPhase = 0;
+            stepLastX = mc.player.getX();
+            stepLastZ = mc.player.getZ();
+        }
+
+        float yaw = (float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0);
+        mc.player.setYaw(yaw);                       // 决定前进方向
+        turnTo(yaw, mc.player.getPitch());   // 真实转头（决定前进方向）
+
+        boolean moved = !StashMoveLogic.isStalled(stepLastX, stepLastZ, mc.player.getX(), mc.player.getZ(), 0.02);
+        stepLastX = mc.player.getX();
+        stepLastZ = mc.player.getZ();
+        stepStuckTicks = moved ? 0 : stepStuckTicks + 1;
+        stepTicks++;
+
+        // 被挡住：先跳（一格高的坎只能跳上去），跳几次还不行就交回去
+        if (stepStuckTicks >= 8) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            mc.options.jumpKey.setPressed(true);
+            if (stepStuckTicks >= 16) {
+                releaseStepKeys();
+                return 2;
+            }
+            return 0;
+        }
+        if (stepTicks > maxTicks) {
+            releaseStepKeys();
+            return 2;
+        }
+
+        boolean press;
+        if (mc.player.isTouchingWater()) {
+            press = true;                                 // 水里要一直按才游得动
+            mc.options.jumpKey.setPressed(true);          // 气泡柱会吸人，按跳帮一把
+        } else {
+            stepPhase = (stepPhase + 1) % 4;
+            press = stepPhase < 2;                         // 干地：按 2 tick 松 2 tick
+            if (mc.options != null) mc.options.jumpKey.setPressed(false);
+        }
+        mc.options.forwardKey.setPressed(press);
+        forwardHeld = press;
+        return 0;
+    }
+
+    private void releaseStepKeys() {
         if (mc.options != null) {
+            mc.options.forwardKey.setPressed(false);
             mc.options.jumpKey.setPressed(false);
-            mc.options.backKey.setPressed(false);
         }
-        return true;
+        forwardHeld = false;
+        stepTarget = null;
+        stepTicks = 0;
+        stepStuckTicks = 0;
+        stepPhase = 0;
     }
 
     /**
      * 走到柱子旁并确认站位（投掷前用）。
      *
-     * <p>V6.7p8：脱困拆出去后，这里只负责「已脱困 → 走回柱子旁的安全格 → 记下原位」。
+     * <p>流程：算出该站的格子 → 人还在柱子里/活板门上且门关着就先点开 → 远（>6 格）才用寻路，
+     * 近处一律 {@link #stepToward} 短按过去（V6.7p10：这就是「不用 Baritone」的那一段）。
      *
      * @return true = 已站好（并记下“原位”，投完退回这里）
      */
     private boolean settlePosition(BlockPos trapdoorPos) {
         if (mc.player == null) return false;
-        if (!escapeIfNeeded(trapdoorPos)) return false;
-        BlockPos feet = mc.player.getBlockPos();
+        BlockPos spot = throwStandSpot(trapdoorPos);
+        if (spot == null) {
+            dumpStandSpotFailure(trapdoorPos);
+            enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
+            return false;
+        }
 
-        // 离珍珠点太远（例如刚补完珍珠）→ 先回到活板门旁的安全格
-        if (feet.getSquaredDistance(trapdoorPos) > 9) {
-            BlockPos far = pearlStandSpot(trapdoorPos);
-            if (far == null) {
-                // 找不到可站的岸边就不再无限重试，直接报出来（附现场）
-                dumpStandSpotFailure(trapdoorPos);
-                enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
-                return false;
-            }
-            walkToPrecise(far);
+        // 人还在柱子里 / 站在活板门上：门关着就先点开（否则关在 1×1 水柱里出不来）
+        BlockPos feet = mc.player.getBlockPos();
+        boolean onOrInColumn = feet.equals(trapdoorPos) || feet.equals(trapdoorPos.up())
+            || mc.player.isTouchingWater();
+        if (onOrInColumn && !trapdoorIsOpenOrAbsent(trapdoorPos)) {
+            debugMsg("[站位] 人在柱子里/门边上，先打开活板门");
+            realClick(trapdoorPos);
+            cooldown = 10;
+            return false;
+        }
+
+        Vec3d t = Vec3d.ofCenter(trapdoorPos);
+        double toTrapdoor = Math.hypot(t.x - mc.player.getX(), t.z - mc.player.getZ());
+
+        // 远距离（补完珍珠回来那种）才用寻路；1~6 格一律短按走，避免 Baritone 顶墙卡脚
+        if (toTrapdoor > 6.0) {
+            walkToPrecise(spot);
             if (debug.get() && tick % 40 == 0) {
-                info("[走近] 距柱子 " + String.format(Locale.ROOT, "%.1f",
-                    Math.sqrt(feet.getSquaredDistance(trapdoorPos))) + " 格，正在走过去");
+                info("[站位] 距柱子 " + String.format(Locale.ROOT, "%.1f", toTrapdoor) + " 格，用寻路过去");
             }
             return false;
         }
-        throwSafeSpot = feet;
-        return true;
+
+        int r = stepToward(spot, 200);
+        if (r == 1) {
+            throwSafeSpot = mc.player.getBlockPos();
+            stepFailCount = 0;
+            return true;
+        }
+        if (r == 2) {
+            stepFailCount++;
+            if (stepFailCount >= 5) {
+                stepFailCount = 0;
+                dumpStandSpotFailure(trapdoorPos);
+                enterStuck("走不到柱子旁 " + spot.toShortString() + "（被挡住了？）");
+            } else {
+                warnThrottled("走到柱子旁站位失败，重试中（第 " + stepFailCount + " 次）");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 按住 Shift 短按前进到柱子边缘（V6.7p10，用户口径）。
+     *
+     * <p>只用在「已经站在柱子旁那一格中心」之后，位移最多 1 格，蹲着不会掉进柱子里；
+     * 走不动就说明到边缘了，可以直接低头投。
+     *
+     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退
+     */
+    private int sneakStepToEdge(BlockPos water, int maxTicks) {
+        sneakForThrow();
+        Vec3d c = Vec3d.ofCenter(water);
+        float yaw = (float) (Math.toDegrees(Math.atan2(c.z - mc.player.getZ(), c.x - mc.player.getX())) - 90.0);
+        mc.player.setYaw(yaw);
+        turnTo(yaw, 90f);
+
+        if (mc.player.isTouchingWater()) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            return 2;
+        }
+
+        edgeTicks++;
+        boolean moved = !StashMoveLogic.isStalled(edgeLastX, edgeLastZ, mc.player.getX(), mc.player.getZ(), 0.02);
+        edgeLastX = mc.player.getX();
+        edgeLastZ = mc.player.getZ();
+        edgeStuckTicks = moved ? 1 : edgeStuckTicks + 1;
+
+        if (edgeStuckTicks >= 3 || edgeTicks > maxTicks) {
+            mc.options.forwardKey.setPressed(false);
+            forwardHeld = false;
+            edgeTicks = 0;
+            edgeStuckTicks = 0;
+            return 1;
+        }
+
+        edgePhase = (edgePhase + 1) % 4;
+        boolean press = edgePhase < 2;
+        mc.options.forwardKey.setPressed(press);
+        forwardHeld = press;
+        return 0;
     }
 
     /**
@@ -1790,8 +1962,8 @@ public class StashMover extends Module {
         BlockPos water = stand.down(1);
 
         // 每 tick 都把视角对准气泡柱（用户口径：全程都要转头）。
-        // 唯独「正在投掷」这一 tick 不叠加：doThrowPearl 会以更高优先级登记精确瞄准，
-        // 这里再压一条低优先级旋转会把镜头拽回柱心，干扰投掷视角。
+        // 唯独「正在投掷」这一 tick 不叠加：doThrowPearl 已经算好精确瞄准角，
+        // 这里再转一次会把镜头拽回柱心，投掷就偏了。
         if (throwSub != 4) faceColumn();
 
         switch (throwSub) {
@@ -1817,7 +1989,12 @@ public class StashMover extends Module {
                         debugMsg("[活板门] 已确认打开（点了 " + trapdoorClickAttempts + " 次）");
                     }
                     trapdoorClickAttempts = 0;
-                    setThrowSub(3, "活板门已开，确认站位");
+                    setThrowSub(3, "活板门已开，潜行贴到边缘");
+                    edgeTicks = 0;
+                    edgeStuckTicks = 0;
+                    edgePhase = 0;
+                    edgeLastX = mc.player.getX();
+                    edgeLastZ = mc.player.getZ();
                     cooldown = PACE_STEP;
                     return;
                 }
@@ -1834,30 +2011,21 @@ public class StashMover extends Module {
                 }
                 trapdoorClickAttempts++;
                 debugMsg("[活板门] 关着 → 点击打开（第 " + trapdoorClickAttempts + " 次）");
-                BlockClicker.clickBlockFacingPlayer(stand, true, Hand.MAIN_HAND);
+                realClick(stand);
                 cooldown = PACE_TRAPDOOR_CLICK;
             }
             case 3 -> {
-                // V6.7p9：这里**不再「潜行 + 按住前进走到走不动」**——那是卡脚的主因
-                // （顶着箱子/水柱边缘一直推，服务端不停把位置拉回来）。
-                // 现在只做两件事：确认没踩进水里、确认离柱心够近；不够近就交给寻路重新站位。
-                Vec3d waterCenter = Vec3d.ofCenter(water);
-                double distToColumn = Math.hypot(waterCenter.x - mc.player.getX(), waterCenter.z - mc.player.getZ());
-                if (mc.player.isTouchingWater()) {
-                    debugMsg("[走近] 踩进气泡柱了，先退开再重试");
-                    setThrowSub(5, "走近时踩进水里");
+                // V6.7p10：站位已经由 settlePosition 站到「柱子旁那一格中心」，
+                // 这里只做最后 1 格的潜行贴边（蹲着不会掉进柱子里），走不动就说明到边缘了。
+                int r = sneakStepToEdge(water, 60);
+                if (r == 1) {
+                    setThrowSub(4, "已到柱子边缘，低头投掷");
                     cooldown = PACE_STEP;
-                    return;
-                }
-                if (distToColumn > 3.0) {
-                    debugMsg("[走近] 离柱心 " + String.format(Locale.ROOT, "%.1f", distToColumn) + " 格，重新站位");
-                    setThrowSub(1, "离柱子太远，重新走近");
+                } else if (r == 2) {
+                    debugMsg("[贴边] 踩进气泡柱了，先退开重来");
+                    setThrowSub(5, "贴边时踩进水里");
                     cooldown = PACE_STEP;
-                    return;
                 }
-                sneakForThrow();
-                setThrowSub(4, "已在柱子旁 " + String.format(Locale.ROOT, "%.1f", distToColumn) + " 格，准备投掷");
-                cooldown = PACE_STEP;
             }
             case 4 -> {
                 int slot = findPearlHotbarSlot();
@@ -2057,7 +2225,8 @@ public class StashMover extends Module {
             }
             double distSq = mc.player.getBlockPos().getSquaredDistance(pullPos);
             if (distSq <= 16) {
-                BlockClicker.clickBlock(pullPos, Direction.UP, true, Hand.MAIN_HAND);
+                lookAt(Vec3d.ofCenter(pullPos));
+                afterMoveAction = () -> BlockClicker.clickBlockNoRotate(pullPos, Direction.UP, Hand.MAIN_HAND);
                 String ack = pullN >= 0 ? ackKeyword.get() + pullN : ackKeyword.get();
                 sendPrivate(pullRequester, ack);
                 info("已拉 " + pullRequester + " 的珍珠");
@@ -2262,14 +2431,16 @@ public class StashMover extends Module {
             yp = FacingLogic.yawPitchTo(aim.x, aim.y, aim.z,
                 mc.player.getX(), mc.player.getEyePos().y, mc.player.getZ());
         }
-        // V6.7p7：改用 Meteor 的 Rotations（第一人称真的转头，见 6.7p5 的教训）；
-        // 回调里再发交互包——保证顺序是「移动包带目标朝向 → 服务端看到朝向 → 才收到投掷」。
-        mc.player.setYaw(yp[0]);
-        mc.player.setPitch(yp[1]);
-        Rotations.rotate(yp[0], yp[1], 60,
-            () -> mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND));
+        // V6.7p10：真实转头（直接改玩家 yaw/pitch 并保持），
+        // 等本 tick 的移动包把朝向带给服务端之后，再发投掷包（SendMovementPacketsEvent.Post）。
+        // 参考实现 RustElytraClient 的 SupplyTask.lookAt 就是 player.setYaw/setPitch + delay(3)；
+        // Meteor 的 Rotations.rotate 是静默转头（发完立刻恢复），看起来只有一帧闪动。
+        turnTo(yp[0], yp[1]);
+        afterMoveAction = () -> {
+            if (mc.player != null) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+            releaseSneak();   // Shift 保持到真正投出之后再松（用户口径：蹲着投）
+        };
 
-        releaseSneak();
         backoffTicks = 60;   // 投完按 S 后退（实际按“离柱心 ≥2.5 格”提前停，60 只是上限）
         cooldown = 3;
         progress();
@@ -2362,7 +2533,7 @@ public class StashMover extends Module {
         }
         var state = mc.world.getBlockState(trapdoorPos);
         if (state.getBlock() instanceof TrapdoorBlock && !state.get(TrapdoorBlock.OPEN)) {
-            BlockClicker.clickBlockFacingPlayer(trapdoorPos, true, Hand.MAIN_HAND);
+            realClick(trapdoorPos);
             cooldown = 10;
             return false;
         }
@@ -2702,7 +2873,7 @@ public class StashMover extends Module {
         debugMsg("[开箱] 点击 " + pos.toShortString() + " 第 " + openAttempts + " 次"
             + "（眼睛距 " + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(center))
             + " / 阈值 " + OPEN_REACH + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
-        BlockClicker.clickBlockFacingPlayer(pos, true, Hand.MAIN_HAND);
+        realClick(pos);
         cooldown = 15;
         progress();
     }

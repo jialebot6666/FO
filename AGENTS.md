@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p9`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p9-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p10`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p10-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -458,6 +458,27 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     全仓 **51 套件 418 测试全绿**。
   - ⚠️ 未能核实：ZenithProxy 的 `StashMoveModule` / `PearlDrop` 只在编译产物里（公开仓库是旧版），
     本次只对齐了「防卡」与「不手动推着走」两条可确证的做法，其余仍按用户口述的流程。
+- ✅ 6.7p10 已修复：**「静默转头」→ 真实转头 + 1 格级站位不再用寻路**（用户实机反馈 + 指定参考实现）。
+  - **参考来源**：`RSTminecraft/RustElytraClient`（原 `c4r0d/RustElytraClient`，仓库已改名）的
+    `SupplyTask.lookAt()`：`player.setYaw(yaw); player.setPitch(pitch);` 直接改真实朝向、
+    **不恢复**，然后 `delay(3)` 再交互。我们在 6.7p5/p7 用的 Meteor `Rotations.rotate(...)` 是
+    **静默转头**——发包前改朝向、发包后立刻 `resetPreRotation`，画面上只有一帧闪动，
+    用户看到的「跟没转一样」就是这个原因。
+  - ① **换掉所有静默转头**：新增 `turnTo(yaw,pitch)` / `lookAt(Vec3d)` / `realClick(BlockPos)`。
+    `faceColumn()`、`stepToward()`、`sneakStepToEdge()`、`doThrowPearl()` 全部改成直接设玩家朝向。
+  - ② **交互顺序**：新增 `afterMoveAction` + `SendMovementPacketsEvent.Post` 钩子——
+    在 TickEvent.Pre 里把朝向真的设过去 → 本 tick 移动包自然带上它 → 移动包发完再发交互包。
+    这样既保证「服务端先看到朝向再收到交互」，又不会把视角弹回去。
+  - ③ `BlockClicker` 新增 `clickBlockNoRotate(pos[, side], hand)`（只发包、不碰视角），
+    原 `clickBlock(..., rotate=true)` 仍保留给其他调用方；本模块 4 处点击全部改走 `realClick`。
+  - ④ **1 格级站位不再调寻路**（用户口径：巴里顿寻路会卡脚 → 珍珠投掷失败）：
+    新增 `throwStandSpot()`（柱子四个邻格按碰撞箱筛，活板门 `FACING` 那一侧降权，
+    全不行才退回 `pearlStandSpot`）+ `stepToward()`（面向格中心、按 2 tick 松 2 tick、
+    卡住先跳、有超时）。`settlePosition` 只在**距离 > 6 格**时才用 Baritone，
+    6 格内一律短按走；`sneakStepToEdge` 负责最后 1 格的潜行贴边（蹲着不会掉进柱子）。
+  - 测试：全仓 **51 套件 418 测试全绿**（本轮改动是朝向/走位的实时耦合逻辑，无新增纯逻辑）。
+  - ⚠️ 已知取舍：真实转头会**接管玩家视角**（每 tick 强行设 yaw/pitch），
+    开着模块时手动转视角会被拽回——这是用户明确要的效果。关模块后立即恢复自由。
   - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
