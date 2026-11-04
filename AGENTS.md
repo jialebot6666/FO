@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p8`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p8-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p1`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p1-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -198,6 +198,17 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       修复（6.32）：删行后**必须补一次 `table.row()`** 把游标移回，框架在工厂返回后还会再调一次
       row()，正好恢复原节奏。教训：用框架的"删行"类 API 前先读源码确认游标/索引副作用。
   - ✅ 6.32 已完成：6.31 崩溃修复（见上条 ⚠️），无其他改动。
+  - ✅ 6.8p1 已完成：**新增 FO 发包挖掘模块**（用户要求：移植 OpenHachimi 反编译源码里的
+    Hachimi V2 AutoMine，3C3U PvP 用）。模块 `modules/FOPacketMine`：自动发包挖目标玩家的
+    脚里(Burrow)/头顶(Face)/围城(Surround)方块，目标范围/挖掘范围/过滤模式（全部/仅黑名单/
+    仅白名单，默认黑名单蜘蛛网）/检查支撑（只挖黑曜石基岩支撑位）/重复发包间隔均可配，
+    HUD 显示目标名，Render3DEvent 高亮当前挖掘格。
+    - 几何计算抽纯逻辑 `utils/PacketMineLogic`（Burrow=脚Y平面±0.25四角、Face=y+1.5平面、
+      Surround=包围盒脚层地板格），单测 `PacketMineLogicTest` 9 用例锚死规则。
+    - 挖掘动作走彗星端官方 `BlockUtils.breakBlock`（旋转+切槽+发包管线），**不复刻**上游
+      BreakManager（依赖其私有 Mixin/Manager 体系）。
+    - 刻意不移植三处（上游反编译语义不可证，模块头注释有记录）：Surround 空气位候选 /
+      FriendSync（需全服玩家挖掘状态表，彗星端无此数据）/ 双格并发挖掘（改单会话重复发包）。
   - ⏳ 7.0 待做：**群系验证**自写（替代 cubiomes 的 `isViableAncientCity`），然后删掉那两个 Windows DLL
   - 黄金回归测试：`AncientCityGoldenTest`（拼图块 + 箱子坐标 + LootTableSeed）与 `AncientLootEvaluatorTest`
     （113 箱掷骰结果逐箱锁死），两者都**不依赖黑盒**。
