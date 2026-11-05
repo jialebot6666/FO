@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.8p10`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p10-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.8p11`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.8p11-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -15,7 +15,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
-  10. FO 发包挖掘（`modules/FOPacketMine`，6.8p2 新增、6.8p4 补全 Grim 协议：移植 Hachimi V2 SpeedMine——对准方块左键接管，客户端自算破坏进度、到阈值（3C3U 实战 0.7）直接发 STOP_DESTROY_BLOCK 包破坏；Grim 绕过四模式（无/Disabler/NewDisabler/时间校验，实战 NewDisabler：START 后补发 START(0,-999,0) 伪造包重指向服务端挖掘追踪 + DoubleBreak 补 STOP）、280ms 会话冷却、RetryTicks 重开会话、InstantMine 即时重破 STOP 流、自动切最快工具、暂停/取消快捷键、聊天提示（Notify）、进度色渲染；全部挖掘包带 accesswidener 取的 block-change sequence（与 BlockClicker 同款）；纯逻辑 `utils/SpeedMineLogic`，单测 `SpeedMineLogicTest`。刻意不移植：Hold/HoldTicks 换持回切、Desync、NoCollision、MineAir、EnderChest 按键、Multitask 并发体系）
+  10. FO 发包挖掘（`modules/FOPacketMine`，6.8p2 新增、6.8p4 补全 Grim 协议：移植 Hachimi V2 SpeedMine——对准方块左键接管，客户端自算破坏进度、到阈值（3C3U 实战 0.7）直接发 STOP_DESTROY_BLOCK 包破坏；Grim 绕过四模式（无/Disabler/NewDisabler/时间校验，实战 NewDisabler：START 后补发 START(0,-999,0) 伪造包重指向服务端挖掘追踪 + DoubleBreak 补 STOP）、280ms 会话冷却、RetryTicks 重开会话、InstantMine 即时重破 STOP 流、自动切最快工具、暂停/取消快捷键、聊天提示（Notify）、进度色渲染；全部挖掘包带 accesswidener 取的 block-change sequence（与 BlockClicker 同款）；纯逻辑 `utils/SpeedMineLogic`，单测 `SpeedMineLogicTest`。6.8p5~p8 已把当初列为「刻意不移植」的 Hold/HoldTicks 换持回切、Desync、NoCollision、MineAir、EnderChest 按键、Multitask 双会话全部补上；6.8p11 再逐方法对照上游纠错（Speed 钳制漏除数、双时钟、转向发包顺序等 9 处）。仍未移植：镜像会话到进度后的 AutoSwitch 换持、Blink/MainHand/AutoAnchor 联动、125ms STOP 去重表）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
@@ -231,6 +231,68 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
       破坏后聊天栏报坐标）；渲染色对齐实战 hex——StartSide=0x3f7e7ef5（青）、
       EndSide=0x066e6ee1（深青）、StartLine=EndLine=0xff9595ff（粉红），线框色独立可配
       （此前线框色是从面色派生的）。
+  - ✅ 6.8p11 已完成：**SpeedMine 移植全面对照上游纠错**（用户要求「自己找一下是不是上次没移植全面」，
+    拿 OpenHachimi-main 源码逐方法比对 `BlockPosPlayerHelper`（591 行）+ `BlockPosBoxMultitask`（1083 行）
+    + 实战配置 cheng.json 三方核对，找出 9 处移植缺陷）。
+    - **#1「挖掘进度」提速从来没生效（最严重）**：上游 `xs()` L259 是
+      `f3 = oQ(...) / this.b * this.l`（**除数就是 Speed**），FO 抄成 `maxDelta * ticks`。
+      累加项 `delta/speedScale` 除以了 Speed、钳制上限没除 → 每 tick 都被原样压回原版进度 →
+      Speed 调 0.7 与调 1.0 行为完全一致，从 6.8p2 起「提速」是假的。
+      ⚠️ 为什么测试没抓到：`SpeedMineLogic.shouldBreak/accumulate` 这两个函数**只有测试在引用、
+      模块从不叫**，测试测的是一套模块不走的模型 —— 教训：**单测必须测模块真正走的那条路径**，
+      否则等于没测。本轮删掉这两个死函数，改为 `nextProgress` / `idealProgressBound` /
+      `clampToIdealBound` 并把模块接上，加了 `ticksToFull()` 回归锁
+      （原版 10 tick→Speed 0.7 必须 7 tick 挖满、20→14、4→3、Speed=1 保持 10）。
+    - **#2 两个时钟被并成一个**：上游 `onSendImmediately`（L441-453）是**双时钟**——
+      `i`=280ms 会话冷却（**每个** STOP 包都武装，含 DoubleBreak 与会话开始那两发）、
+      `j`=时间校验基准（**每个** START 包含 (0,-999,0) 伪造包重置，且 `mode != Time` 时 STOP 也顺带重置）。
+      FO 只有一个 `lastStopTime` 且只在 tryBreak 的 STOP 记账 → 会话期 STOP 不武装冷却、
+      时间校验拿「上一轮的结束时间」给「这一轮」凑数，可能直接跳过诚实等待。
+      修复：新增 `lastStartTime`，记账统一放进 `sendDig()`（等价上游监听所有发包的位置）。
+      ⚠️ FO 把上游 Strict/Time 合并成一档「时间校验」，两档在「STOP 是否重置 j」上行为不同
+      （Strict 重置、Time 不重置）——本档按 **Time 语义**（不重置）实现，要改回 Strict 是一行。
+    - **#3 转向设置对服务端无效**：上游 `RotationUtils.nJ → MovementTracker.Mj` 是
+      **当场发一个 PlayerMoveC2SPacket 视角包**，然后才发挖掘包；FO 用 Meteor
+      `Rotations.rotate(yaw, pitch, null)` 把朝向推到「下一个移动包」，挖掘包当场就发了
+      （本仓库 `BlockClicker` 头注释写的正是这个差别）→ 开挖转向/结束转向两个开关等于没做。
+      修复：新增 `snapLookAt/snapLookBack`（照本仓库 `InteractionUtils`/`AutoTree` 6.6 的同步瞬转写法），
+      `start()` 包住整组 START/STOP、`sendStop()` 只包那条 STOP。
+      ⚠️ 刻意差异：上游把转回丢给别的模块，FO 由发包方自己立刻转回，不外溢状态。
+    - **#4 Desync 的先后顺序**：上游 `xz/xA/xC` 三个发包器都是**先做客户端破坏/移除、再构造 STOP 包**，
+      FO 反过来（发完再 markBreak）。「正常破坏」那一支自己会发包，线上顺序与上游不同 → 改成先做后发。
+    - **#5 保持换持的 HoldTicks 语义接反**：上游 `xB` L542-555 里 HoldTicks 是**最短**持握——
+      方块还在就一直持着（哪怕远超 HoldTicks）、方块没了要 `n < HoldTicks` 才继续持、
+      不可挖或出范围立刻切回；且计数用的是会话自己的 `n`（`xt` 里工具已对时归零）。
+      FO 写成 `blockGone || revertTicks > holdTicks`（方块一没就切回 + HoldTicks 当上限），
+      而 `Session.holdTicksCount` 加了却从没被读 = 死字段。修复：抽
+      `SpeedMineLogic.shouldKeepHolding(...)`（4 个用例锁死）并接上 `holdTicksCount`，删掉 `revertTicks`。
+      ⚠️ 设置名「持握上限」→「持握下限」：**Meteor 用设置名当配置键，改名后旧配置里存的值读不出来**，
+      回落到默认 2（与旧默认同值，实际影响=重新配一次）。
+    - **#6 镜像计数从不归零**：上游 `xu()` L442 在完成门控不满足时 `this.m = 0`，FO 没有 →
+      镜像 `breakAttempts` 只增不减，进度被钳制拉回来时会被提前判死。
+    - **#7 抢占距离测错对象**：上游 `alI` L329-336 判的是「**已有会话那一格**的面中心是否在范围内」，
+      FO 测的是「新请求那一格」→ 远处的新请求能抢掉近处正在干活的高优先级会话。
+      顺带把上游 `PlacementUtils.Fi(pos, range)` 的等价物抽成 `reachableFace(pos)`（面中心测距），
+      `start()` 也补了这道门（此前 START 系列包在范围外照发，只有 tryBreak 有范围检查）。
+    - **#8 缺 player/world 守卫**：上游 `onTickPre` L394 + L433-437——player/world 任一为 null
+      就把会话和待切回一起丢掉。FO 完全没有这层：退服/换世界后旧坐标的会话继续对新世界同一格发
+      START/STOP 并本地 removeBlock（假破块），且可能直接 NPE。
+      另修 `cancelAll()` 漏清静默换持的 `revertScreenSlot/Button/SyncId` 且**不切回工具**
+      （关模块后镐子留在快捷栏、原物品卡在被换出的槽里）——改为 `revertHeldTool()` + `clearSessions()`。
+    - **#9 五个默认值抄错了来源**：cheng.json 实战值 vs FO 默认值——
+      Hold `true`/`false`、MineAir `false`/`true`、CheckGround `true`/`false`、
+      IgnoreBroken `true`/`false`、StrictCheck `true`/`false`（FO 抄的是上游**源码默认值**，
+      6.8p3「参数对齐实战」只搬了 JSON 里读得到的那几项）；类注释与本文还把
+      MineAir、CheckGround 的「实战值」写反了，一并纠正。补上没移植的 `Priority` 设置
+      （新增「挖掘优先级」，上游默认 8、实战 10，左键接管走这个值而不是硬编码 8）。
+    - **仍未移植（属"未做"不是"做错"，需要时再提）**：上游 `xu()` 里镜像会话到进度后的
+      AutoSwitch 换持（依赖 Hachimi 的 `runnable` 单槽机制）、`Blink`/`MainHand`/`AutoAnchor` 联动、
+      125ms `list` STOP 去重、`TO()` 里 hardness==100 那半个门、Manual 开着且手持非最快工具时
+      上游那一支**不发 STOP**（FO 照发）。
+    - 测试：SpeedMineLogicTest 18 → 24 用例（删 4 个死函数用例、新增 10 个真实路径断言），
+      全仓 **52 套件 444 测试全绿**（`cd fo && gradle build`，0 failures / 0 errors）。
+    - ⚠️ 6.8pN 这条线**仍未发 Release**（p1~p10 都没建 tag/Release，jar 只实测交付），本轮沿用；
+      要正式发布再说。
   - ✅ 6.8p10 已完成：**修复双挖第二个方块挖不掉 / 单挖偶尔失败（会话调度对齐上游）**：
     - 根因一（双挖卡死）：镜像会话误调 tryBreak 每 tick 发 STOP。上游镜像只做 xs()（进度）+
       xu()（完成判定），**从不发 STOP**；镜像的 STOP 把共享的 280ms 冷却时钟与时间校验时钟

@@ -13,24 +13,61 @@ public final class SpeedMineLogic {
     }
 
     /**
-     * 判定本 tick 结束后是否应该发包破坏：
-     * Speed 语义与原版一致——进度阈值，挖到 vanilla 进度的 Speed 倍（默认 0.7）即发包破坏。
+     * 上游 {@code xs()} 的进度累加（BlockPosPlayerHelper L239-240）：
+     * 本 tick 的 vanilla 增量按 Speed 缩放后累加，封顶 1.0。
      *
-     * @param progress 已累计的破坏进度（0~1）
-     * @param delta    本 tick 的 vanilla 破坏增量（{@code calcBlockBreakingDelta}）
-     * @param speed    进度阈值（Speed 设置）
-     * @return true = 应立即发包破坏
+     * <p>Speed 语义 = 只挖原版耗时的 Speed 倍（0.7 → 七成时间进度即满）。
+     * 进度归一到 1.0 是 FO 的表示法（渲染直接把 progress 当 0~1 用），
+     * 上游是「raw 累加 + progress ≥ Speed 判定」，两者等价。</p>
      */
-    public static boolean shouldBreak(float progress, float delta, float speed) {
-        if (delta <= 0) return false;
-        // delta >= 1 = 徒手/工具一击即碎：vanilla 本来就瞬间破坏，直接发
-        if (delta >= 1.0f) return true;
-        return progress + delta >= speed;
+    public static float nextProgress(float progress, float delta, float speedScale) {
+        return Math.min(1.0f, progress + delta / speedScale);
     }
 
-    /** 累计进度，封顶 1.0。 */
-    public static float accumulate(float progress, float delta) {
-        return Math.min(1.0f, progress + Math.max(0, delta));
+    /**
+     * 上游 {@code xs()} 尾部的「理想进度上限」（BlockPosPlayerHelper L259）：
+     * {@code 理想单tick进度 / Speed * 已进行tick数}。
+     *
+     * <p>⚠️ <b>除数必须是 Speed</b>。6.8p10 漏了它，累加值除以 Speed 涨、上限不除 Speed，
+     * 于是进度恒被压回原版进度 —— 「挖掘进度」调 0.7 与调 1.0 行为完全一致，提速根本没生效（6.8p11 修复）。</p>
+     *
+     * <p>与上游的第二点差异（刻意保留）：上游这一项用「无视地面/飞行/水中惩罚的理想进度」
+     * （{@code oQ(..., true, false, false)}），FO 用会话内实际进度用过的最大值
+     * {@code maxDelta}（即上游的 {@code p}）。差别只在挖到一半状态变好时：
+     * FO 的上限更紧 → STOP 偏晚不偏早，方向保守，不会因此被 Grim 判超速。</p>
+     */
+    public static float idealProgressBound(float idealDelta, int ticks, float speedScale) {
+        return idealDelta * ticks / speedScale;
+    }
+
+    /**
+     * 理想钳制是否生效（上游 L260 的 {@code if (f3 < d || o)}）：
+     * 上限低于当前进度，或本会话是挖空气会话（空气期不攒进度，落回上限折算）。
+     */
+    public static boolean clampToIdealBound(float idealBound, float progress, boolean miningAir) {
+        return idealBound < progress || miningAir;
+    }
+
+    /**
+     * 保持换持是否该继续持着工具（上游 {@code xB}，BlockPosPlayerHelper L542-555）。
+     *
+     * <p>上游语义：{@code HoldTicks} 是<b>最短</b>持握时长，不是上限——
+     * ① 主会话已经没了（方块挖完、会话被清）直接切回；② 否则「方块还在」或「持握未满 HoldTicks」
+     * 二者成立其一就继续持着，且目标仍可挖、仍在范围内。</p>
+     *
+     * <p>⚠️ 6.8p10 写成了 {@code blockGone || ticks > holdTicks}（方块一没就切回 + HoldTicks 当上限），
+     * 比上游早一 tick 切回（6.8p11 修复；实战 Hold 是开着的）。</p>
+     *
+     * @param mainSessionAlive   主会话是否还在
+     * @param blockStillThere    会话那一格是否仍有方块（未变成空气）
+     * @param heldTicks          会话累计 tick 数（上游的 {@code n}，发过 STOP 且工具已对时归零）
+     * @param holdTicks          最短持握 tick 数（HoldTicks 设置）
+     * @param targetStillMineable 目标仍可挖且在挖掘范围内
+     */
+    public static boolean shouldKeepHolding(boolean mainSessionAlive, boolean blockStillThere,
+                                            int heldTicks, int holdTicks, boolean targetStillMineable) {
+        if (!mainSessionAlive) return false;
+        return (blockStillThere || heldTicks < holdTicks) && targetStillMineable;
     }
 
     /**

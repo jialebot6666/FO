@@ -11,18 +11,108 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * FO 发包挖掘纯逻辑测试。
  *
  * <p>锚点来自 Hachimi V2 SpeedMine 实战配置（cheng.json：Speed=0.7）：
- * vanilla 进度累计到 0.7 即发包破坏；一击即碎（delta>=1）直接破坏。</p>
+ * vanilla 进度累计到 0.7 即发包破坏；一击即碎（delta&gt;=1）单 tick 挖满。
+ * 6.8p11 起这里测的是模块<b>真正走的那条</b>累加+钳制路径——此前的 {@code shouldBreak}/{@code accumulate}
+ * 两个函数只有测试在引用、模块从不叫，所以钳制漏掉 /Speed 导致提速整个失效也没被测出来。</p>
  */
 class SpeedMineLogicTest {
+    // ── 进度累加 + 理想钳制（上游 xs L239-241 与 L259-263）──
+
     @Test
-    void shouldBreak_进度到阈值() {
-        // Speed=0.7：进度 0.65 + delta 0.1 = 0.75 >= 0.7 → 破坏
-        assertTrue(SpeedMineLogic.shouldBreak(0.65f, 0.1f, 0.7f));
+    void nextProgress_按Speed缩放并封顶1() {
+        // Speed=0.7：单 tick 涨 delta/0.7（原版 10 tick 的活 7 tick 干完）
+        assertEquals(0.142857f, SpeedMineLogic.nextProgress(0f, 0.1f, 0.7f), 1e-5f);
+        assertEquals(1.0f, SpeedMineLogic.nextProgress(0.95f, 0.2f, 0.7f), 1e-6f);
+        // Speed=1：与原版进度一致
+        assertEquals(0.1f, SpeedMineLogic.nextProgress(0f, 0.1f, 1.0f), 1e-6f);
     }
 
     @Test
-    void shouldBreak_进度未到阈值() {
-        assertFalse(SpeedMineLogic.shouldBreak(0.5f, 0.1f, 0.7f));
+    void idealProgressBound_除数是Speed_不能漏() {
+        // 上游 f3 = oQ(...) / this.b * this.l。6.8p10 漏掉 / b，进度恒被压回原版进度 → Speed 设置整个失效
+        assertEquals(0.142857f, SpeedMineLogic.idealProgressBound(0.1f, 1, 0.7f), 1e-5f);
+        assertEquals(1.428571f, SpeedMineLogic.idealProgressBound(0.1f, 10, 0.7f), 1e-5f);
+        assertEquals(1.0f, SpeedMineLogic.idealProgressBound(0.1f, 10, 1.0f), 1e-6f);
+    }
+
+    @Test
+    void Speed零点七_在原版七成的tick数挖满() {
+        // 回归锁：6.8p10 无论 Speed 调多少，都要花满原版 tick（提速根本没生效）
+        assertEquals(7, ticksToFull(0.1f, 0.7f));    // 原版 10 tick → ceil(10*0.7)
+        assertEquals(14, ticksToFull(0.05f, 0.7f));  // 原版 20 tick → 14
+        assertEquals(3, ticksToFull(0.25f, 0.7f));   // 原版 4 tick → ceil(2.8)
+        assertEquals(10, ticksToFull(0.1f, 1.0f));   // Speed=1 保持原版耗时
+        assertEquals(2, ticksToFull(0.5f, 0.7f));    // 原版 2 tick → ceil(2*0.7)
+        assertEquals(1, ticksToFull(0.5f, 0.5f));    // 原版 2 tick → ceil(1) = 1
+        assertEquals(1, ticksToFull(0.1f, 0.1f));    // Speed 再低也至少 1 tick
+    }
+
+    /**
+     * 复刻 {@code Session.progressTick()} 的「累加 + 理想钳制」两步，返回进度挖满所需的 tick 数。
+     * 与模块内的实现同序：先累加、再取 maxDelta、最后按上限钳制。
+     */
+    private static int ticksToFull(float delta, float speedScale) {
+        float progress = 0f;
+        float maxDelta = 0f;
+        for (int ticks = 1; ticks <= 2000; ticks++) {
+            progress = SpeedMineLogic.nextProgress(progress, delta, speedScale);
+            maxDelta = Math.max(maxDelta, delta);
+            float ideal = SpeedMineLogic.idealProgressBound(maxDelta, ticks, speedScale);
+            if (SpeedMineLogic.clampToIdealBound(ideal, progress, false)) progress = ideal;
+            if (progress >= 1.0f) return ticks;
+        }
+        return -1;
+    }
+
+    @Test
+    void clampToIdealBound_上限更低才钳_挖空气会话一律取上限() {
+        assertFalse(SpeedMineLogic.clampToIdealBound(0.5f, 0.3f, false)); // 上限高于进度 → 不动
+        assertTrue(SpeedMineLogic.clampToIdealBound(0.3f, 0.5f, false));  // 上限更低 → 钳下去
+        assertTrue(SpeedMineLogic.clampToIdealBound(9f, 0.1f, true));     // 空气会话：把空转的 tick 折算成进度
+        assertFalse(SpeedMineLogic.clampToIdealBound(9f, 0.1f, false));
+    }
+
+    @Test
+    void 进度恒定时钳制不绑_Speed提速留得住() {
+        // 稳态下（每 tick delta 相同）累加值恰等于上限，钳制不该把 Speed 的提速吃掉
+        float progress = 0f;
+        float maxDelta = 0f;
+        for (int ticks = 1; ticks <= 7; ticks++) {
+            progress = SpeedMineLogic.nextProgress(progress, 0.1f, 0.7f);
+            maxDelta = Math.max(maxDelta, 0.1f);
+            float ideal = SpeedMineLogic.idealProgressBound(maxDelta, ticks, 0.7f);
+            assertFalse(SpeedMineLogic.clampToIdealBound(ideal, progress, false),
+                "第 " + ticks + " tick 不该被钳制");
+            if (SpeedMineLogic.clampToIdealBound(ideal, progress, false)) progress = ideal;
+        }
+        assertTrue(progress >= 1.0f);
+    }
+
+    // ── 保持换持切回时机（上游 xB L542-555）──
+
+    @Test
+    void shouldKeepHolding_方块还在就一直持着() {
+        // 上游：block 未消失 → (未消失 || n<HoldTicks) 直接成立，哪怕早已超过 HoldTicks
+        assertTrue(SpeedMineLogic.shouldKeepHolding(true, true, 999, 2, true));
+    }
+
+    @Test
+    void shouldKeepHolding_方块没了要持满HoldTicks才切回() {
+        // 6.8p10 写的是「方块一没就切回」，比上游早；这里锁死上游的 n < HoldTicks 严格小于
+        assertTrue(SpeedMineLogic.shouldKeepHolding(true, false, 1, 2, true));
+        assertFalse(SpeedMineLogic.shouldKeepHolding(true, false, 2, 2, true));
+        assertFalse(SpeedMineLogic.shouldKeepHolding(true, false, 3, 2, true));
+    }
+
+    @Test
+    void shouldKeepHolding_主会话没了直接切回() {
+        assertFalse(SpeedMineLogic.shouldKeepHolding(false, true, 0, 2, true));
+    }
+
+    @Test
+    void shouldKeepHolding_目标不可挖或跑出范围直接切回() {
+        assertFalse(SpeedMineLogic.shouldKeepHolding(true, true, 0, 2, false));
+        assertFalse(SpeedMineLogic.shouldKeepHolding(true, false, 0, 2, false));
     }
 
     @Test
@@ -53,22 +143,16 @@ class SpeedMineLogicTest {
     }
 
     @Test
-    void shouldBreak_一击即碎_直接破坏() {
-        assertTrue(SpeedMineLogic.shouldBreak(0.0f, 1.0f, 0.7f));
-        assertTrue(SpeedMineLogic.shouldBreak(0.0f, 1.0f, 1.5f));
+    void 一击即碎_单tick就挖满() {
+        // delta >= 1（徒手挖豆腐/工具一击即碎）：第一 tick 进度就满，与 Speed 无关
+        assertEquals(1, ticksToFull(1.0f, 0.7f));
+        assertEquals(1, ticksToFull(2.0f, 1.0f));
     }
 
     @Test
-    void shouldBreak_无进度增量_不破坏() {
-        assertFalse(SpeedMineLogic.shouldBreak(0.0f, 0.0f, 0.7f));
-        assertFalse(SpeedMineLogic.shouldBreak(0.5f, -0.2f, 0.7f));
-    }
-
-    @Test
-    void accumulate_封顶1() {
-        assertEquals(1.0f, SpeedMineLogic.accumulate(0.9f, 0.2f), 1e-6);
-        assertEquals(0.3f, SpeedMineLogic.accumulate(0.2f, 0.1f), 1e-6);
-        assertEquals(0.2f, SpeedMineLogic.accumulate(0.2f, -0.1f), 1e-6);
+    void nextProgress_增量非正时不涨进度() {
+        // 模块在 progressTick 里对 vanillaDelta <= 0 直接早退；这里锁死「不会倒涨」
+        assertEquals(0.5f, SpeedMineLogic.nextProgress(0.5f, 0.0f, 0.7f), 1e-6f);
     }
 
     @Test

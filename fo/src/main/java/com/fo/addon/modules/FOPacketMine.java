@@ -31,6 +31,7 @@ import net.minecraft.block.LadderBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
@@ -76,8 +77,10 @@ import java.util.List;
  *
  * <p>默认参数照搬 3C3U 实战配置（cheng.json SpeedMine 段）：Speed=0.7、Range=6、
  * 仅黑名单（火/重生锚）、Grim=新版绕过、DoubleBreak=true、RetryTicks=10、
- * MiningTicks=10、InstantMine=true、MineAir=true、CheckGround=false/CheckFly=true、
- * Desync=假破块、Notify 开。</p>
+ * MiningTicks=10、InstantMine=true、Hold=true（持握下限 2）、CheckGround=true、CheckFly=true、
+ * IgnoreBroken=true、StrictCheck=true、MineAir=false、Desync=假破块、Notify 开、挖掘优先级 8。
+ * ⚠️ 6.8p11 修正：此前 Hold/MineAir/CheckGround/IgnoreBroken/StrictCheck 五项抄的是上游
+ * <b>源码默认值</b>而不是 cheng.json 的实战值（MineAir、CheckGround 的「实战值」还被注释写反了）。</p>
  *
  * <p>与上游的刻意差异（依赖 Hachimi 私有体系，无法等价移植）：</p>
  * <ul>
@@ -168,6 +171,11 @@ public class FOPacketMine extends Module {
         .defaultValue(6).min(1).sliderMax(8).build()
     );
 
+    private final Setting<Integer> priority = sgGeneral.add(new IntSetting.Builder()
+        .name("挖掘优先级").description("左键接管时给会话的优先级；其他模块走 mine(坐标, 优先级) 抢占时比这个数（Priority，上游默认 8、3C3U 实战 10）")
+        .defaultValue(8).min(0).sliderMax(10).build()
+    );
+
     private final Setting<GrimMode> grimMode = sgGeneral.add(new EnumSetting.Builder<GrimMode>()
         .name("Grim绕过").description("绕过 Grim fastbreak 检查的方式（Grim）。实战新版绕过")
         .defaultValue(GrimMode.新版绕过).build()
@@ -199,8 +207,8 @@ public class FOPacketMine extends Module {
     );
 
     private final Setting<Boolean> hold = sgGeneral.add(new BoolSetting.Builder()
-        .name("保持换持").description("发包后先不把工具切回去，等方块消失或到持握上限（Hold，1.21+ 服务器适用）")
-        .defaultValue(false).build()
+        .name("保持换持").description("发包后先不把工具切回去：方块还在就一直持着，方块没了也要持满「持握下限」才切回（Hold，1.21+ 服务器适用，实战开启）")
+        .defaultValue(true).build()
     );
 
     private final Setting<Boolean> manual = sgGeneral.add(new BoolSetting.Builder()
@@ -216,13 +224,13 @@ public class FOPacketMine extends Module {
     );
 
     private final Setting<Integer> holdTicks = sgGeneral.add(new IntSetting.Builder()
-        .name("持握上限").description("保持换持时最多持握工具的 tick 数（HoldTicks）")
+        .name("持握下限").description("保持换持时，方块挖掉后至少要持握这么多 tick 才切回（上游 HoldTicks 是最短持握而非上限，3C3U 实战 2）")
         .defaultValue(2).min(0).sliderMax(60).build()
     );
 
     private final Setting<Boolean> mineAir = sgGeneral.add(new BoolSetting.Builder()
-        .name("允许挖空气").description("允许对空气位发起挖掘（MineAir，实战开启）")
-        .defaultValue(true).build()
+        .name("允许挖空气").description("允许对空气位发起挖掘（MineAir，上游代码默认开、3C3U 实战关闭）")
+        .defaultValue(false).build()
     );
 
     private final Setting<Boolean> swingHand = sgGeneral.add(new BoolSetting.Builder()
@@ -231,8 +239,8 @@ public class FOPacketMine extends Module {
     );
 
     private final Setting<Boolean> ignoreBroken = sgGeneral.add(new BoolSetting.Builder()
-        .name("忽略已破坏").description("已被破坏（空）的方块不成为挖掘目标（IgnoreBroken）")
-        .defaultValue(false).build()
+        .name("忽略已破坏").description("已被破坏（空）的方块不成为挖掘目标（IgnoreBroken，实战开启）")
+        .defaultValue(true).build()
     );
 
     private final Setting<DesyncMode> desync = sgGeneral.add(new EnumSetting.Builder<DesyncMode>()
@@ -246,13 +254,13 @@ public class FOPacketMine extends Module {
     );
 
     private final Setting<Boolean> strictCheck = sgGeneral.add(new BoolSetting.Builder()
-        .name("严格暂停").description("暂停期间禁止发起新的挖掘会话（StrictCheck）")
-        .defaultValue(false).build()
+        .name("严格暂停").description("暂停期间禁止发起新的挖掘会话（StrictCheck，实战开启）")
+        .defaultValue(true).build()
     );
 
     private final Setting<Boolean> checkGround = sgGeneral.add(new BoolSetting.Builder()
-        .name("地面检测").description("挖掘速度预测计入离地惩罚（CheckGround，实战关闭=无视空中惩罚）")
-        .defaultValue(false).build()
+        .name("地面检测").description("挖掘速度预测计入离地惩罚（CheckGround，实战开启=尊重空中惩罚；关闭则按在地面算，进度涨得更快）")
+        .defaultValue(true).build()
     );
 
     private final Setting<Boolean> checkFly = sgGeneral.add(new BoolSetting.Builder()
@@ -417,11 +425,12 @@ public class FOPacketMine extends Module {
     private Session mainSession;
     /** 镜像会话（上游 blockPosPlayerHelper）：双重破坏的第二条进度线。 */
     private Session mirrorSession;
-    /** 上次发 STOP 的时间（280ms 冷却 + 时间校验基准）。 */
+    /** 上游 i：280ms 会话冷却时钟，由<b>每一个</b> STOP 包武装（含 DoubleBreak/旧版绕过的会话期 STOP）。 */
     private long lastStopTime;
+    /** 上游 j：时间校验模式的诚实等待基准，由每一个 START 包（含 (0,-999,0) 伪造包）武装。 */
+    private long lastStartTime;
     /** 保持换持：发包后等待切回的旧槽位。 */
     private int revertSlot = -1;
-    private int revertTicks;
     /** 保持换持（静默换持）：切回用的 ScreenHandler 槽位号、SWAP 按钮（目标快捷栏位）与捕获时的 syncId。 */
     private int revertScreenSlot = -1;
     private int revertScreenButton = -1;
@@ -459,9 +468,11 @@ public class FOPacketMine extends Module {
         // 双重破坏开启时，镜像会话正在挖的方块拒绝再开主会话（上游 alH 守卫）
         if (doubleBreak.get() && mirrorSession != null && mirrorSession.pos.equals(pos)) return false;
 
-        if (mainSession != null && !mainSession.done && mainSession.priority > priority) {
-            // 已有更高优先级的会话且仍在范围内工作（上游 alI 的抢占保护）
-            if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) <= range.get()) return false;
+        if (mainSession != null && !mainSession.done && mainSession.priority > priority
+            && reachableFace(mainSession.pos) != null) {
+            // 上游 alI L329-336：范围测的是**已有会话那一格的面中心**——那一格还在手上干活才不让抢。
+            // 6.8p10 测的是「新请求那一格」，对象接错了：远处的新请求能抢掉近处的高优先级会话（6.8p11 修复）
+            return false;
         }
 
         mainSession = new Session(pos, priority, speed.get().floatValue());
@@ -525,17 +536,48 @@ public class FOPacketMine extends Module {
 
     @Override
     public void onActivate() {
-        mainSession = null;
-        mirrorSession = null;
-        revertSlot = -1;
-        revertScreenSlot = -1;
+        clearSessions();
         lastHeldStack = null;
         lastDamageProgress = 0;
     }
 
     @Override
     public void onDeactivate() {
-        cancelAll();
+        // 关模块前先把欠着的切回做掉：6.8p10 只清了 revertSlot，静默换持的字段整个漏掉，
+        // 结果是镐子留在快捷栏、原物品卡在被换出的槽里没人管（6.8p11 修复）
+        revertHeldTool(false);
+        clearSessions();
+    }
+
+    /** 丢掉两个会话与待切回记录（只清状态，不发任何包）。 */
+    private void clearSessions() {
+        mainSession = null;
+        mirrorSession = null;
+        revertSlot = -1;
+        revertScreenSlot = -1;
+        revertScreenButton = -1;
+        revertScreenSyncId = -1;
+    }
+
+    /**
+     * 把「保持换持」借来的工具切回原位（上游 xy/xB 里的 {@code bb}）。
+     *
+     * @param keepPendingOnSyncMismatch 界面环境变了（syncId 不匹配）时要不要留着待切回、等下一个 tick
+     *                                  （上游的 syncId 守卫）；关模块/退服传 false = 放弃，不再碰背包
+     */
+    private void revertHeldTool(boolean keepPendingOnSyncMismatch) {
+        if (revertScreenSlot != -1) {
+            boolean envOk = mc.player != null
+                && mc.player.currentScreenHandler.syncId == revertScreenSyncId;
+            if (envOk) screenSwap(revertScreenSlot, revertScreenButton);
+            if (!envOk && keepPendingOnSyncMismatch) return;
+            revertScreenSlot = -1;
+            revertScreenButton = -1;
+            revertScreenSyncId = -1;
+        } else if (revertSlot != -1) {
+            if (mc.player != null) InvUtils.swap(revertSlot, false);
+            revertSlot = -1;
+        }
     }
 
     @EventHandler
@@ -551,14 +593,24 @@ public class FOPacketMine extends Module {
         event.cancel();
 
         if (mainSession != null && pos.equals(mainSession.pos)) return; // 已经在挖这格
-        mine(pos, 8);
+        mine(pos, priority.get());
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        // 上游 onTickPre（L394 + L433-437）：player/world 任一为 null 就把会话和待切回一起丢掉。
+        // 6.8p10 完全没有这层守卫——退服/换世界后旧坐标的会话还在跑，会对新世界同一格发 START/STOP
+        // 并本地 removeBlock（假破块），还可能直接 NPE（6.8p11 修复）
+        if (mc.player == null || mc.world == null || mc.interactionManager == null) {
+            revertHeldTool(false);
+            clearSessions();
+            return;
+        }
+
         if (pauseKey.get().isPressed()) return;
         if (cancelKey.get().isPressed()) {
-            cancelAll();
+            revertHeldTool(false);
+            clearSessions();
             return;
         }
 
@@ -570,26 +622,19 @@ public class FOPacketMine extends Module {
 
         // ── 发包挖掘（Packet）模式 ──
 
-        // 保持换持：等方块消失或到持握上限再切回（上游 xB/HoldTicks）
+        // 保持换持切回（上游 xB L542-555）：方块还在就一直持着；方块没了最多再持 HoldTicks tick；
+        // 目标不可挖或跑出范围立刻切回。计数用会话自己的 holdTicksCount（上游 n），
+        // 不是模块级的独立计时器，也不是「方块一没就切回」（6.8p11 修正）
         if (revertSlot != -1 || revertScreenSlot != -1) {
-            revertTicks++;
-            boolean blockGone = mainSession == null
-                || mc.world.getBlockState(mainSession.pos).isAir();
-            if (blockGone || revertTicks > holdTicks.get()) {
-                if (revertScreenSlot != -1) {
-                    // 静默换持切回：syncId 守卫——界面环境变了（开/关容器）就等下一个 tick 再试（上游 xy/xB 守卫）
-                    if (mc.player.currentScreenHandler.syncId == revertScreenSyncId) {
-                        screenSwap(revertScreenSlot, revertScreenButton);
-                        revertScreenSlot = -1;
-                        revertScreenButton = -1;
-                        revertScreenSyncId = -1;
-                        revertTicks = 0;
-                    }
-                } else {
-                    InvUtils.swap(revertSlot, false);
-                    revertSlot = -1;
-                    revertTicks = 0;
-                }
+            boolean blockStillThere = mainSession != null
+                && !mc.world.getBlockState(mainSession.pos).isAir();
+            boolean mineable = mainSession != null
+                && reachableFace(mainSession.pos) != null
+                && BlockUtils.canBreak(mainSession.pos);
+            int heldTicks = mainSession != null ? mainSession.holdTicksCount : 0;
+            if (!SpeedMineLogic.shouldKeepHolding(mainSession != null, blockStillThere,
+                heldTicks, holdTicks.get(), mineable)) {
+                revertHeldTool(true);
             }
         }
 
@@ -602,6 +647,9 @@ public class FOPacketMine extends Module {
                 || (mirrorSession.progress >= 1.0f
                     && ++mirrorSession.breakAttempts > miningTicks.get())) {
                 mirrorSession = null;
+            } else if (mirrorSession.progress < 1.0f) {
+                // 上游 xu() L442：完成门控没满足就把计数归零（6.8p11 补回，此前镜像从不归零 → 提前判死）
+                mirrorSession.breakAttempts = 0;
             }
         }
 
@@ -711,6 +759,12 @@ public class FOPacketMine extends Module {
         private void start() {
             state = mc.world.getBlockState(pos);
 
+            // 上游 xr() 第一步就是 Fi(pos, range)：取不到合法破坏面或超出范围，整个 start 直接放弃
+            // （此前只有 tryBreak 有范围门，START 系列包在范围外照发，6.8p11 补）
+            Direction face = reachableFace(pos);
+            if (face == null) return;
+            dir = face;
+
             if (state.isAir()) {
                 if (!mineAir.get()) return;
                 miningAir = true;
@@ -718,7 +772,9 @@ public class FOPacketMine extends Module {
                 return;
             }
 
-            if (startRotate.get()) rotateTo(pos);
+            // 「开挖转向」：上游 nJ 是当场发一个服务端视角包，再发这一整组 START/STOP，
+            // 服务端处理挖掘包时已经看到正确朝向（6.8p10 用 Meteor Rotations 推到下一个移动包 = 无效，6.8p11 修）
+            boolean rotated = startRotate.get() && snapLookAt(pos, dir);
 
             // 旧版绕过（Disabler）：START 前先发 STOP（上游 xG）
             if (grimMode.get() == GrimMode.旧版绕过) {
@@ -746,6 +802,7 @@ public class FOPacketMine extends Module {
             }
 
             swing();
+            if (rotated) snapLookBack();
             started = true;
         }
 
@@ -803,26 +860,35 @@ public class FOPacketMine extends Module {
                 checkGround.get(),
                 checkFly.get());
 
-            progress = Math.min(1.0f, progress + vanillaDelta / speedScale);
+            progress = SpeedMineLogic.nextProgress(progress, vanillaDelta, speedScale);
             maxDelta = Math.max(maxDelta, vanillaDelta);
 
-            // 理想进度钳制（上游 xs 尾部）：进度不得超过真实状态理想挖掘的累计值
-            float ideal = maxDelta * ticks;
-            if (ideal < progress || miningAir) progress = ideal;
+            // 理想进度钳制（上游 xs 尾部 L259-263）：上限 = 理想单 tick 进度 / Speed * 已进行 tick 数。
+            // ⚠️ 除数 Speed 是 6.8p11 补回来的：6.8p10 写成 maxDelta * ticks（不除 Speed），
+            // 于是每 tick 涨的 delta/Speed 立刻被压回 delta，进度恒等于原版进度——
+            // 「挖掘进度」这个设置从 6.8p2 起就没生效过（Speed 0.7 与 1.0 行为一致）。
+            float ideal = SpeedMineLogic.idealProgressBound(maxDelta, ticks, speedScale);
+            if (SpeedMineLogic.clampToIdealBound(ideal, progress, miningAir)) {
+                progress = ideal;
+                miningAir = false;   // 上游同一处一次性清旗标（6.8p11 补；此前永不清，空气会话后续不再走 done 分支）
+            }
         }
 
         /** 发破坏包（上游 xt）：实时面/范围门 → 时间校验 → 换持策略 → STOP。 */
         void tryBreak() {
-            // 实时范围与破坏面（上游 xt 每次调用 PlacementUtils.Fi 重算；超出范围或取不到面不发）：
-            // 玩家转身/远离后仍用旧面发 STOP 会被 Grim 判非法（6.8p10 修复）
-            if (mc.player.getEyePos().distanceTo(pos.toCenterPos()) > range.get()) return;
-            dir = getFacing(pos);
+            // 实时范围与破坏面（上游 xt 每次调 Fi(pos, range) 重算：取不到面或超范围就不发）。
+            // 玩家转身/远离后仍用旧面发 STOP 会被 Grim 判非法（6.8p10 修复；6.8p11 收敛成同一个 Fi 等价物）
+            Direction face = reachableFace(pos);
+            if (face == null) return;
+            dir = face;
 
-            // 时间校验模式：STOP 前必须等够真实挖掘时间（上游 FX 分支）
+            // 时间校验模式：STOP 前必须等够真实挖掘时间（上游 xt 的 FX 分支）。
+            // ⚠️ 基准是上游的 j = 本次会话的 START 时刻，不是「上次 STOP」：6.8p10 拿 lastStopTime
+            // 当基准，等于用上一轮的结束时间给这一轮凑数，可能直接跳过诚实等待（6.8p11 修复）
             if (grimMode.get() == GrimMode.时间校验) {
                 double expected = Math.ceil(1.0 / Math.max(maxDelta, 1e-6)) * 50.0;
                 if (!SpeedMineLogic.timeModeStopAllowed(
-                    expected, System.currentTimeMillis() - lastStopTime, TIME_MODE_SLACK_MS)) {
+                    expected, System.currentTimeMillis() - lastStartTime, TIME_MODE_SLACK_MS)) {
                     return;
                 }
             }
@@ -838,39 +904,36 @@ public class FOPacketMine extends Module {
                     int button = mc.player.getInventory().getSelectedSlot();
                     int syncId = mc.player.currentScreenHandler.syncId;
                     screenSwap(slotId, button);
-                    if (endRotate.get()) rotateTo(pos);
                     breakAttempts++;
                     sendStop();
                     swing();
                     if (hold.get()) {
-                        // 保持换持：不切回，等方块消失或持握上限（上游 Hold/xB + syncId 守卫）
+                        // 保持换持：不切回，切回时机交给 onTick 里的 shouldKeepHolding（上游 Hold/xB + syncId 守卫）
                         revertScreenSlot = slotId;
                         revertScreenButton = button;
                         revertScreenSyncId = syncId;
                         revertSlot = -1;
-                        revertTicks = 0;
                     } else {
+                        holdTicksCount = 0;   // 上游 xt L309：这次已经把工具换回来了
                         screenSwap(slotId, button);
                     }
                 } else if (!hold.get()) {
                     // 直切：换上→发 STOP→自动换回（上游 ba/xA/bb）
+                    holdTicksCount = 0;   // 上游 xt L309
                     InvUtils.swap(bestSlot, true);
-                    if (endRotate.get()) rotateTo(pos);
                     breakAttempts++;
                     sendStop();
                     swing();
                 } else {
-                    // 保持换持：换上不切回，等方块消失或持握上限（上游 Hold/xB 分支）
+                    // 保持换持：换上不切回，切回时机交给 onTick 里的 shouldKeepHolding（上游 Hold/xB 分支）
                     revertSlot = mc.player.getInventory().getSelectedSlot();
-                    revertTicks = 0;
                     InvUtils.swap(bestSlot, false);
-                    if (endRotate.get()) rotateTo(pos);
                     breakAttempts++;
                     sendStop();
                     swing();
                 }
             } else {
-                if (endRotate.get()) rotateTo(pos);
+                holdTicksCount = 0;   // 上游 xt L347：手上已经是合适工具
                 breakAttempts++;
                 sendStop();
                 swing();
@@ -922,9 +985,14 @@ public class FOPacketMine extends Module {
         }
 
         private void sendStop() {
-            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir);
-            lastStopTime = System.currentTimeMillis();
+            // 上游 xz/xA/xC：Desync 的客户端处理在**构造 STOP 包之前**执行
+            // （「正常破坏」那一支自己也会发包，与 STOP 的先后在线上有区别）；
+            // 时钟记账统一交给 sendDig（6.8p11）
             markBreak(pos);
+            // 「结束转向」：与上游 nJ 一样当场发视角包，让服务端在处理这条 STOP 前就看到新朝向
+            boolean rotated = endRotate.get() && snapLookAt(pos, dir);
+            sendDig(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir);
+            if (rotated) snapLookBack();
         }
     }
 
@@ -984,9 +1052,51 @@ public class FOPacketMine extends Module {
         return dz > 0 ? Direction.SOUTH : Direction.NORTH;
     }
 
-    private void rotateTo(BlockPos pos) {
-        Vec3d target = pos.toCenterPos();
-        Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target), (Runnable) null);
+    /**
+     * 上游 {@code PlacementUtils.Fi(pos, range)} 的等价物：取破坏面并校验
+     * 「该面中心到眼睛」在挖掘范围内；取不到面或超范围返回 null。
+     * 上游所有发包点（xr/xt/xB）都走这一道门，FO 此前只在 tryBreak 用「方块中心距离」近似。
+     */
+    private Direction reachableFace(BlockPos pos) {
+        Direction face = getFacing(pos);
+        return mc.player.getEyePos().distanceTo(faceCenter(pos, face)) <= range.get() ? face : null;
+    }
+
+    /** 面中心 = 方块中心 + 面法向量的一半（上游 {@code PlacementUtils.Fn}）。 */
+    private static Vec3d faceCenter(BlockPos pos, Direction face) {
+        var normal = face.getVector();
+        return new Vec3d(pos.getX() + 0.5 + normal.getX() * 0.5,
+            pos.getY() + 0.5 + normal.getY() * 0.5,
+            pos.getZ() + 0.5 + normal.getZ() * 0.5);
+    }
+
+    /**
+     * 瞬转发一个<b>服务端</b>视角包对准该面的面中心（上游 {@code RotationUtils.nJ → MovementTracker.Mj}：
+     * 它当场发 {@code PlayerMoveC2SPacket}，之后才发挖掘包，所以服务端处理 START/STOP 时已经看到正确朝向）。
+     *
+     * <p>⚠️ 6.8p10 用的是 Meteor 的 {@code Rotations.rotate(yaw, pitch, null)}——它把新朝向推到
+     * 「下一个移动包」，而挖掘包当场就发了（本仓库 {@code BlockClicker} 头注释写的就是这个差别），
+     * 于是「开挖转向 / 结束转向」两个设置对服务端完全不生效（6.8p11 修复）。</p>
+     *
+     * <p>与上游的另一处刻意差异：上游把转回的活儿丢给别的模块/后续移动包，
+     * FO 学本仓库 {@code InteractionUtils}/{@code AutoTree} 的做法——发包方自己立刻转回，不外溢状态。</p>
+     */
+    private boolean snapLookAt(BlockPos pos, Direction face) {
+        if (mc.player == null || mc.getNetworkHandler() == null) return false;
+        Vec3d point = faceCenter(pos, face);
+        sendLook((float) Rotations.getYaw(point), (float) Rotations.getPitch(point));
+        return true;
+    }
+
+    /** 转回客户端真实朝向（上游 {@code MovementTracker.Mk}）。 */
+    private void snapLookBack() {
+        if (mc.player == null) return;
+        sendLook(mc.player.getYaw(), mc.player.getPitch());
+    }
+
+    private void sendLook(float yaw, float pitch) {
+        mc.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
+            yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
     }
 
     /** 目标有效性：过滤模式 + 忽略已破坏。 */
@@ -1008,12 +1118,28 @@ public class FOPacketMine extends Module {
                 System.currentTimeMillis(), lastStopTime, SESSION_COOLDOWN_MS);
     }
 
-    /** 挖掘包统一带正确的 block-change sequence（复用 fo.accesswidener 的 GrimV3 条目）。 */
+    /**
+     * 挖掘包统一带正确的 block-change sequence（复用 fo.accesswidener 的 GrimV3 条目），
+     * 并在这里集中记两个时钟——对齐上游 onSendImmediately（BlockPosBoxMultitask L441-453）：
+     * ① 每个 <b>STOP</b> 包武装 280ms 会话冷却时钟（上游 i），所以 DoubleBreak 与会话开始时
+     *    那两发 STOP 同样算数；② 每个 <b>START</b> 包（含 (0,-999,0) 伪造包）重置时间校验基准
+     *    （上游 j），且非「时间校验」模式下 STOP 也顺带重置它。
+     * 6.8p10 只有一个 lastStopTime 且只在 tryBreak 那一发 STOP 记账，两个时钟被并成了一个。
+     */
     private void sendDig(PlayerActionC2SPacket.Action action, BlockPos pos, Direction dir) {
         var pending = mc.world.getPendingUpdateManager().incrementSequence();
         int seq = pending.sequence;
         pending.close();
         mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(action, pos, dir, seq));
+
+        long now = System.currentTimeMillis();
+        if (action == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK) {
+            lastStartTime = now;
+        } else if (action == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
+            lastStopTime = now;
+            // 上游：mode != Time 时 j = i（FO 把 Strict/Time 合并成「时间校验」，这里按 Time 语义不重置）
+            if (grimMode.get() != GrimMode.时间校验) lastStartTime = now;
+        }
     }
 
     private void swing() {
@@ -1044,11 +1170,5 @@ public class FOPacketMine extends Module {
 
     private static int[] toRgba(SettingColor c) {
         return new int[]{c.r, c.g, c.b, c.a};
-    }
-
-    private void cancelAll() {
-        mainSession = null;
-        mirrorSession = null;
-        revertSlot = -1;
     }
 }
