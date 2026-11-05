@@ -42,11 +42,12 @@ public final class BlockClicker {
     public static void clickBlock(BlockPos pos, Direction side, boolean rotate, Hand hand) {
         if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
 
-        // 1. 面中心命中点（miku：pos + 0.5 + side 偏移 * 0.5）
+        // 1. 面中心命中点，向方块内部收 0.001 格：
+        //    正好 +0.5 会落在方块边界上，部分服务端会判成无效交互（V6.7p12 已踩过）。
         Vec3d hitVec = new Vec3d(
-            pos.getX() + 0.5 + side.getVector().getX() * 0.5,
-            pos.getY() + 0.5 + side.getVector().getY() * 0.5,
-            pos.getZ() + 0.5 + side.getVector().getZ() * 0.5
+            pos.getX() + 0.5 + side.getVector().getX() * 0.499,
+            pos.getY() + 0.5 + side.getVector().getY() * 0.499,
+            pos.getZ() + 0.5 + side.getVector().getZ() * 0.499
         );
 
         // 2. 挥手（客户端 + 服务端）
@@ -86,9 +87,9 @@ public final class BlockClicker {
     public static void clickBlockNoRotate(BlockPos pos, Direction side, Hand hand) {
         if (mc.player == null || mc.world == null || mc.getNetworkHandler() == null) return;
         Vec3d hitVec = new Vec3d(
-            pos.getX() + 0.5 + side.getVector().getX() * 0.5,
-            pos.getY() + 0.5 + side.getVector().getY() * 0.5,
-            pos.getZ() + 0.5 + side.getVector().getZ() * 0.5
+            pos.getX() + 0.5 + side.getVector().getX() * 0.499,
+            pos.getY() + 0.5 + side.getVector().getY() * 0.499,
+            pos.getZ() + 0.5 + side.getVector().getZ() * 0.499
         );
         swingHand(hand);
         sendSequencedPacket(hand, new BlockHitResult(hitVec, side, pos, false));

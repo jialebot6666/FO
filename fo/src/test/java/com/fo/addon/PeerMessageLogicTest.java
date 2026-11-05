@@ -107,4 +107,76 @@ class PeerMessageLogicTest {
     void 组装请求正文() {
         assertEquals("拉我3", PeerMessageLogic.buildRequest("拉我", 3));
     }
+
+    // ==================== V6.7p15：请求安全（起点匹配 / 白名单 / 冷却） ====================
+
+    @Test
+    void 拉我请求必须出现在正文开头() {
+        var ok = PeerMessageLogic.matchRequestKeyword("拉我3", "拉我");
+        assertTrue(ok.matched());
+        assertEquals(3, ok.number());
+        assertFalse(PeerMessageLogic.matchRequestKeyword("不要拉我3", "拉我").matched());
+        assertFalse(PeerMessageLogic.matchRequestKeyword("别拉我", "拉我").matched());
+        assertFalse(PeerMessageLogic.matchRequestKeyword("我先拉我一下", "拉我").matched());
+    }
+
+    @Test
+    void 请求开头空格也接受() {
+        var m = PeerMessageLogic.matchRequestKeyword("  拉我7  ", "拉我");
+        assertTrue(m.matched());
+        assertEquals(7, m.number());
+    }
+
+    @Test
+    void 白名单为空允许所有请求者() {
+        assertTrue(PeerMessageLogic.requesterAllowed("Alice", "", java.util.List.of()));
+        assertTrue(PeerMessageLogic.requesterAllowed("Alice", null, null));
+    }
+
+    @Test
+    void 白名单只允许名单内玩家() {
+        var white = java.util.List.of("Alice", "Bob");
+        assertTrue(PeerMessageLogic.requesterAllowed("alice", "", white));
+        assertTrue(PeerMessageLogic.requesterAllowed("BOB", "", white));
+        assertFalse(PeerMessageLogic.requesterAllowed("Eve", "", white));
+    }
+
+    @Test
+    void 指定搭档必须完全匹配() {
+        assertTrue(PeerMessageLogic.requesterAllowed("Alice", "alice", java.util.List.of()));
+        assertFalse(PeerMessageLogic.requesterAllowed("Bob", "alice", java.util.List.of()));
+        assertFalse(PeerMessageLogic.requesterAllowed("", "alice", java.util.List.of()));
+    }
+
+    @Test
+    void 正在拉时拒绝新请求() {
+        assertFalse(PeerMessageLogic.pullCooldownElapsed(true, 1000, -100000, 40));
+    }
+
+    @Test
+    void 冷却结束才允许下一次拉() {
+        long last = 100;
+        assertFalse(PeerMessageLogic.pullCooldownElapsed(false, last + 39, last, 40));
+        assertTrue(PeerMessageLogic.pullCooldownElapsed(false, last + 40, last, 40));
+    }
+
+    @Test
+    void 冷却为0时立即可用() {
+        assertTrue(PeerMessageLogic.pullCooldownElapsed(false, 100, 100, 0));
+    }
+
+    // ==================== V6.7p16：双号拉珍珠端必须配白名单 ====================
+
+    @Test
+    void 三号模式只要填了1号就能收请求() {
+        assertTrue(PeerMessageLogic.pullGateOpen(true, true, false), "三号靠 1 号锁定，白名单可空");
+        assertFalse(PeerMessageLogic.pullGateOpen(true, false, true), "没填 1 号一律不收");
+    }
+
+    @Test
+    void 双号拉珍珠端没白名单就拒绝所有请求() {
+        // 关键回归点：双号不能当公共开门工具，白名单留空时必须拒绝
+        assertFalse(PeerMessageLogic.pullGateOpen(false, true, false));
+        assertTrue(PeerMessageLogic.pullGateOpen(false, false, true), "填了白名单即可（双号没有 1 号概念）");
+    }
 }

@@ -25,6 +25,7 @@ import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -388,7 +389,7 @@ public class StashMover extends Module {
 
     private final Setting<String> keyword = sgPearl.add(new StringSetting.Builder()
         .name("拉我关键字")
-        .description("收到含该关键字的私信就拉珍珠（后面可跟数字，如「拉我3」）。")
+        .description("收到以该关键字开头的私信才拉珍珠（后面可跟数字，如「拉我3」；「不要拉我」不会误触发）。")
         .defaultValue("拉我")
         .build());
 
@@ -443,6 +444,23 @@ public class StashMover extends Module {
         .sliderMin(10)
         .sliderMax(300)
         .visible(distanceCheck::get)
+        .build());
+
+    private final Setting<List<String>> pullWhitelist = sgPearl.add(new StringListSetting.Builder()
+        .name("拉珍珠白名单")
+        .description("只接受这些玩家的拉珍珠请求。⚠️ 双号拉珍珠端**必须填**（留空 = 拒绝所有请求，防陌生人乱拉）；"
+            + "三号模式另由「1 号搬运端」锁定，白名单留空不影响。")
+        .defaultValue(new ArrayList<>())
+        .visible(this::isPullerRole)
+        .build());
+
+    private final Setting<Integer> pullCooldown = sgPearl.add(new IntSetting.Builder()
+        .name("拉珍珠冷却")
+        .description("拉完一次后至少等待多少 tick 才接受下一次请求（40 tick = 2 秒）。")
+        .defaultValue(40)
+        .min(0)
+        .sliderMax(400)
+        .visible(this::isPullerRole)
         .build());
 
     private final Setting<Boolean> returnToStart = sgPearl.add(new BoolSetting.Builder()
@@ -817,6 +835,8 @@ public class StashMover extends Module {
     private int pullClickAttempts;
     private BlockPos pullStartPos;
     private long pullReturnStart;
+    /** 上一次拉珍珠结束（或放弃）的 tick，用于请求冷却。 */
+    private long lastPullEndTick = -100_000L;
 
     // 三号珍珠补货（精确补到 target，一颗一颗）
     private int restockStepsLeft;
@@ -857,6 +877,7 @@ public class StashMover extends Module {
         forwardHeld = false;
         backoffTicks = 0;
         sneakHeld = false;
+        lastPullEndTick = -100_000L;
         restockStepsLeft = 0;
         pullActive = false;
         unloadedSomething = false;
@@ -1999,17 +2020,52 @@ public class StashMover extends Module {
         lookAt(Vec3d.ofCenter(pos));
         afterMoveAction = () -> {
             if (mc.player == null || mc.interactionManager == null) return;
-            // V6.7p12：优先走**真实玩家交互路径**（准星 raycast + 客户端预测）。
-            // 手搓 PlayerInteractBlockC2SPacket 有两个坑：
-            //   ① 命中点是「中心 + 面方向×0.5」，正好落在方块边界上，部分服务端判无效交互；
-            //   ② 手搓包不做客户端预测，门开了客户端状态不更新 → 下一轮又点一次 → 把门关回去。
-            if (mc.crosshairTarget instanceof BlockHitResult hit && hit.getBlockPos().equals(pos)) {
+            // V6.7p15：不要依赖 mc.crosshairTarget —— 它由渲染线程按上一帧朝向更新，
+            // 同一 tick 刚 lookAt 后通常还没指向目标，会落到手搓包分支（边界命中点 + 无预测）。
+            // 直接用玩家当前朝向做一次客户端 raycast，拿到真实命中点和面，再走 interactBlock。
+            //
+            // V6.7p16：**双箱另一半也算命中**。扫描时双箱只记其中半块，人站哪边不由我们决定，
+            // 射线打到搭档那半块时旧写法一律判“没对上”→ 每次点击都掉进手搓包兜底（无预测）；
+            // 而两半块点开的是同一个箱子，认它没有副作用。
+            BlockPos partner = chestPartner(pos);
+            if (mc.player.raycast(OPEN_REACH + 1.0, 1.0F, false) instanceof BlockHitResult hit
+                && isSameChest(hit.getBlockPos(), pos, partner)) {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
-            } else {
-                // 准星没对上（被别的东西挡住/还没转完）→ 退回自己算命中点
-                BlockClicker.clickBlockNoRotate(pos, Hand.MAIN_HAND);
+                return;
             }
+            // 兜底：准星目标如果已经同步到目标，也走真实交互
+            if (mc.crosshairTarget instanceof BlockHitResult hit
+                && isSameChest(hit.getBlockPos(), pos, partner)) {
+                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
+                return;
+            }
+            // 目标被挡住/射线没命中 → 手搓包兜底（命中点已向方块内收 0.001 格）
+            BlockClicker.clickBlockNoRotate(pos, Hand.MAIN_HAND);
         };
+    }
+
+    /** 命中的方块是不是「目标本身或它的双箱搭档」。 */
+    private static boolean isSameChest(BlockPos hit, BlockPos target, BlockPos partner) {
+        return hit != null && (hit.equals(target) || (partner != null && hit.equals(partner)));
+    }
+
+    /**
+     * 双箱的另一半；单箱 / 非箱子返回 null（V6.7p16）。
+     *
+     * <p>用途见 {@link #realClick}：扫描时双箱只记半块，射线打到另一半时也要算命中。
+     * 偏移算法与 {@link #blacklistChest} 同源（{@code StashMoveLogic.chestOtherHalfOffset}，
+     * 与原版 ChestBlock 字节码一致）。
+     */
+    private BlockPos chestPartner(BlockPos pos) {
+        if (pos == null || mc.world == null) return null;
+        var state = mc.world.getBlockState(pos);
+        if (!(state.getBlock() instanceof ChestBlock)) return null;
+        ChestType type = state.get(ChestBlock.CHEST_TYPE);
+        if (type == ChestType.SINGLE) return null;
+        Direction facing = state.get(ChestBlock.FACING);
+        int[] off = StashMoveLogic.chestOtherHalfOffset(type == ChestType.LEFT,
+            facing.getOffsetX(), facing.getOffsetZ());
+        return pos.add(off[0], 0, off[1]);
     }
 
     /** 本 tick 的移动包（带朝向）发完之后再执行挂起的交互动作。 */
@@ -2727,6 +2783,7 @@ public class StashMover extends Module {
         pullPhase = 0;
         pullClickSent = false;
         pullClickAttempts = 0;
+        lastPullEndTick = tick;
     }
 
     @EventHandler
@@ -2742,15 +2799,27 @@ public class StashMover extends Module {
     }
 
     private void handlePullRequest(PeerMessageLogic.Parsed parsed) {
-        var req = PeerMessageLogic.matchKeyword(parsed.content(), keyword.get());
+        // 请求指令必须出现在正文开头，避免「不要拉我」「别拉我」这类聊天误触发。
+        var req = PeerMessageLogic.matchRequestKeyword(parsed.content(), keyword.get());
         if (!req.matched()) return;
 
-        if (mode.get() == Mode.TRIO) {
-            String expected = peerMover.get().trim();
-            if (expected.isEmpty() || !parsed.sender().equalsIgnoreCase(expected)) return;
+        String expected = mode.get() == Mode.TRIO ? peerMover.get().trim() : "";
+        var white = pullWhitelist.get();
+        boolean whiteFilled = white != null && !white.isEmpty();
+        // V6.7p16：双号拉珍珠端**必须**填白名单才收请求（三号仍靠「1 号搬运端」锁定）。
+        if (!PeerMessageLogic.pullGateOpen(mode.get() == Mode.TRIO, !expected.isEmpty(), whiteFilled)) {
+            warnThrottled(mode.get() == Mode.TRIO
+                ? "拉珍珠端未指定「1 号搬运端」，已忽略拉珍珠请求"
+                : "双号拉珍珠端未填「拉珍珠白名单」，已拒绝所有拉珍珠请求");
+            return;
         }
-        if (pullActive) {
-            info("当前已有珍珠在拉中，忽略 " + parsed.sender() + " 的请求");
+        if (!PeerMessageLogic.requesterAllowed(parsed.sender(), expected, white)) {
+            debugMsg("忽略不在白名单/非预期搭档的拉珍珠请求：" + parsed.sender());
+            return;
+        }
+        if (!PeerMessageLogic.pullCooldownElapsed(pullActive, tick, lastPullEndTick, pullCooldown.get())) {
+            info(pullActive ? "当前已有珍珠在拉中，忽略 " + parsed.sender() + " 的请求"
+                : "拉珍珠冷却中，忽略 " + parsed.sender() + " 的请求");
             return;
         }
 
@@ -3434,14 +3503,8 @@ public class StashMover extends Module {
     private void blacklistChest(BlockPos pos) {
         if (pos == null) return;
         blacklist.add(pos);
-        var state = mc.world.getBlockState(pos);
-        if (!(state.getBlock() instanceof ChestBlock)) return;
-        ChestType type = state.get(ChestBlock.CHEST_TYPE);
-        if (type == ChestType.SINGLE) return;
-        Direction facing = state.get(ChestBlock.FACING);
-        int[] off = StashMoveLogic.chestOtherHalfOffset(type == ChestType.LEFT,
-            facing.getOffsetX(), facing.getOffsetZ());
-        blacklist.add(pos.add(off[0], 0, off[1]));
+        BlockPos partner = chestPartner(pos);
+        if (partner != null) blacklist.add(partner);
     }
 
     private BlockPos findNearestLava(BlockPos center, int radius) {

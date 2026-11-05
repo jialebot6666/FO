@@ -1,5 +1,6 @@
 package com.fo.addon.utils;
 
+import java.util.Collection;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -87,6 +88,63 @@ public final class PeerMessageLogic {
             }
         }
         return new Match(true, -1);
+    }
+
+    /**
+     * 拉珍珠请求专用的关键字匹配：关键字必须出现在正文开头。
+     *
+     * <p>不同于确认消息，拉珍珠请求是动作指令，必须严格匹配协议
+     * {@code 拉我N}。旧实现用 indexOf，聊天里出现「不要拉我」「别拉我」
+     * 之类的话也会触发，属于误拉风险。
+     */
+    public static Match matchRequestKeyword(String content, String keyword) {
+        if (content == null || keyword == null) return Match.none();
+        String k = keyword.trim();
+        if (k.isEmpty()) return Match.none();
+        String c = content.trim();
+        if (!c.startsWith(k)) return Match.none();
+        return matchKeyword(c, k);
+    }
+
+    /**
+     * 拉珍珠请求的「准入门槛」是否配好了（V6.7p16）。
+     *
+     * <p>两种拉珍珠端各有各的锁：
+     * <ul>
+     *   <li>三号模式（2/3 号）：必须指定「1 号搬运端」，别人发什么都不理；</li>
+     *   <li>双号拉珍珠端：必须填「拉珍珠白名单」——留空等于谁都能拉，这在无政府服上
+     *       会把你的号喊去给别人开门。宁可不出勤，也不当公共工具。</li>
+     * </ul>
+     *
+     * @param trio              是否三号模式
+     * @param peerMoverConfigured 三号模式的「1 号搬运端」是否已填
+     * @param whitelistNotEmpty  白名单是否非空
+     */
+    public static boolean pullGateOpen(boolean trio, boolean peerMoverConfigured, boolean whitelistNotEmpty) {
+        return trio ? peerMoverConfigured : whitelistNotEmpty;
+    }
+
+    /**
+     * 请求者是否可信：指定搭档优先，白名单为空表示不额外限制。
+     */
+    public static boolean requesterAllowed(String sender, String expectedPartner, Collection<String> whitelist) {
+        if (sender == null || sender.isBlank()) return false;
+        String s = sender.trim();
+        if (expectedPartner != null && !expectedPartner.isBlank()
+            && !s.equalsIgnoreCase(expectedPartner.trim())) return false;
+        if (whitelist == null || whitelist.isEmpty()) return true;
+        for (String allowed : whitelist) {
+            if (allowed != null && s.equalsIgnoreCase(allowed.trim())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 是否可以接受新的拉珍珠请求：正在拉时拒绝；结束后冷却若干 tick。
+     */
+    public static boolean pullCooldownElapsed(boolean pullActive, long nowTick, long lastEndTick, int cooldownTicks) {
+        if (pullActive) return false;
+        return nowTick - lastEndTick >= Math.max(0, cooldownTicks);
     }
 
     /**
