@@ -275,31 +275,31 @@ class StashMoveLogicTest {
     @Test
     void 没确认过回程票一律不许自杀() {
         // 关键回归点：投出去的珍珠没进腔室时，绝不能死（死完下一趟就拉不回来了）
-        assertFalse(StashMoveLogic.canSuicide(10000, 0, 660, 600));
-        assertFalse(StashMoveLogic.canSuicide(10000, -1, 660, 600));
+        assertFalse(StashMoveLogic.canSuicide(10000, 0, 1200));
+        assertFalse(StashMoveLogic.canSuicide(10000, -1, 1200));
     }
 
     @Test
-    void 确认后必须等够服务器下限600tick() {
+    void 确认后必须等够设置里的延时() {
+        // V6.7p18：不再夹 600 硬下限，默认 1200（3C3U 实测 660 仍会掉）
         long confirmed = 1000;
-        assertFalse(StashMoveLogic.canSuicide(confirmed + 599, confirmed, 660, 600), "差一 tick 都不许死");
-        assertTrue(StashMoveLogic.canSuicide(confirmed + 600, confirmed, 600, 600), "正好 600 可以");
-        assertTrue(StashMoveLogic.canSuicide(confirmed + 660, confirmed, 660, 600));
+        assertFalse(StashMoveLogic.canSuicide(confirmed + 1199, confirmed, 1200), "差一 tick 都不许死");
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 1200, confirmed, 1200), "正好够就能死");
     }
 
     @Test
-    void 配置被改小也按600兜住() {
-        // 老配置里可能存着 100 tick 之类的小值，必须被 600 夹住
+    void 延时设零时确认完立刻可自杀() {
+        // 用户可在 0~2000 之间自己定；设 0 就是“确认完立刻死”（必掉珍珠，风险自负）
         long confirmed = 500;
-        assertFalse(StashMoveLogic.canSuicide(confirmed + 300, confirmed, 100, 600));
-        assertTrue(StashMoveLogic.canSuicide(confirmed + 600, confirmed, 100, 600));
+        assertTrue(StashMoveLogic.canSuicide(confirmed, confirmed, 0));
+        assertFalse(StashMoveLogic.canSuicide(confirmed + 599, confirmed, 600));
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 600, confirmed, 600));
     }
 
     @Test
-    void 配置比下限大时按配置走() {
-        long confirmed = 2000;
-        assertFalse(StashMoveLogic.canSuicide(confirmed + 800, confirmed, 900, 600));
-        assertTrue(StashMoveLogic.canSuicide(confirmed + 900, confirmed, 900, 600));
+    void 负延时按零处理() {
+        long confirmed = 100;
+        assertTrue(StashMoveLogic.canSuicide(confirmed, confirmed, -5));
     }
 
     // ==================== V6.7p17：双号入口判区 ====================

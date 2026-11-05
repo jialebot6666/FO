@@ -236,7 +236,7 @@ public class StashMover extends Module {
     private final Setting<ChestMode> chestMode = sgMover.add(new EnumSetting.Builder<ChestMode>()
         .name("待搬运方式")
         .description("自动搜索=以玩家为中心扫箱子；单箱子=只搬目标箱子；区域框选=搬指定长方体范围内所有箱子。")
-        .defaultValue(ChestMode.AUTO)
+        .defaultValue(ChestMode.SINGLE)
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
@@ -371,10 +371,11 @@ public class StashMover extends Module {
     private final Setting<Integer> suicideDelay = sgMover.add(new IntSetting.Builder()
         .name("自杀延时")
         .description("确认腔室里已经有自己的珍珠之后，再等多少 tick 才自杀（20 tick = 1 秒）。"
-            + "⚠️ 3C3U 服务器必须 ≥600 tick，否则珍珠会消失，下限已锁死 600。")
-        .defaultValue(660)
-        .min(600)
-        .sliderMax(1200)
+            + "⚠️ 3C3U 实测 660 tick 仍会把珍珠吞掉，默认已抬到 1200（60 秒）；"
+            + "设太小珍珠会消失，设 0 = 确认完立刻死（必掉）。")
+        .defaultValue(1200)
+        .min(0)
+        .sliderMax(2000)
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
@@ -673,8 +674,10 @@ public class StashMover extends Module {
     private static final int PEARL_CONFIRM_TICKS = 6;
     /** 投出后等多久还没在腔室里看到珍珠 → 判定没进柱，重投（100 tick = 5 秒）。 */
     private static final int PEARL_CONFIRM_TIMEOUT = 100;
-    /** 自杀硬下限：3C3U 上低于 600 tick 珍珠会消失（用户实机口径，设置里也锁了 min=600）。 */
-    private static final int MIN_SUICIDE_DELAY = 600;
+    /** 投完到「确定要自杀」之间允许重走正前方的次数（V6.7p18，用户口径：最多重走 3 次）。 */
+    private static final int FRONT_ALIGN_MAX_TRIES = 3;
+    /** 单次「走到正前方」的等待上限（tick）：超了算一次重走。 */
+    private static final int FRONT_ALIGN_TIMEOUT = 240;
 
     // ===== V6.7p11：照 PearlDrop 校准的一套判定阈值与超时 =====
     /** 判定「已居中」的最大水平距离（格）。超过说明还没到边缘。 */
@@ -765,10 +768,12 @@ public class StashMover extends Module {
     private int throwSub;
     private int throwRetries;
     private BlockPos throwSafeSpot;
+    /** V6.7p18：开门后「纠到正前方」已经重走了几次。 */
+    private int frontAlignTries;
+    /** V6.7p18：本轮纠位的开始 tick（0 = 还没开始）。 */
+    private long frontWalkStart;
 
     // ===== V6.7p10：短按键站位（1 格级不再调寻路）=====
-    /** 柱子旁「该站的那一格」，按区缓存。 */
-    private BlockPos throwStandCache;
     private BlockPos stepTarget;
     private int stepTicks;
     private int stepStuckTicks;
@@ -1484,12 +1489,12 @@ public class StashMover extends Module {
             enterStuck("请先设置搬运活板门位置");
             return;
         }
-        // V6.7p13：双号复用和 1号同一套投掷子流程（站位正对面→开活板门→贴边→投→判定→后退）。
-        // 成功后去还珍珠（PUT_BACK）；没珍珠则回去借（TAKE_PEARL）；失败由子流程内部报警。
+        // V6.7p13：双号复用和 1号同一套投掷子流程（脱离→开活板门→站正前方→贴边→投→判定→后退）。
+        // V6.7p18：投完**先确认腔室**再还余量 —— 用户口径「成功之后再放回珍珠」。
+        // 旧顺序（投→还→确认）在确认失败时珍珠已经还回箱子，得再跑一趟珍珠箱才能重投。
         ThrowSeq r = tickThrowSequence(stand, () -> {
             releaseSneak();
-            moverState = MoverState.PUT_BACK;
-            cooldown = 10;
+            startPearlConfirm("投掷完成");
         });
         if (r == ThrowSeq.NO_PEARL) {
             moverState = MoverState.TAKE_PEARL;
@@ -1499,20 +1504,20 @@ public class StashMover extends Module {
     private void dualPutBack() {
         if (countPearls() == 0) {
             closeScreen();
-            startPearlConfirm("没有多余珍珠要还");
+            afterPutBack();
             return;
         }
         if (containerOpen()) {
             // 珍珠箱塞满珍珠时放不回去，直接跳过（misaka 同款分支）
             if (containerIsFull()) {
                 closeScreen();
-                startPearlConfirm("珍珠箱已满，多余珍珠留在身上");
+                afterPutBack();
                 return;
             }
             int slot = findPearlSlotInInventory();
             if (slot < 0) {
                 closeScreen();
-                startPearlConfirm("背包里已经没有珍珠");
+                afterPutBack();
                 return;
             }
             clickSlot(slot, SlotActionType.QUICK_MOVE);
@@ -1526,6 +1531,22 @@ public class StashMover extends Module {
         }
         if (!approachForOpen(chestPos)) return;
         openChestAt(chestPos);
+    }
+
+    /**
+     * 还完余量之后去哪（V6.7p18）。
+     *
+     * <p>新顺序是「投 → 确认 → 还」，所以正常走到这里 {@code pearlConfirmedTick > 0}，直接进自杀等待；
+     * 只有“腔室里那颗珍珠其实是别人放的”这类极端情况才会没确认过，那就回去补确认 ——
+     * 没票绝不自杀。
+     */
+    private void afterPutBack() {
+        if (pearlConfirmedTick > 0) {
+            moverState = MoverState.SUICIDE_PREP;
+            cooldown = 20;
+        } else {
+            startPearlConfirm("余量已还，回程票未确认");
+        }
     }
 
     /** 投掷与还珍珠都做完了 → 进入「确认回程票」（V6.7p14）。 */
@@ -1555,10 +1576,16 @@ public class StashMover extends Module {
             pearlConfirmStreak++;
             if (StashMoveLogic.pearlConfirmed(pearlConfirmStreak, PEARL_CONFIRM_TICKS)) {
                 pearlConfirmedTick = tick;
-                int delay = Math.max(MIN_SUICIDE_DELAY, suicideDelay.get());
+                int delay = suicideDelay.get();
                 info("回程票已确认（腔室里检测到自己的珍珠），" + (delay / 20) + " 秒后自杀");
-                moverState = MoverState.SUICIDE_PREP;
-                cooldown = 20;
+                // 确认成功之后才处理余量：还有珍珠就去还，没有就直接等自杀
+                if (countPearls() > 0) {
+                    moverState = MoverState.PUT_BACK;
+                    cooldown = PACE_STEP;
+                } else {
+                    moverState = MoverState.SUICIDE_PREP;
+                    cooldown = 20;
+                }
             }
             return;
         }
@@ -1570,10 +1597,12 @@ public class StashMover extends Module {
                     + " 次），请手动检查活板门/水柱结构");
                 return;
             }
-            warning("腔室里没检测到自己的珍珠，重投一次（第 " + pearlConfirmRetries + " 次）");
+            warning("腔室里没检测到自己的珍珠，先补一颗再重投（第 " + pearlConfirmRetries + " 次）");
+            // 用户口径：检测到腔室没珍珠 → 先取珍珠，再投放；投不进就再取再投。
+            // 背包里还有珍珠时 TAKE_PEARL 会自动跳过开箱、直接进 THROW。
             throwSub = 0;
             throwRetries = 0;
-            moverState = MoverState.THROW;
+            moverState = MoverState.TAKE_PEARL;
             cooldown = PACE_STEP;
         }
     }
@@ -1643,8 +1672,8 @@ public class StashMover extends Module {
             return;
         }
         // 3C3U 的硬要求：确认之后还要等 ≥600 tick，否则那颗珍珠会被服务器吞掉。
-        int delay = Math.max(MIN_SUICIDE_DELAY, suicideDelay.get());
-        if (!StashMoveLogic.canSuicide(tick, pearlConfirmedTick, suicideDelay.get(), MIN_SUICIDE_DELAY)) {
+        int delay = suicideDelay.get();
+        if (!StashMoveLogic.canSuicide(tick, pearlConfirmedTick, delay)) {
             long waited = tick - pearlConfirmedTick;
             if (debug.get() && waited % 100 == 0) {
                 info("[双号][自杀] 回程票确认后等待 " + (waited / 20) + "/" + (delay / 20) + " 秒");
@@ -2279,27 +2308,43 @@ public class StashMover extends Module {
     }
 
     /**
-     * 柱子旁边「该站哪一格」（V6.7p12，用户口径：**站活板门的正对面**）。
+     * 柱子旁边「该站哪一格」（V6.7p18 重写）。
      *
      * <p>为什么必须正对面：门板立在自己那一格的某一侧，站对面贴到边缘也碰不到它；
      * 站侧面或门板那一侧，按住 Shift 往前贴的时候人物碰撞箱（0.6 宽）会顶到门板，
      * 走不到位 → 珍珠投不进腔室。这正是实机反馈的「走不到合适位置」。
      *
-     * <p>实现：用 {@link #openLidSide} 读出门板占哪一侧，正对面**优先**（不加惩罚），
-     * 垂直两侧次之（+100），门板那一侧最后（+1000）；同一层都不可站再试 +1 层，
-     * 还不行退回 {@link #pearlStandSpot}。结果按区缓存。
+     * <p>⚠️ 旧实现（p12~p17）有两个连着的坑，也是「每次都在旁边投」的真正原因：
+     * <ol>
+     *   <li>站位发生在开门**之前**，此时 {@link #openLidSide} 返回 null（平铺的薄板看不出占哪侧），
+     *       于是只按「离得近」挑一格，根本没有正前方概念；</li>
+     *   <li>挑出来的格子还会写进缓存并**永久短路**，门开了也不会重算。</li>
+     * </ol>
+     * 现在：门关着只给一个「够得着」的临时落脚点（{@link #pearlStandSpot}），
+     * 门开之后才按门板侧算正对面，而且**不缓存**（每次现算，就几次方块查询）。
      */
     private BlockPos throwStandSpot(BlockPos trapdoor) {
         if (mc.world == null || mc.player == null) return null;
         BlockPos water = trapdoor.down(1);
-        if (throwStandCache != null && !throwStandCache.equals(water) && isStandable(throwStandCache)) {
-            return throwStandCache;
-        }
         Direction lid = openLidSide(trapdoor);
-        if (debug.get() && lid != null && tick % 100 == 0) {
-            debugMsg("[站位] 门板占" + lid.asString() + "侧，优先站对侧");
+        if (lid == null) {
+            // 门还关着：读不出门板占哪侧，先给个能站人的临时点。
+            // 开门后 tickThrowSequence 会再调一次 settlePosition，那时才算正前方。
+            return pearlStandSpot(trapdoor);
         }
 
+        Direction front = lid.getOpposite();
+        for (int level = 0; level <= 1; level++) {
+            BlockPos p = new BlockPos(trapdoor.getX() + front.getOffsetX(),
+                trapdoor.getY() + level, trapdoor.getZ() + front.getOffsetZ());
+            if (p.equals(water) || !isStandable(p)) continue;
+            if (debug.get() && tick % 100 == 0) {
+                debugMsg("[站位] 门板占" + lid.asString() + "侧 → 站正对面");
+            }
+            return p;
+        }
+
+        // 正前方站不了（用户口径：正常结构永远可站，这里只是兜底，避免直接卡死）
         BlockPos best = null;
         for (int level = 0; level <= 1 && best == null; level++) {
             int feetY = trapdoor.getY() + level;
@@ -2308,20 +2353,19 @@ public class StashMover extends Module {
                 BlockPos p = new BlockPos(trapdoor.getX() + d.getOffsetX(), feetY, trapdoor.getZ() + d.getOffsetZ());
                 if (p.equals(water) || !isStandable(p)) continue;
                 double score = p.getSquaredDistance(mc.player.getBlockPos());
-                if (lid != null) {
-                    if (d == lid) score += 1000;                          // 门板那一侧：贴过去必撞
-                    else if (d != lid.getOpposite()) score += 100;        // 垂直两侧次之
-                    // 正对面：不加惩罚，只要能站就优先
-                }
+                if (d == lid) score += 1000;                       // 门板那一侧：贴过去必撞
+                else if (d != front) score += 100;                 // 垂直两侧次之
                 if (score < bestScore) {
                     bestScore = score;
                     best = p;
                 }
             }
         }
-        if (best == null) best = pearlStandSpot(trapdoor);
-        throwStandCache = best;
-        return best;
+        if (best != null) {
+            warnThrottled("活板门正前方那一格站不了，退回侧面站位（建议检查结构）");
+            return best;
+        }
+        return pearlStandSpot(trapdoor);
     }
 
     /**
@@ -2530,7 +2574,9 @@ public class StashMover extends Module {
         }
         ThrowSeq r = tickThrowSequence(stand, this::finishTrioThrow);
         if (r == ThrowSeq.NO_PEARL) {
-            enterStuck("快捷栏里没有末影珍珠");
+            // V6.7p18：投掷把珍珠用光时不再直接卡死，回本区珍珠箱补货再来（补不到由 RESTOCK 报警）
+            restockPhase = 0;
+            setTrioState(TrioState.RESTOCK, "没有末影珍珠了，先回珍珠箱补货");
         }
     }
 
@@ -2557,7 +2603,9 @@ public class StashMover extends Module {
                     return ThrowSeq.DONE;
                 }
                 throwRetries = 0;
-                setThrowSub(1, "柱里没珍珠，准备投一颗");
+                frontAlignTries = 0;
+                frontWalkStart = 0;
+                setThrowSub(1, "柱里没珍珠，准备投一颗（先脱离气泡柱再开活板门）");
             }
             case 1 -> {
                 if (settlePosition(stand)) {
@@ -2573,7 +2621,28 @@ public class StashMover extends Module {
                     }
                     trapdoorClickAttempts = 0;
                     trapdoorRetreats = 0;
-                    setThrowSub(3, "活板门已开，潜行贴到边缘");
+                    // V6.7p18：门开着才读得出门板占哪侧 —— 到这里才把站位纠到「正前方」。
+                    // 旧实现在开门前就选好站位还写了缓存，门开了也不重算，于是每次都站旁边。
+                    if (!settlePosition(stand)) {
+                        if (frontWalkStart == 0) {
+                            frontWalkStart = tick;
+                        } else if (tick - frontWalkStart > FRONT_ALIGN_TIMEOUT) {
+                            frontAlignTries++;
+                            frontWalkStart = tick;
+                            PathManagers.get().stop();
+                            if (frontAlignTries > FRONT_ALIGN_MAX_TRIES) {
+                                enterStuck("活板门已开，但走不到正前方（已重走 " + FRONT_ALIGN_MAX_TRIES
+                                    + " 次），请检查正前方那一格是否被占");
+                                return ThrowSeq.FAILED;
+                            }
+                            warnThrottled("还没站到活板门正前方，重走（第 " + frontAlignTries + " 次）");
+                        }
+                        return ThrowSeq.RUNNING;
+                    }
+                    frontAlignTries = 0;
+                    frontWalkStart = 0;
+                    debugMsg("[投掷] 已站到活板门正前方");
+                    setThrowSub(3, "已站到正前方，潜行贴到边缘");
                     edgeTicks = 0;
                     edgeStuckTicks = 0;
                     edgeCentered = 0;
@@ -2679,6 +2748,8 @@ public class StashMover extends Module {
                         enterStuck("投掷珍珠 " + TRIO_MAX_THROW_RETRIES + " 次都没确认投出（珍珠数没变）");
                     } else {
                         debugMsg("[校验] 珍珠数没变，第 " + throwRetries + " 次重投");
+                        frontAlignTries = 0;
+                        frontWalkStart = 0;
                         setThrowSub(2, "校验失败，重开活板门重投");
                         cooldown = PACE_STEP;
                     }

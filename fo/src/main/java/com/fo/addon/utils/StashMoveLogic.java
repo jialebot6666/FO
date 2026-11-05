@@ -251,21 +251,18 @@ public final class StashMoveLogic {
     /**
      * 允不允许自杀（双号）。
      *
-     * <p>两条硬约束：
-     * <ol>
-     *   <li>{@code confirmedTick <= 0} = 从没确认过腔室里的珍珠 → <b>一律不许自杀</b>，
-     *       否则这一趟死完就没有回程票，下一趟永远拉不回来；</li>
-     *   <li>确认之后还要等够 {@code max(delay, minDelay)} tick —— 3C3U 上低于 600 tick
-     *       珍珠会被服务器吞掉，所以即使配置被改小也要按 {@code minDelay} 兜住。</li>
-     * </ol>
+     * <p>硬约束：{@code confirmedTick <= 0} = 从没确认过腔室里的珍珠 → <b>一律不许自杀</b>，
+     * 否则这一趟死完就没有回程票，下一趟永远拉不回来。
+     *
+     * <p>确认之后按设置里的「自杀延时」等够就行（V6.7p18 起不再夹 600 下限：3C3U 实测
+     * 660 仍会把珍珠吞掉，默认值已抬到 1200，范围 0~2000 交给用户自己定）。
      *
      * @param nowTick       当前 tick
      * @param confirmedTick 确认成功的那一 tick（0 = 未确认）
-     * @param delay         设置里的「自杀延时」
-     * @param minDelay      服务器硬下限（{@code MIN_SUICIDE_DELAY} = 600）
+     * @param delay         设置里的「自杀延时」（tick）
      */
-    public static boolean canSuicide(long nowTick, long confirmedTick, int delay, int minDelay) {
+    public static boolean canSuicide(long nowTick, long confirmedTick, int delay) {
         if (confirmedTick <= 0) return false;
-        return nowTick - confirmedTick >= Math.max(delay, minDelay);
+        return nowTick - confirmedTick >= Math.max(0, delay);
     }
 }
