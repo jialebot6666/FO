@@ -220,6 +220,22 @@ public final class StashMoveLogic {
         return FACE_UP;
     }
 
+    /**
+     * 双号「自动搜索」模式的兜底判区（V6.7p17）。
+     *
+     * <p>单箱 / 框选模式都有源区坐标，直接走 {@link #nearerZone} 的双锚点取近；
+     * 只有自动搜索没有源区锚点（它的语义就是「在重生点脚下搜箱子」），
+     * 这时退化成「离存储侧任一锚点不超过半径 → 存储区」。
+     *
+     * @param nearestStoreDistanceXZ 玩家到存储侧锚点（存储箱 / 珍珠箱 / 活板门）的最近水平距离；
+     *                               三个都没配时传 {@link Double#MAX_VALUE}
+     * @param radius                 判定半径（格）
+     */
+    public static Zone storeZoneByDistance(double nearestStoreDistanceXZ, double radius) {
+        if (Double.isNaN(nearestStoreDistanceXZ)) return Zone.SOURCE;
+        return nearestStoreDistanceXZ <= Math.max(0, radius) ? Zone.STORE : Zone.SOURCE;
+    }
+
     // ==================== V6.7p14：回程票（腔室珍珠）确认 + 自杀门槛 ====================
 
     /**

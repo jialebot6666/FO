@@ -166,6 +166,7 @@ public class StashMover extends Module {
      * → 卸货 → 取珍珠 → 投回程票 → 还余量 → <b>确认腔室有珍珠</b> → 延时自杀 → 重生。
      */
     private enum MoverState {
+        ZONE_CHECK,
         LOOT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
         UNLOAD, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
         SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
@@ -297,6 +298,17 @@ public class StashMover extends Module {
         .min(1)
         .sliderMax(20)
         .visible(() -> mode.get() == Mode.MOVER || mode.get() == Mode.TRIO)
+        .build());
+
+    private final Setting<Integer> dualZoneRadius = sgMover.add(new IntSetting.Builder()
+        .name("存储区判定半径")
+        .description("双号开模块时判断「我在待搬运箱区还是存储区」：离存储箱/珍珠箱/活板门的最近水平距离"
+            + "不超过这个值就算在存储区（会先卸货再补回程票）。只在「自动搜索」模式用到——"
+            + "单箱和框选有源区坐标，走双锚点取近，不看这个值。")
+        .defaultValue(32)
+        .min(8)
+        .sliderMax(128)
+        .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.AUTO)
         .build());
 
     private final Setting<Boolean> onlyShulker = sgMover.add(new BoolSetting.Builder()
@@ -893,7 +905,9 @@ public class StashMover extends Module {
         pearlConfirmStart = 0;
         pearlConfirmRetries = 0;
 
-        moverState = MoverState.LOOT;
+        // V6.7p17：先判区再决定走哪一段——站在存储区开模块时不能再从 LOOT 起步
+        //（自动搜索会把存储箱当待搬运箱，单箱/框选会直接寻路去源区）
+        moverState = MoverState.ZONE_CHECK;
         trioState = TrioState.SETTLE;
         trioZone = StashMoveLogic.Zone.UNKNOWN;
         throwSub = 0;
@@ -1115,6 +1129,7 @@ public class StashMover extends Module {
             return;
         }
         switch (moverState) {
+            case ZONE_CHECK -> dualZoneCheck();
             case LOOT -> dualLoot();
             case SEND -> dualSend();
             case WAIT_ACK -> dualWaitAck();
@@ -1132,6 +1147,100 @@ public class StashMover extends Module {
             case REFILL -> dualRefill();
             case STUCK -> tickStuck();
         }
+    }
+
+    // ==================== 双号：入口判区（V6.7p17） ====================
+
+    /**
+     * 先判「我在哪一侧」，再决定从路线的哪一段进场。
+     *
+     * <p>不判区的后果很直接：站在存储区开模块，状态机从 {@code LOOT} 起步 ——
+     * 自动搜索会在脚下把存储箱当待搬运箱搬走，单箱 / 框选则直接寻路去源区。
+     *
+     * <p>判据与三号同源：
+     * <ul>
+     *   <li><b>单箱 / 框选</b>本来就有源区坐标 → 直接用
+     *       {@link StashMoveLogic#nearerZone} 双锚点取近；</li>
+     *   <li><b>自动搜索</b>没有源区锚点（语义就是「在重生点脚下搜箱子」）→
+     *       退化成「离存储侧任一锚点 ≤ 判定半径」。</li>
+     * </ul>
+     *
+     * <p>⚠️ 日志里只打距离，不打坐标（无政府服防泄露，`NoCoordinatesInLogsTest` 会盯）。
+     */
+    private void dualZoneCheck() {
+        BlockPos store = storeChest.get();
+        if (store.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置存储箱位置");
+            return;
+        }
+        BlockPos source = dualSourceAnchor();
+        StashMoveLogic.Zone zone;
+        if (source != null) {
+            zone = StashMoveLogic.nearerZone(mc.player.getX(), mc.player.getZ(),
+                source.getX() + 0.5, source.getZ() + 0.5,
+                store.getX() + 0.5, store.getZ() + 0.5);
+            debugMsg("[双号][判区] 双锚点取近：离源区 " + distText(source)
+                + "，离存储区 " + distText(store));
+        } else {
+            double d = nearestStoreAnchorDistanceXZ();
+            zone = StashMoveLogic.storeZoneByDistance(d, dualZoneRadius.get());
+            debugMsg("[双号][判区] 自动搜索按半径兜底：离存储侧最近 "
+                + (d == Double.MAX_VALUE ? "未配置锚点" : numberText(d) + " 格")
+                + "，判定半径 " + dualZoneRadius.get() + " 格");
+        }
+        if (zone == StashMoveLogic.Zone.STORE) {
+            info("判定在存储区：先卸货、补回程票，再自杀回待搬运箱区");
+            dualArriveWaitStart = tick;
+            dualSettleStart = 0;
+            moverState = MoverState.ARRIVE_WAIT;
+            cooldown = PACE_STEP;
+        } else {
+            debugMsg("[双号][判区] 判定在待搬运箱区，开始取货");
+            moverState = MoverState.LOOT;
+            cooldown = 0;
+        }
+        progress();
+    }
+
+    /** 双号的源区锚点：单箱 = 目标箱子，框选 = 框中心，自动搜索 = 没有（null）。 */
+    private BlockPos dualSourceAnchor() {
+        switch (chestMode.get()) {
+            case SINGLE -> {
+                BlockPos t = targetChest.get();
+                return t.equals(BlockPos.ORIGIN) ? null : t;
+            }
+            case RANGE -> {
+                BlockPos a = pos1.get();
+                BlockPos b = pos2.get();
+                if (a.equals(BlockPos.ORIGIN) || b.equals(BlockPos.ORIGIN)) return null;
+                return new BlockPos((a.getX() + b.getX()) / 2,
+                    (a.getY() + b.getY()) / 2, (a.getZ() + b.getZ()) / 2);
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
+    /** 到存储侧三个锚点（存储箱 / 珍珠箱 / 活板门）的最近水平距离；都没配返回 {@code MAX_VALUE}。 */
+    private double nearestStoreAnchorDistanceXZ() {
+        double best = Double.MAX_VALUE;
+        for (BlockPos p : new BlockPos[]{storeChest.get(), pearlChest.get(), trapdoor.get()}) {
+            if (p == null || p.equals(BlockPos.ORIGIN)) continue;
+            double d = Math.hypot(mc.player.getX() - (p.getX() + 0.5),
+                mc.player.getZ() - (p.getZ() + 0.5));
+            if (d < best) best = d;
+        }
+        return best;
+    }
+
+    private String distText(BlockPos p) {
+        return numberText(Math.hypot(mc.player.getX() - (p.getX() + 0.5),
+            mc.player.getZ() - (p.getZ() + 0.5))) + " 格";
+    }
+
+    private static String numberText(double d) {
+        return String.format(Locale.ROOT, "%.0f", d);
     }
 
     private void dualLoot() {
@@ -2066,6 +2175,18 @@ public class StashMover extends Module {
         int[] off = StashMoveLogic.chestOtherHalfOffset(type == ChestType.LEFT,
             facing.getOffsetX(), facing.getOffsetZ());
         return pos.add(off[0], 0, off[1]);
+    }
+
+    /**
+     * 这个方块是不是「存储侧」的箱子（存储箱 / 珍珠箱，含双箱搭档另一半）。
+     *
+     * <p>扫出来的待搬运队列里必须把它们剔掉：判区万一失误（基地太大、人站在判定半径外），
+     * 至少不会把自家仓库当待搬运箱搬走。
+     */
+    private boolean isStoreSideChest(BlockPos pos) {
+        if (pos == null) return false;
+        return pos.equals(storeChest.get()) || pos.equals(pearlChest.get())
+            || pos.equals(chestPartner(storeChest.get())) || pos.equals(chestPartner(pearlChest.get()));
     }
 
     /** 本 tick 的移动包（带朝向）发完之后再执行挂起的交互动作。 */
@@ -3456,6 +3577,9 @@ public class StashMover extends Module {
                     mc.player.getBlockPos().getSquaredDistance(x),
                     mc.player.getBlockPos().getSquaredDistance(y)));
             }
+            // V6.7p17：自家仓库永远不进待搬运队列（含双箱搭档另一半）——
+            // 判区只管「走哪一段」，这条名单管「哪些箱子永远不能碰」，两件事互不依赖。
+            chestQueue.removeIf(this::isStoreSideChest);
             if (chestQueue.isEmpty()) return null;
         }
         while (queueIndex < chestQueue.size()) {

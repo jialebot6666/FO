@@ -301,4 +301,33 @@ class StashMoveLogicTest {
         assertFalse(StashMoveLogic.canSuicide(confirmed + 800, confirmed, 900, 600));
         assertTrue(StashMoveLogic.canSuicide(confirmed + 900, confirmed, 900, 600));
     }
+
+    // ==================== V6.7p17：双号入口判区 ====================
+
+    @Test
+    void 自动搜索按半径兜底判区() {
+        assertEquals(StashMoveLogic.Zone.STORE, StashMoveLogic.storeZoneByDistance(10, 32));
+        // 边界值算存储区：正好站在判定圈上，按存储区处理更安全（宁可直接卸货，也不去搜自家箱子）
+        assertEquals(StashMoveLogic.Zone.STORE, StashMoveLogic.storeZoneByDistance(32, 32));
+        assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.storeZoneByDistance(32.1, 32));
+    }
+
+    @Test
+    void 没配存储锚点按源区处理() {
+        assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.storeZoneByDistance(Double.MAX_VALUE, 32));
+        assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.storeZoneByDistance(Double.NaN, 32));
+    }
+
+    @Test
+    void 判定半径为零只认脚下() {
+        assertEquals(StashMoveLogic.Zone.STORE, StashMoveLogic.storeZoneByDistance(0, 0));
+        assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.storeZoneByDistance(0.1, 0));
+    }
+
+    @Test
+    void 单箱框选走双锚点取近() {
+        // 复用三号同一个函数：离哪个锚点近就算哪个区
+        assertEquals(StashMoveLogic.Zone.STORE, StashMoveLogic.nearerZone(100, 0, 0, 0, 100, 0));
+        assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.nearerZone(10, 0, 0, 0, 500, 0));
+    }
 }
