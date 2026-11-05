@@ -219,4 +219,37 @@ public final class StashMoveLogic {
         }
         return FACE_UP;
     }
+
+    // ==================== V6.7p14：回程票（腔室珍珠）确认 + 自杀门槛 ====================
+
+    /**
+     * 回程票是否已确认：连续 {@code needTicks} 个 tick 都在腔室里看到自己的珍珠才算。
+     *
+     * <p>为什么不是「看到一次就算」：珍珠实体由服务端同步，投出去那一两 tick 客户端还看不到，
+     * 单帧判定会把「还没同步」误判成「已经有了」。
+     */
+    public static boolean pearlConfirmed(int streak, int needTicks) {
+        return needTicks > 0 && streak >= needTicks;
+    }
+
+    /**
+     * 允不允许自杀（双号）。
+     *
+     * <p>两条硬约束：
+     * <ol>
+     *   <li>{@code confirmedTick <= 0} = 从没确认过腔室里的珍珠 → <b>一律不许自杀</b>，
+     *       否则这一趟死完就没有回程票，下一趟永远拉不回来；</li>
+     *   <li>确认之后还要等够 {@code max(delay, minDelay)} tick —— 3C3U 上低于 600 tick
+     *       珍珠会被服务器吞掉，所以即使配置被改小也要按 {@code minDelay} 兜住。</li>
+     * </ol>
+     *
+     * @param nowTick       当前 tick
+     * @param confirmedTick 确认成功的那一 tick（0 = 未确认）
+     * @param delay         设置里的「自杀延时」
+     * @param minDelay      服务器硬下限（{@code MIN_SUICIDE_DELAY} = 600）
+     */
+    public static boolean canSuicide(long nowTick, long confirmedTick, int delay, int minDelay) {
+        if (confirmedTick <= 0) return false;
+        return nowTick - confirmedTick >= Math.max(delay, minDelay);
+    }
 }

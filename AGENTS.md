@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p13`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p13-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p14`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p14-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -544,6 +544,36 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     防回归（只查自动搬运模块的日志语句不含绝对坐标）。
   - 测试：全仓 **52 套件 423 测试全绿**（本轮是重构 + 行为对齐，无新增纯逻辑函数）。
   - ⚠️ 待用户实机确认：取货/存货「有时不开箱」是否只剩上面的计数 bug（用户表示要自己测定位）。
+- ✅ 6.7p14 已完成：**双号搬运端改成「按路线走」**（用户实机反馈「拉回存储区后不储存、反而寻路回去」，
+  方案经讨论后确认：取整堆珍珠 + 保留还珍珠，自杀延时必须 ≥600 tick）。
+  - **根因**：① 收到「收到N」就进 `WALK_WATER` 并**当场**走向存储区活板门 —— 此时人还在待搬运箱区，
+    存储区区块没加载 → `pearlStandSpot` 必然返回 null → 把活板门当归宿点开始跨图寻路；
+    被珍珠拉过去后 Baritone 旧路径没停（`dualWalkWater` 是裸调 `moveToPrecise`），人顺着旧路往回走。
+    对比三号的 `trioWaitTeleport`（识别落点突跳 → 停路 → ARRIVE_WAIT 2 秒），双号三件事一件都没有。
+    ② 卸货排在投珍珠之后，投掷链路任何一环不过，`WALK_STORE` 永远轮不到 —— 表现就是「不储存」。
+  - **新路线（与三号同构，双号专用状态）**：
+    `LOOT → SEND → WAIT_ACK → WAIT_TELEPORT → ARRIVE_WAIT → SETTLE → UNLOAD → TAKE_PEARL
+    → THROW → PUT_BACK → CONFIRM_PEARL → SUICIDE_PREP → DEAD_WAIT → LOOT`
+    （删掉 `WALK_WATER` / `WALK_STORE` 两个状态与 `dualWalkWater` / `dualWalkStore` 两个方法；
+    双号方向固定：传送=存储区、自杀=源区，所以**不需要**三号那套判区）
+  - **WAIT_TELEPORT**：松键 + 停路，`teleportJumped(...,32)` 识别落地；超时（新增设置
+    「等待被拉超时」，默认 **100 tick = 5 秒**，可调 40~400）就**原样重发**「拉我N」——
+    新增 `resendPullRequest`，**N 不递增**（`sendPullRequest` 会 ++，重发会让搭档按新数字再点一次门、
+    多触一颗珍珠），最多 3 次后报警。
+  - **ARRIVE_WAIT / SETTLE**：落地先静默 40 tick（复用 `ARRIVE_WAIT_TICKS`）等区块；
+    `SETTLE` 只做「离开气泡柱」（`dualSettle`：在水里/站在活板门上就走到 `pearlStandSpot`），
+    **不把人硬拽到柱子旁**——卸货不需要站位。
+  - **CONFIRM_PEARL（回程票）**：投完 + 还完余量后，连续 `PEARL_CONFIRM_TICKS=6` tick 在腔室里
+    检测到自己的珍珠才算确认（实体同步有延迟，一帧不算）；100 tick 没看到就重投，最多 3 次。
+  - **自杀门槛**：`自杀延时` 设置下限锁死 **600**（默认 660，3C3U 上低于 600 珍珠会被吞掉），
+    计时起点改为 **确认成功那一 tick**；`pearlConfirmedTick<=0` 时**一律不许自杀**（退回重投）。
+    删除原「投掷珍珠后延时自杀」开关（默认 false，等于投完立刻死，与 600 tick 要求冲突）。
+    纯逻辑 `StashMoveLogic.canSuicide(...)` / `pearlConfirmed(...)` 可单测。
+  - **附带**：`dualUnload` 补「存储箱未设置」校验；`dualPutBack` 补「珍珠箱未设置」校验；
+    重生后 cooldown 20 → 40 tick 等区块；新增 6 个单测。
+  - 测试：全仓 **52 套件 429 测试全绿**。
+  - ⚠️ 已知取舍：`finalTrip`（最后一趟）仍是卸完货直接关模块，**不给腔室补回程票**；
+    下次开局需要人工确认腔室里还有没有自己的珍珠（或用已有那颗）。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
     珍珠箱旁或两区之外。表现是「柱子 → 珍珠箱 → 柱子」白跑两趟；更糟的是珍珠箱全路线只有一个，

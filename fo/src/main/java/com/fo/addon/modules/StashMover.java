@@ -151,9 +151,23 @@ public class StashMover extends Module {
         }
     }
 
+    /**
+     * 双号搬运端的路线（V6.7p14 按三号的走法重排）。
+     *
+     * <p>旧顺序是「发拉我 → 等收到 → 走向柱子 → 投珍珠 → 还珍珠 → 走去存储箱 → 卸货 → 自杀」，
+     * 两个硬伤：① 收到「收到N」时人还在待搬运箱区，代码立刻开始走向存储区的活板门
+     * （源区读不到那边的区块，站位搜索必然返回空 → 直接把活板门当归宿点跨图寻路），
+     * 被珍珠拉过去的瞬间旧路径还活着，人就会顺着旧路往回走/乱走；
+     * ② 卸货排在投珍珠后面，投掷链路任何一环不过，卸货永远轮不到 —— 表现为「不储存」。
+     *
+     * <p>现在的路线（与三号同构）：
+     * 取货 → 发拉我 → 等确认 → <b>等落地</b> → <b>到达静默 2 秒</b> → <b>脱离气泡柱</b>
+     * → 卸货 → 取珍珠 → 投回程票 → 还余量 → <b>确认腔室有珍珠</b> → 延时自杀 → 重生。
+     */
     private enum MoverState {
-        LOOT, SEND, WAIT_ACK, WALK_WATER, TAKE_PEARL, THROW, PUT_BACK,
-        WALK_STORE, UNLOAD, SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
+        LOOT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
+        UNLOAD, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
+        SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
     /**
@@ -335,20 +349,29 @@ public class StashMover extends Module {
         .visible(() -> mode.get() == Mode.MOVER && suicideMode.get() == SuicideMode.COMMAND)
         .build());
 
-    private final Setting<Boolean> suicideAfterPearl = sgMover.add(new BoolSetting.Builder()
-        .name("投掷珍珠后延时自杀")
-        .description("投完滞留珍珠先等一段时间再死，防止珍珠消失。")
-        .defaultValue(false)
+    /**
+     * 自杀延时（V6.7p14：改成「确认腔室珍珠之后」的固定等待，不再是一个可关的开关）。
+     *
+     * <p>为什么下限锁死 600 tick：3C3U 服务端对滞留珍珠的同步有延迟，投完立刻死会让
+     * 那颗珍珠消失 —— 下一趟就没有回程票，整条循环断掉。用户实机口径：必须 ≥600 tick。
+     */
+    private final Setting<Integer> suicideDelay = sgMover.add(new IntSetting.Builder()
+        .name("自杀延时")
+        .description("确认腔室里已经有自己的珍珠之后，再等多少 tick 才自杀（20 tick = 1 秒）。"
+            + "⚠️ 3C3U 服务器必须 ≥600 tick，否则珍珠会消失，下限已锁死 600。")
+        .defaultValue(660)
+        .min(600)
+        .sliderMax(1200)
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
-    private final Setting<Integer> suicideDelay = sgMover.add(new IntSetting.Builder()
-        .name("自杀延时")
-        .description("投掷珍珠后等多少 tick 才能自杀（20 tick = 1 秒）。")
-        .defaultValue(660)
-        .min(0)
-        .sliderMax(1200)
-        .visible(() -> mode.get() == Mode.MOVER && suicideAfterPearl.get())
+    private final Setting<Integer> teleportWaitTimeout = sgMover.add(new IntSetting.Builder()
+        .name("等待被拉超时")
+        .description("发出「拉我N」后多少 tick 还没被拉过去，就原样重发一次（100 tick = 5 秒，最多重发 3 次）。")
+        .defaultValue(100)
+        .min(40)
+        .sliderMax(400)
+        .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<Integer> lavaRadius = sgMover.add(new IntSetting.Builder()
@@ -615,6 +638,14 @@ public class StashMover extends Module {
     private static final int PACE_RESTOCK_DONE = 10;    // 补珍珠完成 → 投掷
     private static final int PACE_TRAPDOOR_CLICK = 14;  // 点活板门后等方块状态同步
 
+    // ===== V6.7p14：双号的回程票（腔室珍珠）确认 =====
+    /** 连续这么多 tick 都在腔室里检测到自己的珍珠才算确认（实体同步有延迟，看一帧不算）。 */
+    private static final int PEARL_CONFIRM_TICKS = 6;
+    /** 投出后等多久还没在腔室里看到珍珠 → 判定没进柱，重投（100 tick = 5 秒）。 */
+    private static final int PEARL_CONFIRM_TIMEOUT = 100;
+    /** 自杀硬下限：3C3U 上低于 600 tick 珍珠会消失（用户实机口径，设置里也锁了 min=600）。 */
+    private static final int MIN_SUICIDE_DELAY = 600;
+
     // ===== V6.7p11：照 PearlDrop 校准的一套判定阈值与超时 =====
     /** 判定「已居中」的最大水平距离（格）。超过说明还没到边缘。 */
     private static final double TRIO_CENTER_DIST = 1.2;
@@ -668,6 +699,24 @@ public class StashMover extends Module {
     private int resendCount;
     private long verifyStartTick;
     private long lastPearlThrowTick;
+
+    // ===== V6.7p14：双号的「等落地 / 到达 / 回程票确认」三件事 =====
+    /** 发出「拉我」后开始等落地的 tick。 */
+    private long dualTeleportWaitStart;
+    /** 等落地阶段已经原样重发了几次（与 ack 阶段的重发分开计数）。 */
+    private int dualTeleportResends;
+    /** 落地后静默开始的 tick（等区块加载）。 */
+    private long dualArriveWaitStart;
+    /** 脱离气泡柱开始计时的 tick（0 = 还没开始）。 */
+    private long dualSettleStart;
+    /** 连续几 tick 在腔室里检测到自己的珍珠（确认回程票用）。 */
+    private int pearlConfirmStreak;
+    /** 回程票确认成功的那一 tick；0 = 未确认，**禁止自杀**。 */
+    private long pearlConfirmedTick;
+    /** 本轮确认开始计时的 tick。 */
+    private long pearlConfirmStart;
+    /** 本轮已经因为「没确认到」重投了几次。 */
+    private int pearlConfirmRetries;
     private long refillStartTick;
     private BlockPos cachedLava;
     private long lavaScanTick;
@@ -812,6 +861,16 @@ public class StashMover extends Module {
         pullActive = false;
         unloadedSomething = false;
         lastProgressTick = 0;
+
+        // V6.7p14：双号新增的几个阶段状态
+        dualTeleportWaitStart = 0;
+        dualTeleportResends = 0;
+        dualArriveWaitStart = 0;
+        dualSettleStart = 0;
+        pearlConfirmStreak = 0;
+        pearlConfirmedTick = 0;
+        pearlConfirmStart = 0;
+        pearlConfirmRetries = 0;
 
         moverState = MoverState.LOOT;
         trioState = TrioState.SETTLE;
@@ -1038,12 +1097,14 @@ public class StashMover extends Module {
             case LOOT -> dualLoot();
             case SEND -> dualSend();
             case WAIT_ACK -> dualWaitAck();
-            case WALK_WATER -> dualWalkWater();
+            case WAIT_TELEPORT -> dualWaitTeleport();
+            case ARRIVE_WAIT -> dualArriveWait();
+            case SETTLE -> dualSettle();
+            case UNLOAD -> dualUnload();
             case TAKE_PEARL -> dualTakePearl();
             case THROW -> dualThrow();
             case PUT_BACK -> dualPutBack();
-            case WALK_STORE -> dualWalkStore();
-            case UNLOAD -> dualUnload();
+            case CONFIRM_PEARL -> dualConfirmPearl();
             case SUICIDE_PREP -> dualSuicidePrep();
             case SUICIDE_LAVA -> dualSuicideLava();
             case DEAD_WAIT -> dualDeadWait();
@@ -1095,19 +1156,48 @@ public class StashMover extends Module {
             return;
         }
         sendPullRequest(targetPlayer.get());
-        moverState = waitAck.get() ? MoverState.WAIT_ACK : MoverState.WALK_WATER;
+        if (waitAck.get()) {
+            moverState = MoverState.WAIT_ACK;
+        } else {
+            startTeleportWait();
+        }
+    }
+
+    /** 等确认/等落地超时后的「原样重发」：N 不递增，避免搭档按新数字再点一次门、多触一颗珍珠。 */
+    private void resendPullRequest(String target) {
+        if (target == null || target.isBlank() || mc.player == null) return;
+        sendPrivate(target, PeerMessageLogic.buildRequest(keyword.get(), expectedN));
+        debugMsg("原样重发「" + keyword.get() + expectedN + "」给 " + target);
+        progress();
+    }
+
+    /** 进入「等被拉走」：先松键、停路 —— 绝不在源区就开始走向存储区的柱子。 */
+    private void startTeleportWait() {
+        releaseMovementKeys();
+        PathManagers.get().stop();
+        pathTarget = null;
+        closeScreen();
+        dualTeleportWaitStart = tick;
+        dualTeleportResends = 0;
+        moverState = MoverState.WAIT_TELEPORT;
+        progress();
+        debugMsg("[双号][拉我] 已发出请求，原地等被拉走（" + teleportWaitTimeout.get() + " tick 没走就重发）");
     }
 
     private void dualWaitAck() {
+        // 搭档可能先拉人再回「收到」：先看有没有已经被拉走，别错过落点
+        if (dualTeleportJumpedNow()) {
+            onDualArrived();
+            return;
+        }
         if (ackReceived) {
-            moverState = MoverState.WALK_WATER;
+            startTeleportWait();
             return;
         }
         if (tick - lastSendTick > 300) {
             if (resendCount < 3) {
-                int next = resendCount + 1;
+                resendCount++;
                 sendPullRequest(targetPlayer.get());
-                resendCount = next;
                 debugMsg("等确认超时，第 " + resendCount + " 次重发「拉我N」");
             } else {
                 enterStuck("等待搭档确认超时（已重发 3 次）");
@@ -1115,27 +1205,115 @@ public class StashMover extends Module {
         }
     }
 
-    private void dualWalkWater() {
+    /** 这一 tick 是否刚被珍珠拉走（水平突跳 > 32 格）。 */
+    private boolean dualTeleportJumpedNow() {
+        if (lastPos == null || mc.player == null) return false;
+        Vec3d now = mc.player.getEntityPos();
+        return StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, now.x, now.z, 32);
+    }
+
+    /** 落地统一收尾：清队列、停路、松键，进到达静默（对齐三号的 WAIT_TELEPORT 收尾）。 */
+    private void onDualArrived() {
+        closeScreen();
+        releaseMovementKeys();
+        PathManagers.get().stop();
+        pathTarget = null;
+        blacklist.clear();
+        chestQueue.clear();
+        queueIndex = 0;
+        openChest = null;
+        openAttempts = 0;
+        trapdoorClickAttempts = 0;
+        throwSub = 0;
+        throwRetries = 0;
+        dualArriveWaitStart = tick;
+        dualSettleStart = 0;
+        moverState = MoverState.ARRIVE_WAIT;
+        info("已到达存储区，先等 " + (ARRIVE_WAIT_TICKS / 20) + " 秒让区块加载");
+        progress();
+    }
+
+    /**
+     * 等被拉走（V6.7p14 新增，对应三号的 {@code trioWaitTeleport}）。
+     *
+     * <p>⚠️ 这一步<b>绝对不能走路</b>：此时人还在待搬运箱区，存储区区块没加载，
+     * {@link #pearlStandSpot} 必然返回空，旧代码就会把活板门当归宿点开始跨图寻路；
+     * 被珍珠拉过去之后 Baritone 那条旧路径还活着，人就会顺着它往回走 ——
+     * 用户实机看到的「拉回来不储存、反而寻路回去」就是这里来的。
+     */
+    private void dualWaitTeleport() {
+        releaseMovementKeys();
+        if (PathManagers.get().isPathing()) PathManagers.get().stop();
+
+        if (dualTeleportJumpedNow()) {
+            onDualArrived();
+            return;
+        }
+
+        if (tick - dualTeleportWaitStart > teleportWaitTimeout.get()) {
+            if (dualTeleportResends < 3) {
+                dualTeleportResends++;
+                dualTeleportWaitStart = tick;
+                warning("还没被拉过去（" + teleportWaitTimeout.get() + " tick 超时），第 "
+                    + dualTeleportResends + " 次重发「拉我" + expectedN + "」");
+                resendPullRequest(targetPlayer.get());
+            } else {
+                enterStuck("等待被拉走超时（已重发 3 次）：检查搭档是否在线、珍珠点是否填对、腔室里有没有你的珍珠");
+            }
+        }
+    }
+
+    /** 到达静默（V6.7p14，对齐三号的 ARRIVE_WAIT）：落地后什么都不碰，等区块同步完。 */
+    private void dualArriveWait() {
+        releaseMovementKeys();
+        if (PathManagers.get().isPathing()) PathManagers.get().stop();
+        long waited = tick - dualArriveWaitStart;
+        if (waited < ARRIVE_WAIT_TICKS) {
+            if (debug.get() && waited % 20 == 0) {
+                debugMsg("[双号][到达] 等待加载 " + (waited / 20) + "/" + (ARRIVE_WAIT_TICKS / 20) + " 秒");
+            }
+            return;
+        }
+        dualSettleStart = tick;
+        moverState = MoverState.SETTLE;
+        cooldown = PACE_STEP;
+        debugMsg("[双号][到达] 加载完成，开始脱离气泡柱");
+    }
+
+    /**
+     * 脱离气泡柱（V6.7p14）。
+     *
+     * <p>被珍珠拉过来时人是泡在水柱里/站在活板门上的，这时候直接开存储箱会因距离和视线都不对
+     * 而点不开。这里只做「离开水柱」，<b>不把人硬拽到柱子旁</b>——卸货不需要站位，
+     * 只有投珍珠才需要（那一步由 {@code tickThrowSequence} 的 settlePosition 负责）。
+     */
+    private void dualSettle() {
         BlockPos stand = trapdoor.get();
         if (stand.equals(BlockPos.ORIGIN)) {
             enterStuck("请先设置搬运活板门位置");
             return;
         }
-        // 气泡柱里已经有自己的珍珠 → 不用再走这一趟，直接去还珍珠/卸货
-        if (ownPearlInColumn(stand.down(1))) {
-            moverState = MoverState.PUT_BACK;
+        BlockPos feet = mc.player.getBlockPos();
+        boolean inColumn = mc.player.isTouchingWater()
+            || feet.equals(stand) || feet.equals(stand.up());
+        if (!inColumn) {
+            debugMsg("[双号][脱离] 已离开气泡柱，去卸货");
+            dualSettleStart = 0;
+            moverState = MoverState.UNLOAD;
+            cooldown = PACE_SETTLE_DONE;
             return;
         }
-        // 走到活板门「旁边」的实心格，不踩气泡柱（踩上去会触发珍珠）
+        if (dualSettleStart == 0) dualSettleStart = tick;
+        if (tick - dualSettleStart > 240) {
+            enterStuck("被拉过来后卡在气泡柱里出不来（请手动检查活板门/水柱）");
+            return;
+        }
         BlockPos spot = pearlStandSpot(stand);
-        BlockPos target = spot != null ? spot : stand;
-        if (mc.player.getBlockPos().getSquaredDistance(target) > 4) {
-            if (!PathManagers.get().isPathing()) {
-                PathManagers.get().moveToPrecise(target);
-            }
+        if (spot == null) {
+            warnThrottled("气泡柱旁边找不到可站的实心格，重试中");
             return;
         }
-        moverState = MoverState.TAKE_PEARL;
+        walkToPrecise(spot);
     }
 
     private void dualTakePearl() {
@@ -1191,20 +1369,20 @@ public class StashMover extends Module {
     private void dualPutBack() {
         if (countPearls() == 0) {
             closeScreen();
-            moverState = MoverState.WALK_STORE;
+            startPearlConfirm("没有多余珍珠要还");
             return;
         }
         if (containerOpen()) {
             // 珍珠箱塞满珍珠时放不回去，直接跳过（misaka 同款分支）
             if (containerIsFull()) {
                 closeScreen();
-                moverState = MoverState.WALK_STORE;
+                startPearlConfirm("珍珠箱已满，多余珍珠留在身上");
                 return;
             }
             int slot = findPearlSlotInInventory();
             if (slot < 0) {
                 closeScreen();
-                moverState = MoverState.WALK_STORE;
+                startPearlConfirm("背包里已经没有珍珠");
                 return;
             }
             clickSlot(slot, SlotActionType.QUICK_MOVE);
@@ -1212,31 +1390,76 @@ public class StashMover extends Module {
             return;
         }
         BlockPos chestPos = pearlChest.get();
+        if (chestPos.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置珍珠箱位置");
+            return;
+        }
         if (!approachForOpen(chestPos)) return;
         openChestAt(chestPos);
     }
 
-    private void dualWalkStore() {
+    /** 投掷与还珍珠都做完了 → 进入「确认回程票」（V6.7p14）。 */
+    private void startPearlConfirm(String reason) {
+        closeScreen();
+        pearlConfirmStreak = 0;
+        pearlConfirmStart = tick;
+        moverState = MoverState.CONFIRM_PEARL;
+        cooldown = PACE_STEP;
+        debugMsg("[双号][回程票] " + reason + "，开始确认腔室里的珍珠");
+    }
+
+    /**
+     * 确认回程票（V6.7p14，用户口径：和 3 号一样，确认腔室里真有珍珠才允许计时自杀）。
+     *
+     * <p>为什么要连续 {@link #PEARL_CONFIRM_TICKS} tick：珍珠实体是服务端同步过来的，
+     * 投出去那一两 tick 客户端还看不到，看一帧就判「有」会误判。
+     * 确认不到就重投（最多 3 次），绝不带着一张空票去死。
+     */
+    private void dualConfirmPearl() {
+        BlockPos stand = trapdoor.get();
+        if (stand.equals(BlockPos.ORIGIN)) {
+            enterStuck("请先设置搬运活板门位置");
+            return;
+        }
+        if (ownPearlInColumn(stand.down(1))) {
+            pearlConfirmStreak++;
+            if (StashMoveLogic.pearlConfirmed(pearlConfirmStreak, PEARL_CONFIRM_TICKS)) {
+                pearlConfirmedTick = tick;
+                int delay = Math.max(MIN_SUICIDE_DELAY, suicideDelay.get());
+                info("回程票已确认（腔室里检测到自己的珍珠），" + (delay / 20) + " 秒后自杀");
+                moverState = MoverState.SUICIDE_PREP;
+                cooldown = 20;
+            }
+            return;
+        }
+        pearlConfirmStreak = 0;
+        if (tick - pearlConfirmStart > PEARL_CONFIRM_TIMEOUT) {
+            pearlConfirmRetries++;
+            if (pearlConfirmRetries > 3) {
+                enterStuck("投出去的珍珠一直不在腔室里（已重投 " + (pearlConfirmRetries - 1)
+                    + " 次），请手动检查活板门/水柱结构");
+                return;
+            }
+            warning("腔室里没检测到自己的珍珠，重投一次（第 " + pearlConfirmRetries + " 次）");
+            throwSub = 0;
+            throwRetries = 0;
+            moverState = MoverState.THROW;
+            cooldown = PACE_STEP;
+        }
+    }
+
+    private void dualUnload() {
         BlockPos store = storeChest.get();
         if (store.equals(BlockPos.ORIGIN)) {
             enterStuck("请先设置存储箱位置");
             return;
         }
-        if (containerOpen()) {
-            moverState = MoverState.UNLOAD;
-            return;
-        }
-        if (!approachForOpen(store)) return;
-        openChestAt(store);
-    }
-
-    private void dualUnload() {
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
                 onUnloadDone();
                 return;
             }
-            openChestAt(storeChest.get());
+            openChestAt(store);
             return;
         }
         if (containerIsFull()) {
@@ -1269,18 +1492,40 @@ public class StashMover extends Module {
             toggle();
             return;
         }
-        moverState = MoverState.SUICIDE_PREP;
+        // V6.7p14：卸完货才去投「回程票」——货先落袋，投掷链路再出问题也不会把货背死。
+        pearlConfirmedTick = 0;
+        pearlConfirmStreak = 0;
+        pearlConfirmRetries = 0;
+        throwSub = 0;
+        throwRetries = 0;
+        moverState = MoverState.TAKE_PEARL;
+        cooldown = PACE_SETTLE_DONE;
+        debugMsg("[双号][卸货] 完成，去珍珠箱取珍珠充回程票");
     }
 
     private void dualSuicidePrep() {
-        if (suicideAfterPearl.get() && tick - lastPearlThrowTick < suicideDelay.get()) {
+        // V6.7p14：**没确认回程票就不许自杀**。确认不到时退回重投，不拿号去赌。
+        if (pearlConfirmedTick <= 0) {
+            warning("还没确认腔室里有自己的珍珠（回程票没生效），先不自杀，回去重投");
+            pearlConfirmStart = tick;
+            pearlConfirmStreak = 0;
+            moverState = MoverState.CONFIRM_PEARL;
+            return;
+        }
+        // 3C3U 的硬要求：确认之后还要等 ≥600 tick，否则那颗珍珠会被服务器吞掉。
+        int delay = Math.max(MIN_SUICIDE_DELAY, suicideDelay.get());
+        if (!StashMoveLogic.canSuicide(tick, pearlConfirmedTick, suicideDelay.get(), MIN_SUICIDE_DELAY)) {
+            long waited = tick - pearlConfirmedTick;
+            if (debug.get() && waited % 100 == 0) {
+                info("[双号][自杀] 回程票确认后等待 " + (waited / 20) + "/" + (delay / 20) + " 秒");
+            }
             return;
         }
         closeScreen();
         if (suicideMode.get() == SuicideMode.COMMAND) {
             runSuicideCommand();
             moverState = MoverState.DEAD_WAIT;
-            cooldown = 20;
+            cooldown = 40;
             return;
         }
         moverState = MoverState.SUICIDE_LAVA;
@@ -1299,7 +1544,7 @@ public class StashMover extends Module {
                 releaseForward();
                 runSuicideCommand();
                 moverState = MoverState.DEAD_WAIT;
-                cooldown = 20;
+                cooldown = 40;
                 return;
             }
         }
@@ -1317,8 +1562,15 @@ public class StashMover extends Module {
         if (mc.player.isDead()) {
             mc.player.requestRespawn();
             releaseForward();
+            // V6.7p14：重生后多等 2 秒——重生点的区块/箱子还没同步就开始搜箱会白跑一趟
+            pearlConfirmedTick = 0;
+            pearlConfirmStreak = 0;
+            pearlConfirmRetries = 0;
+            lastPearlThrowTick = 0;
+            pathTarget = null;
             moverState = MoverState.LOOT;
-            cooldown = 20;
+            cooldown = 40;
+            debugMsg("[双号][重生] 已重生，等区块加载后继续取货");
         }
     }
 

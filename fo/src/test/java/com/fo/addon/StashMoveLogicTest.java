@@ -256,4 +256,49 @@ class StashMoveLogicTest {
         streak = StashMoveLogic.nextCenterStreak(streak, false, 0.6, 1.2);
         assertTrue(StashMoveLogic.readyToThrow(streak, 6), "第 6 次才允许投");
     }
+
+    // ==================== V6.7p14：回程票确认 + 自杀门槛 ====================
+
+    @Test
+    void 腔室珍珠要连续命中才确认() {
+        assertFalse(StashMoveLogic.pearlConfirmed(5, 6), "只看到 5 tick 不能算确认");
+        assertTrue(StashMoveLogic.pearlConfirmed(6, 6), "连续 6 tick 才算确认");
+        assertTrue(StashMoveLogic.pearlConfirmed(9, 6));
+    }
+
+    @Test
+    void 确认阈值非法时不确认() {
+        assertFalse(StashMoveLogic.pearlConfirmed(100, 0), "阈值 0 属于配置错误，不能当成已确认");
+        assertFalse(StashMoveLogic.pearlConfirmed(0, 6));
+    }
+
+    @Test
+    void 没确认过回程票一律不许自杀() {
+        // 关键回归点：投出去的珍珠没进腔室时，绝不能死（死完下一趟就拉不回来了）
+        assertFalse(StashMoveLogic.canSuicide(10000, 0, 660, 600));
+        assertFalse(StashMoveLogic.canSuicide(10000, -1, 660, 600));
+    }
+
+    @Test
+    void 确认后必须等够服务器下限600tick() {
+        long confirmed = 1000;
+        assertFalse(StashMoveLogic.canSuicide(confirmed + 599, confirmed, 660, 600), "差一 tick 都不许死");
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 600, confirmed, 600, 600), "正好 600 可以");
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 660, confirmed, 660, 600));
+    }
+
+    @Test
+    void 配置被改小也按600兜住() {
+        // 老配置里可能存着 100 tick 之类的小值，必须被 600 夹住
+        long confirmed = 500;
+        assertFalse(StashMoveLogic.canSuicide(confirmed + 300, confirmed, 100, 600));
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 600, confirmed, 100, 600));
+    }
+
+    @Test
+    void 配置比下限大时按配置走() {
+        long confirmed = 2000;
+        assertFalse(StashMoveLogic.canSuicide(confirmed + 800, confirmed, 900, 600));
+        assertTrue(StashMoveLogic.canSuicide(confirmed + 900, confirmed, 900, 600));
+    }
 }
