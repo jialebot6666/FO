@@ -14,6 +14,27 @@ public interface IPathManager {
     void moveTo(BlockPos pos, boolean ignoreY);
 
     /**
+     * 走到目标「附近」就算到（V6.7p20）：GoalNear(pos, range)。
+     *
+     * <p>为什么拉珍珠端不能用 {@link #moveTo(BlockPos, boolean)} 的 GoalXZ（ignoreY）：
+     * 那个目标只认 XZ、完全不管 Y，Baritone 为了到那个 XZ 会一路挖穿挡路的方块
+     * （`allowBreak` 默认开），在洞穴系统里就可能挖到基岩层；而且它的「到没到」只看 XZ，
+     * 会和我们 3D 的点击判定打架。默认退化为 moveTo(pos, false)。
+     */
+    default void moveToNear(BlockPos pos, int range) {
+        moveTo(pos, false);
+    }
+
+    /**
+     * 临时开关 Baritone 的「允许挖掘」（V6.7p20）。
+     *
+     * <p>拉珍珠端只是走过去点个门，不需要破坏任何方块；关掉之后路被挡住会直接
+     * 无路可走并超时放弃，而不是把人家基地挖穿。默认空实现（没有 Baritone 时无影响）。
+     */
+    default void setAllowBreak(boolean allow) {
+    }
+
+    /**
      * 精确寻路到目标格内（V4.19）：GoalGetToBlock 只走到目标格相邻格就停（玩家中心
      * 进不了目标格，站盒子旁会留 2-3 格空隙），这里改用 GoalNear(pos, 0.5)——
      * 玩家中心进入目标格 0.5 格内才算到达，真正"一格空间都不留"。

@@ -49,6 +49,24 @@ public final class StashPearlLogic {
         return x + " " + y + " " + z;
     }
 
+    /**
+     * 到珍珠点算不算「到了」（V6.7p20）。
+     *
+     * <p>为什么不再用单一的 3D 距离：寻路用的是有 Y 参与的目标（GoalNear），
+     * 必须和点击判定保持同一套尺度；以前 3D 距离 ≤4 配 GoalXZ（只认 XZ），
+     * 会出现「寻路说到了、点击说没到」的来回抖。
+     *
+     * @param dx            玩家格 - 珍珠点格 的 X 差
+     * @param dy            Y 差
+     * @param dz            Z 差
+     * @param maxHorizontal 允许的水平距离（格）
+     * @param maxDy         允许的高度差（格）
+     */
+    public static boolean nearPearlPoint(double dx, double dy, double dz,
+                                         double maxHorizontal, double maxDy) {
+        return Math.hypot(dx, dz) <= maxHorizontal && Math.abs(dy) <= maxDy;
+    }
+
     /** "x y z" → 三个整数；格式不对返回 null。 */
     public static int[] parsePos(String text) {
         if (text == null) return null;

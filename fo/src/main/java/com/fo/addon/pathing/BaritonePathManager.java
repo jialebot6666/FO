@@ -105,6 +105,45 @@ public class BaritonePathManager implements IPathManager {
         }
     }
 
+    /** V6.7p20：走到目标附近就算到（GoalNear(range)），Y 也参与判定，避免 GoalXZ 只认 XZ。 */
+    @Override
+    public void moveToNear(BlockPos pos, int range) {
+        try {
+            Object goal = goalNearCtor.newInstance(pos, Math.max(0, range));
+            setGoalAndPathM.invoke(customGoalProcessM.invoke(baritone), goal);
+        } catch (ReflectiveOperationException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /** 备份的 allowBreak（V6.7p20）：只在第一次关闭时记录，恢复后清空。 */
+    private Boolean allowBreakBackup;
+
+    /**
+     * 临时关掉 Baritone 的「允许挖掘」（V6.7p20）。
+     *
+     * <p>拉珍珠端走过去点个门，不需要破坏方块。关掉之后路被挡住会直接无路可走、
+     * 由调用方超时放弃 —— 比把人家基地挖穿到基岩层好。
+     */
+    @Override
+    public void setAllowBreak(boolean allow) {
+        try {
+            Class<?> api = Class.forName("baritone.api.BaritoneAPI");
+            Object settings = api.getMethod("getSettings").invoke(null);
+            Object settingObj = settings.getClass().getField("allowBreak").get(settings);
+            java.lang.reflect.Field vf = settingObj.getClass().getField("value");
+            if (!allow) {
+                if (allowBreakBackup == null) allowBreakBackup = (Boolean) vf.get(settingObj);
+                vf.set(settingObj, Boolean.FALSE);
+            } else if (allowBreakBackup != null) {
+                vf.set(settingObj, allowBreakBackup);
+                allowBreakBackup = null;
+            }
+        } catch (Exception ignored) {
+            // Baritone 版本差异 / 设置名变化：静默跳过，不影响主流程
+        }
+    }
+
     @Override
     public void moveToPrecise(BlockPos pos) {
         try {

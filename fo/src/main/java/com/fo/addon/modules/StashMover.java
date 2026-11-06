@@ -459,6 +459,15 @@ public class StashMover extends Module {
         .visible(distanceCheck::get)
         .build());
 
+    private final Setting<Boolean> pullerNoDig = sgPearl.add(new BoolSetting.Builder()
+        .name("赶路不挖掘")
+        .description("去珍珠点/回出发点的路上禁止 Baritone 破坏方块。"
+            + "拉珍珠只需要走过去点个门，不需要挖；关掉这个开关它就会为了开路一路挖下去（可能挖到基岩层）。"
+            + "⚠️ 若路线本来就得挖一段，这里要关掉。")
+        .defaultValue(true)
+        .visible(this::isPullerRole)
+        .build());
+
     private final Setting<List<String>> pullWhitelist = sgPearl.add(new StringListSetting.Builder()
         .name("拉珍珠白名单")
         .description("只接受这些玩家的拉珍珠请求。⚠️ 双号拉珍珠端**必须填**（留空 = 拒绝所有请求，防陌生人乱拉）；"
@@ -668,6 +677,14 @@ public class StashMover extends Module {
     private static final int PACE_THROW_DONE = 10;      // 投完 → 取货/存货
     private static final int PACE_RESTOCK_DONE = 10;    // 补珍珠完成 → 投掷
     private static final int PACE_TRAPDOOR_CLICK = 14;  // 点活板门后等方块状态同步
+
+    // ===== V6.7p20：拉珍珠端的到达判定（与寻路目标同一套尺度）=====
+    /** 水平离珍珠点多近算「到了」（格）。 */
+    private static final double PEARL_NEAR_HORIZONTAL = 2.5;
+    /** 高度差多大以内算「到了」（格）。 */
+    private static final double PEARL_NEAR_DY = 2.5;
+    /** 寻路目标给的容忍度（GoalNear range，格）。 */
+    private static final int PULLER_GOAL_RANGE = 2;
 
     // ===== V6.7p14：双号的回程票（腔室珍珠）确认 =====
     /** 连续这么多 tick 都在腔室里检测到自己的珍珠才算确认（实体同步有延迟，看一帧不算）。 */
@@ -949,6 +966,7 @@ public class StashMover extends Module {
     public void onDeactivate() {
         releaseMovementKeys();
         PathManagers.get().stop();
+        PathManagers.get().setAllowBreak(true);
         blacklist.clear();
         chestQueue.clear();
         pullActive = false;
@@ -2909,6 +2927,26 @@ public class StashMover extends Module {
 
     // ==================== 拉珍珠端（miku 珍珠大管家） ====================
 
+    /** 到珍珠点/出发点「到了」没：水平 ≤2.5 且高度差 ≤2.5（与 GoalNear 目标同一套尺度）。 */
+    private boolean nearPullPoint(BlockPos pos) {
+        BlockPos p = mc.player.getBlockPos();
+        return StashPearlLogic.nearPearlPoint(p.getX() - pos.getX(), p.getY() - pos.getY(),
+            p.getZ() - pos.getZ(), PEARL_NEAR_HORIZONTAL, PEARL_NEAR_DY);
+    }
+
+    /**
+     * 拉珍珠端的寻路（V6.7p20）。
+     *
+     * <p>⚠️ 以前用 `moveTo(pos, true)` = GoalXZ（只看 XZ、不看 Y）：
+     * Baritone 为了到那个 XZ 会一路挖穿挡路的方块（allowBreak 默认开），
+     * 在洞穴系统里就可能挖到基岩层；而且它「到没到」只看 XZ，和我们的点击判定不同源。
+     * 现在改成 GoalNear(2)（Y 参与）+ 可选禁挖。
+     */
+    private void pathToPullTarget(BlockPos pos) {
+        PathManagers.get().setAllowBreak(!pullerNoDig.get());
+        PathManagers.get().moveToNear(pos, PULLER_GOAL_RANGE);
+    }
+
     private void tickPuller() {
         if (!pullActive || pullPos == null) return;
 
@@ -2918,8 +2956,7 @@ public class StashMover extends Module {
                 resetPull();
                 return;
             }
-            double distSq = mc.player.getBlockPos().getSquaredDistance(pullPos);
-            if (distSq <= 16) {
+            if (nearPullPoint(pullPos)) {
                 // V6.7p13：点活板门加「确认 + 重试」——用门的状态是否翻转判断点中了没。
                 boolean isTrapdoor = mc.world.getBlockState(pullPos).getBlock() instanceof TrapdoorBlock;
                 if (!pullClickSent) {
@@ -2947,7 +2984,7 @@ public class StashMover extends Module {
                 }
                 return;
             }
-            if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(pullPos, true);
+            if (!PathManagers.get().isPathing()) pathToPullTarget(pullPos);
             return;
         }
 
@@ -2956,7 +2993,7 @@ public class StashMover extends Module {
             resetPull();
             return;
         }
-        if (mc.player.getBlockPos().getSquaredDistance(pullStartPos) <= 4) {
+        if (nearPullPoint(pullStartPos)) {
             resetPull();
             return;
         }
@@ -2964,7 +3001,7 @@ public class StashMover extends Module {
             resetPull();
             return;
         }
-        if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(pullStartPos, true);
+        if (!PathManagers.get().isPathing()) pathToPullTarget(pullStartPos);
     }
 
     private void finishPullClick() {
@@ -2984,6 +3021,8 @@ public class StashMover extends Module {
         pullClickSent = false;
         pullClickAttempts = 0;
         lastPullEndTick = tick;
+        // V6.7p20：恢复 Baritone 的挖掘开关，别把「赶路不挖掘」带到别的模块
+        PathManagers.get().setAllowBreak(true);
     }
 
     @EventHandler

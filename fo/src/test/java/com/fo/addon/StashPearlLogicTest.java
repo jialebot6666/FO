@@ -61,6 +61,28 @@ class StashPearlLogicTest {
         assertEquals(-30, xyz[2]);
     }
 
+    // ==================== V6.7p20：到达判定（与 GoalNear 目标同一套尺度） ====================
+
+    @Test
+    void 珍珠点到达判定看水平与高度() {
+        assertTrue(StashPearlLogic.nearPearlPoint(1.0, 0, 1.0, 2.5, 2.5));
+        assertTrue(StashPearlLogic.nearPearlPoint(2.5, 0, 0, 2.5, 2.5), "水平正好 2.5 算到");
+        assertFalse(StashPearlLogic.nearPearlPoint(2.6, 0, 0, 2.5, 2.5));
+    }
+
+    @Test
+    void 站得高一层也算到低一层也算到() {
+        // 以前 3D 距离 ≤4 配 GoalXZ（只认 XZ），会出现「寻路说到了、点击说没到」
+        assertTrue(StashPearlLogic.nearPearlPoint(0, 2.5, 0, 2.5, 2.5));
+        assertTrue(StashPearlLogic.nearPearlPoint(0, -2.5, 0, 2.5, 2.5));
+        assertFalse(StashPearlLogic.nearPearlPoint(0, 3, 0, 2.5, 2.5), "差 3 格就不点");
+    }
+
+    @Test
+    void 水平差了但高度够也不算到() {
+        assertFalse(StashPearlLogic.nearPearlPoint(0, 0, 3, 2.5, 2.5));
+    }
+
     @Test
     void 坐标解析容错() {
         assertNull(StashPearlLogic.parsePos("12 64"));

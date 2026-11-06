@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p19`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p19-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p20`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p20-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -633,6 +633,17 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     `inColumn` 判定同时去掉「站在门顶上」（站在门顶不该开门，走下去就行）。
   - 三号本来就走 `settlePosition`，本次未改；`dualSettle` 里那段自写的 `pearlStandSpot + walkToPrecise` 删除。
   - 测试：无新增纯逻辑（全是世界耦合路径），全仓 **52 套件 443 测试全绿**。
+- ✅ 6.7p20 已修复：**拉珍珠端远距离赶路会挖穿地形、一路挖到基岩层**（用户实机）。
+  - 根因：`tickPuller` 只有一句 `moveTo(pullPos, true)` = Baritone **GoalXZ（只看 XZ、不看 Y）**；
+    而 Baritone 的 `allowBreak` 默认是**开**的，为了到那个 XZ 会挖穿挡路的方块，
+    在洞穴系统里就可能一路挖到基岩层。更别扭的是它「到没到」只看 XZ，
+    而我们的点击判定是 3D 的 `distSq <= 16` —— 两个判定不同源，会出现「寻路说到了、点击说没到」的来回抖。
+  - 修法：① `IPathManager` 新增 `moveToNear(pos, range)` → `GoalNear(pos, 2)`（Y 参与判定）；
+    ② 新增 `setAllowBreak(boolean)`（反射改 Baritone 的 allowBreak，`resetPull` / `onDeactivate` 恢复）；
+    ③ 点击判定换成 `StashPearlLogic.nearPearlPoint`（水平 ≤2.5 且 |ΔY| ≤2.5），与目标同一套尺度；
+    ④ 新增设置「**赶路不挖掘**」默认开（路线本来就得挖一段的可以关掉）。
+  - ⚠️ 已知取舍：路被挡死时会**超时放弃**并提示，而不是挖穿人家基地。
+  - 测试：新增 3 条 `nearPearlPoint` 断言，全仓 **52 套件 446 测试全绿**。
 - ⚠️ 6.7p15 是**未入库**的中间版本（另一窗口产出，只交付了 jar）：内容已全部并入 6.7p16，**不要单独发 p15**。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
