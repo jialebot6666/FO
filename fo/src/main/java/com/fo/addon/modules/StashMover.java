@@ -1422,6 +1422,16 @@ public class StashMover extends Module {
      * 而点不开。这里只做「离开水柱」，<b>不把人硬拽到柱子旁</b>——卸货不需要站位，
      * 只有投珍珠才需要（那一步由 {@code tickThrowSequence} 的 settlePosition 负责）。
      */
+    /**
+     * 脱离气泡柱（V6.7p19 与三号对齐）。
+     *
+     * <p>⚠️ 旧实现是双号自己写的一套：只 `pearlStandSpot` + `walkToPrecise`，**从来不去开活板门**。
+     * 而实机里「搭档点完门，门是关着的」——人被拉到活板门<b>下面</b>时，气泡柱一直往上顶、
+     * 头顶是关着的门，Baritone 又在水里来回作废路径，表现就是贴着门底反复浮沉、240 tick 后报警。
+     *
+     * <p>现在直接复用三号那套 {@link #settlePosition}：人在柱子里且门关着 → 先点开门；
+     * 近距离用短按前进 + 跳（水里一直按），走不动再交给寻路。三号一直是这条链，实机没问题。
+     */
     private void dualSettle() {
         BlockPos stand = trapdoor.get();
         if (stand.equals(BlockPos.ORIGIN)) {
@@ -1429,8 +1439,7 @@ public class StashMover extends Module {
             return;
         }
         BlockPos feet = mc.player.getBlockPos();
-        boolean inColumn = mc.player.isTouchingWater()
-            || feet.equals(stand) || feet.equals(stand.up());
+        boolean inColumn = mc.player.isTouchingWater() || feet.equals(stand);
         if (!inColumn) {
             debugMsg("[双号][脱离] 已离开气泡柱，去卸货");
             dualSettleStart = 0;
@@ -1439,16 +1448,15 @@ public class StashMover extends Module {
             return;
         }
         if (dualSettleStart == 0) dualSettleStart = tick;
-        if (tick - dualSettleStart > 240) {
-            enterStuck("被拉过来后卡在气泡柱里出不来（请手动检查活板门/水柱）");
+        if (tick - dualSettleStart > 300) {
+            enterStuck("被拉过来后卡在气泡柱里出不来（检查活板门能不能从里面点开）");
             return;
         }
-        BlockPos spot = pearlStandSpot(stand);
-        if (spot == null) {
-            warnThrottled("气泡柱旁边找不到可站的实心格，重试中");
-            return;
-        }
-        walkToPrecise(spot);
+        if (!settlePosition(stand)) return;   // 开门 / 短按走位都在里面
+        debugMsg("[双号][脱离] 已离开气泡柱，去卸货");
+        dualSettleStart = 0;
+        moverState = MoverState.UNLOAD;
+        cooldown = PACE_SETTLE_DONE;
     }
 
     private void dualTakePearl() {
