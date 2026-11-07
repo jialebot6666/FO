@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p31`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p31-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p32`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p32-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -778,6 +778,14 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - 加固：`ENDER_STATE_TIMEOUT` 15→30 秒（含走过去的时间）；新增「连续关掉 3 次非末影箱界面」
     熔断（`ENDER_CLOSE_LIMIT`）；四周无可站格立即降级不再干等；入状态时打印「眼→箱体/开箱距离」。
   - 测试：新增 1 条 `isEnderScreenShape`，全仓 **53 套件 475 测试全绿**。
+- ✅ 6.7p32 已修复：**杀戮光环「每次攻击执行两次」+ 删除「停止格挡」死设置**（p32 排期第 2 项，用户确认删设置）。
+  - 双攻击根因：`attack()` 先固定打一次 `attackEntity`，分支里又打一次 —— 默认模式 =
+    双 `attackEntity`（服务端收到 2 个攻击包、客户端挥 2 次手）；发包模式 = 正规攻击 + 额外攻击包（同样 2 个包）。
+    现在两种模式都只执行**一次**攻击：默认走正规 `attackEntity`；发包模式只发
+    `PlayerInteractEntityC2SPacket.attack`（真正意义上的纯发包）。
+  - 死设置：`stopShield`（「停止格挡」，默认 false）声明后全文件无读取点，`shouldShieldBreak()` 恒
+    `return false` —— 删设置 + 删方法 + 删 `itemInHand()` 的死分支。旧配置里的该键会被 Meteor 忽略，无需迁移。
+  - 测试：MC 运行时行为无可单测的纯逻辑，全仓 **53 套件 476 测试全绿**（数量不变）。
 - ✅ 6.7p30 已实现：**末影箱分区坐标（混合模式：坐标优先 + 校验 + 自动扫描兜底）**。
   - 末影箱组新增 4 条坐标设置（`0,0,0` = 留空 = 自动扫描，老配置零回归）：
     双号「取货区末影箱位置 / 存储区末影箱位置」，三号「待搬运箱区末影箱位置 / 存储箱区末影箱位置」，
