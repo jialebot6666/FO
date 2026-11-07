@@ -3,6 +3,8 @@ package com.fo.addon;
 import com.fo.addon.utils.StashMoveLogic;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -329,5 +331,38 @@ class StashMoveLogicTest {
         // 复用三号同一个函数：离哪个锚点近就算哪个区
         assertEquals(StashMoveLogic.Zone.STORE, StashMoveLogic.nearerZone(100, 0, 0, 0, 100, 0));
         assertEquals(StashMoveLogic.Zone.SOURCE, StashMoveLogic.nearerZone(10, 0, 0, 0, 500, 0));
+    }
+
+    // ==================== V6.7p21：取货三态 / 自家仓库保护 ====================
+
+    @Test
+    void 取货三态_有候选就是取到() {
+        assertEquals(StashMoveLogic.TakeOutcome.TAKEN, StashMoveLogic.takeOutcome(true, true));
+        assertEquals(StashMoveLogic.TakeOutcome.TAKEN, StashMoveLogic.takeOutcome(false, true));
+    }
+
+    @Test
+    void 取货三态_有物品但没候选是NO_MATCH而不是已空() {
+        // 这就是「只拿潜影盒遇到普通物资箱」的场景：不能当空箱拉黑
+        assertEquals(StashMoveLogic.TakeOutcome.NO_MATCH, StashMoveLogic.takeOutcome(true, false));
+    }
+
+    @Test
+    void 取货三态_真的一件东西都没有才是EMPTY() {
+        assertEquals(StashMoveLogic.TakeOutcome.EMPTY, StashMoveLogic.takeOutcome(false, false));
+    }
+
+    @Test
+    void 自家仓库保护_双号与三号锚点都能命中() {
+        List<int[]> anchors = List.of(
+            new int[]{100, 64, 200},    // 双号存储箱
+            new int[]{300, 70, 400},    // 三号存储箱
+            new int[]{301, 70, 400});   // 它的双箱搭档
+        assertTrue(StashMoveLogic.isProtectedChest(100, 64, 200, anchors));
+        assertTrue(StashMoveLogic.isProtectedChest(300, 70, 400, anchors));
+        assertTrue(StashMoveLogic.isProtectedChest(301, 70, 400, anchors), "双箱搭档也要保护");
+        assertFalse(StashMoveLogic.isProtectedChest(302, 70, 400, anchors));
+        assertFalse(StashMoveLogic.isProtectedChest(100, 65, 200, anchors), "y 不同不算同一个箱子");
+        assertFalse(StashMoveLogic.isProtectedChest(0, 0, 0, null));
     }
 }

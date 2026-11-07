@@ -1,5 +1,7 @@
 package com.fo.addon.utils;
 
+import java.util.List;
+
 /**
  * 自动搬运的纯逻辑（可单测，不碰 MC 运行时）。
  *
@@ -264,5 +266,49 @@ public final class StashMoveLogic {
     public static boolean canSuicide(long nowTick, long confirmedTick, int delay) {
         if (confirmedTick <= 0) return false;
         return nowTick - confirmedTick >= Math.max(0, delay);
+    }
+
+    // ==================== V6.7p21：取货三态 + 自家仓库保护 ====================
+
+    /** 从容器取货的判定结果。 */
+    public enum TakeOutcome {
+        /** 有符合过滤条件的物品，已取走一组。 */
+        TAKEN,
+        /** 容器里确实什么都没有。 */
+        EMPTY,
+        /** 容器里有物品，但全被过滤条件挡掉了（典型：「只拿潜影盒」遇到普通物资箱）。 */
+        NO_MATCH
+    }
+
+    /**
+     * 取货三态判定（V6.7p21 修复）。
+     *
+     * <p>旧实现把「箱空」和「箱里有东西但都不符合过滤」合并成一个 {@code false}，
+     * 调用方一律当成「已搬空」→ 把普通物资箱拉黑；三号还会误报「待搬运箱区已搬空」。
+     * 这两个语义必须分开：只有 EMPTY 才该拉黑，NO_MATCH 只跳过。
+     *
+     * @param anyItemInContainer 容器区是否有任何非空物品
+     * @param anyCandidate       是否至少有一个物品通过过滤条件
+     */
+    public static TakeOutcome takeOutcome(boolean anyItemInContainer, boolean anyCandidate) {
+        if (anyCandidate) return TakeOutcome.TAKEN;
+        return anyItemInContainer ? TakeOutcome.NO_MATCH : TakeOutcome.EMPTY;
+    }
+
+    /**
+     * 坐标是否命中「自家仓库」保护名单（存储箱 / 珍珠箱，含双箱搭档另一半）。
+     *
+     * <p>V6.7p21：三号模式原来只保护双号的两个坐标，框选 / 自动搜索会把本区珍珠箱当物资箱搬空，
+     * 之后补货时报「珍珠箱里没有珍珠」。现在双号 + 三号的全部锚点（及其搭档）一起进名单。
+     *
+     * @param anchors 每项 {x, y, z}
+     */
+    public static boolean isProtectedChest(int x, int y, int z, List<int[]> anchors) {
+        if (anchors == null) return false;
+        for (int[] a : anchors) {
+            if (a == null || a.length != 3) continue;
+            if (a[0] == x && a[1] == y && a[2] == z) return true;
+        }
+        return false;
     }
 }

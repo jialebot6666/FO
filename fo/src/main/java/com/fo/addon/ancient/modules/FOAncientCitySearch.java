@@ -179,6 +179,8 @@ public class FOAncientCitySearch extends Module {
     private final Setting<XaeroWaypointBridge.Preference> waypointChannelSetting;
 
     private final Setting<Boolean> autoStealSetting;
+    /** V6.7p21：只偷「本模块搜索命中的箱子」，防止开自己基地/村庄箱子被顺手牵羊。 */
+    private final Setting<Boolean> stealOnlyHitsSetting;
     /** 只读展示：累计偷取统计（V6.27；V6.29 挪到独立的「累计统计」分组里）。 */
     private final Setting<Boolean> stealStatsSetting;
     private final Setting<List<Item>> stealItemsSetting;
@@ -262,6 +264,11 @@ public class FOAncientCitySearch extends Module {
     private String pendingStealBookEnchantId;
     private int pendingStealBookLevel;
     private int pendingStealCount;
+
+    /** V6.7p21：命中判定的水平半径（格）——双箱两半可能只记了其中一半，不用精确相等。 */
+    private static final int SEARCH_HIT_RADIUS = 3;
+    /** 「只偷命中箱」但没有搜索记录时，提示只发一次。 */
+    private boolean warnedNoSearchRecord;
 
     /** 累计统计有改动、还没落盘。 */
     private boolean stealStatsDirty;
@@ -413,6 +420,16 @@ public class FOAncientCitySearch extends Module {
             .defaultValue(true)
             .build());
 
+        // V6.7p21：收紧偷取范围。旧行为「任何 ChestBlock 都偷」会导致开自家仓库/村庄箱子时
+        // 把附魔金、迅捷潜行3 顺手取走，且统计被污染（AGENTS.md 里登记的待做项）。
+        stealOnlyHitsSetting = sgSteal.add(new BoolSetting.Builder()
+            .name("只偷搜索命中的箱子")
+            .description("开启后只从本模块搜索命中的古城箱子里取东西；自己基地、村庄等其它箱子一律不碰（防误偷）。"
+                + "关闭则恢复旧行为：任何箱子都偷。")
+            .defaultValue(true)
+            .visible(autoStealSetting::get)
+            .build());
+
         // V6.27 新增、V6.29 挪进独立的「累计统计」分组（显示在「初始延迟」下面）。
         // 控件由 AddonTemplate 注册的 StealStatsSetting 工厂负责画，这里只占位置。
         stealStatsSetting = sgStats.add(new StealStatsSetting.Builder()
@@ -469,6 +486,7 @@ public class FOAncientCitySearch extends Module {
     @Override
     public void onActivate() {
         loadStore();
+        warnedNoSearchRecord = false;
         // V6.28：自动带上上次「应用」过的种子 —— 点过一次就一直记住，不用每次开模块重设。
         // 没应用过（或已手动清除）时保持 manualSeed = null，行为与以前一致（联机会提示手动设种子）。
         loadSeedStore();
@@ -573,6 +591,20 @@ public class FOAncientCitySearch extends Module {
         if (!AncientStealLogic.shouldScanContainer(targetKnown, isChest)) {
             debug("自动偷取：打开的不是箱子，跳过（"
                 + (targetKnown ? "识别为其他容器" : "拿不到方块依据") + "）");
+            return;
+        }
+
+        // V6.7p21：只偷本模块搜索命中的箱子（默认开）。开自家仓库 / 村庄箱子时不再顺手取走。
+        if (stealOnlyHitsSetting.get() && !isSearchHit(lastTargetedBlock)) {
+            if (!hasAnySearchRecord()) {
+                if (!warnedNoSearchRecord) {
+                    warnedNoSearchRecord = true;
+                    info("自动偷取已开启「只偷搜索命中的箱子」，但当前没有任何搜索记录，已跳过这个箱子；"
+                        + "请先搜索一次，或在设置里关闭该选项");
+                }
+            } else {
+                debug("自动偷取：这个箱子不在搜索命中记录里，跳过");
+            }
             return;
         }
 
@@ -852,6 +884,27 @@ public class FOAncientCitySearch extends Module {
         return server + "|" + mc.world.getRegistryKey().getValue();
     }
 
+    /**
+     * 这个箱子是不是「本模块搜索命中的箱子」（V6.7p21）。
+     *
+     * <p>判定用命中记录 + 已开名单，水平半径 {@link #SEARCH_HIT_RADIUS} 格：
+     * 双箱两半可能只记了其中一半；而箱子刚被打开时命中记录会被移除，
+     * 同一 tick 到达的容器同步事件靠「已开名单」仍能认出来。
+     */
+    private boolean isSearchHit(BlockPos pos) {
+        if (pos == null) return false;
+        String scope = currentScope();
+        if (scope == null) return false;
+        return chestStore.isSearchHit(scope, pos.getX(), pos.getZ(), SEARCH_HIT_RADIUS);
+    }
+
+    /** 当前作用域有没有任何搜索记录（把「没搜过」和「不是这个箱子」区分开，提示文案不同）。 */
+    private boolean hasAnySearchRecord() {
+        String scope = currentScope();
+        if (scope == null) return false;
+        return chestStore.size(scope) > 0 || chestStore.openedCount(scope) > 0;
+    }
+
     private static Path storePath() {
         return FabricLoader.getInstance().getGameDir().resolve(STORE_FILE_NAME);
     }
@@ -1024,8 +1077,12 @@ public class FOAncientCitySearch extends Module {
         if (containerOpen && !wasContainerOpen && lastTargetedBlock != null
             && tickCounter - lastTargetedAtTick <= TARGET_FRESH_TICKS) {
             // 先记入「已开名单」（V6.19）：之后所有搜索都跳过这个坐标，
-            // 重开模块/重新搜索不会再把开过的箱子加回来
-            if (mc.world.getBlockState(lastTargetedBlock).getBlock() instanceof ChestBlock) {
+            // 重开模块/重新搜索不会再把开过的箱子加回来。
+            // V6.7p21：只有「搜索命中的箱子」才写名单 —— 旧实现把玩家开过的任何 ChestBlock
+            // 都记进去，既让 opened 无界膨胀，也会让「只偷命中箱」把自家仓库误判成命中。
+            if (mc.world.getBlockState(lastTargetedBlock).getBlock() instanceof ChestBlock
+                && chestStore.isSearchHit(scope, lastTargetedBlock.getX(),
+                    lastTargetedBlock.getZ(), SEARCH_HIT_RADIUS)) {
                 chestStore.markOpened(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ());
             }
             if (chestStore.remove(scope, lastTargetedBlock.getX(), lastTargetedBlock.getZ())) {

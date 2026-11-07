@@ -357,4 +357,40 @@ class AncientChestStoreTest {
         AncientChestStore back = AncientChestStore.fromJson(broken);
         assertEquals(0, back.size("a"));
     }
+
+    // ==================== V6.7p21：自动偷取的「命中箱」判定 ====================
+
+    @Test
+    void 命中判定_水平半径内算命中_半径外不算() {
+        AncientChestStore store = new AncientChestStore();
+        store.add(SCOPE_A, new AncientChestStore.Mark(100, 64, 200, AncientChestStore.LABEL_GOLD));
+
+        assertTrue(store.isSearchHit(SCOPE_A, 100, 200, 3), "同坐标必须命中");
+        assertTrue(store.isSearchHit(SCOPE_A, 102, 202, 3), "水平 2√2 < 3 格，双箱另一半要算命中");
+        assertFalse(store.isSearchHit(SCOPE_A, 103, 203, 3), "水平 3√2 > 3 格，不该命中");
+        assertTrue(store.isSearchHit(SCOPE_A, 100, 200, 0), "radius=0 同坐标仍应命中");
+        assertFalse(store.isSearchHit(SCOPE_A, 101, 200, 0), "radius=0 差一格就不算");
+    }
+
+    @Test
+    void 命中判定_记录被移除后靠已开名单仍认得() {
+        // 开箱瞬间 cleanupStaleMarks 会 remove 掉命中记录；同一 tick 的容器同步事件
+        // 还要能认出「这是我搜到的箱子」，否则「只偷命中箱」会漏掉刚开到的那一个。
+        AncientChestStore store = new AncientChestStore();
+        store.add(SCOPE_A, new AncientChestStore.Mark(100, 64, 200, AncientChestStore.LABEL_GOLD));
+        store.remove(SCOPE_A, 100, 200);
+        store.markOpened(SCOPE_A, 100, 200);
+
+        assertTrue(store.isSearchHit(SCOPE_A, 100, 200, 3));
+        assertFalse(store.isSearchHit(SCOPE_A, 400, 400, 3));
+    }
+
+    @Test
+    void 命中判定_不跨作用域也不认空记录() {
+        AncientChestStore store = new AncientChestStore();
+        store.add(SCOPE_A, new AncientChestStore.Mark(100, 64, 200, AncientChestStore.LABEL_GOLD));
+
+        assertFalse(store.isSearchHit(SCOPE_B, 100, 200, 3), "别的服务器/维度的记录不能串");
+        assertFalse(new AncientChestStore().isSearchHit(SCOPE_A, 0, 0, 3), "空记录一律不算命中");
+    }
 }

@@ -113,6 +113,37 @@ public final class AncientChestStore {
         return set == null ? 0 : set.size();
     }
 
+    /**
+     * 这个坐标是不是「本次搜索命中的箱子」：命中记录或已开名单，水平半径内（V6.7p21）。
+     *
+     * <p>自动偷取用它判断「这个箱子该不该偷」。用半径而不是精确相等的原因有两个：
+     * ① 双箱两半可能只记了其中一半；② 箱子刚被打开时命中记录会被移除，
+     * 同一 tick 到达的容器同步事件靠「已开名单」仍要能认出它。
+     *
+     * <p>水平判定（忽略 y）：古城的箱子都在同一层附近，而记录里的 y 来自结构重放，
+     * 与服务端实际落点可能差一格。
+     *
+     * @param radius 允许的水平误差（格）；0 = 精确同坐标
+     */
+    public synchronized boolean isSearchHit(String scope, int x, int z, int radius) {
+        int r = Math.max(0, radius);
+        long r2 = (long) r * r;
+        for (Mark m : byScope.getOrDefault(scope, List.of())) {
+            long dx = (long) m.x() - x;
+            long dz = (long) m.z() - z;
+            if (dx * dx + dz * dz <= r2) return true;
+        }
+        Set<Long> opened = openedByScope.get(scope);
+        if (opened != null) {
+            for (long k : opened) {
+                long dx = (long) (int) (k >> 32) - x;
+                long dz = (long) (int) k - z;
+                if (dx * dx + dz * dz <= r2) return true;
+            }
+        }
+        return false;
+    }
+
     /** 清空某个作用域的<b>标记</b>（保留种子与已开名单）——新一轮搜索整批替换时用。 */
     public synchronized void clearMarks(String scope) {
         byScope.remove(scope);

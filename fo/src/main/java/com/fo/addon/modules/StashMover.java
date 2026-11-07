@@ -724,12 +724,27 @@ public class StashMover extends Module {
     private static final long ANTI_STUCK_WINDOW_MS = 5000;
     private static final int ANTI_STUCK_SETTLE_TICKS = 20;
 
+    // ===== V6.7p21：过滤箱（有物品但不符合「只拿潜影盒」）的处理 =====
+    /** 跳过期：10 秒后才允许重新打开同一个箱子，避免每 tick 重复开同一个箱子。 */
+    private static final int SKIP_TICKS = 200;
+    /** 「箱子被过滤」提示的最小间隔（tick）：30 秒一条。 */
+    private static final int FILTERED_WARN_INTERVAL = 600;
+
     private long tick;
     private int cooldown;
 
     // 双号搬运
     private MoverState moverState = MoverState.LOOT;
     private final Set<BlockPos> blacklist = new HashSet<>();
+    /**
+     * 「箱里有物品、但不符合过滤条件」的箱子 → 跳过期（tick）。
+     *
+     * <p>V6.7p21：这类箱子不能拉黑（拉黑后整趟都不再被看），也不能每 tick 重开，
+     * 所以只跳过 {@link #SKIP_TICKS}，等补货或用户改设置后还能重试。
+     */
+    private final LinkedHashMap<BlockPos, Long> skippedUntil = new LinkedHashMap<>();
+    /** 上一次「箱子被过滤」提示的 tick（30 秒一条，别刷屏）。 */
+    private long lastFilteredWarnTick;
     private final List<BlockPos> chestQueue = new ArrayList<>();
     private int queueIndex;
     private BlockPos openChest;
@@ -895,6 +910,8 @@ public class StashMover extends Module {
         tick = 0;
         cooldown = 0;
         blacklist.clear();
+        skippedUntil.clear();
+        lastFilteredWarnTick = 0;
         chestQueue.clear();
         queueIndex = 0;
         openChest = null;
@@ -1274,10 +1291,20 @@ public class StashMover extends Module {
             return;
         }
         if (containerOpen()) {
-            if (takeFromContainer()) return;
+            StashMoveLogic.TakeOutcome outcome = takeFromContainer();
+            if (outcome == StashMoveLogic.TakeOutcome.TAKEN) return;
 
-            // 当前箱子已空
             closeScreen();
+            // V6.7p21：箱子里有东西、只是没有我们要的（例如「只拿潜影盒」遇到普通物资箱）。
+            // 这种情况**不能**拉黑，否则整趟都不会再来看它；只跳过一小段时间。
+            if (outcome == StashMoveLogic.TakeOutcome.NO_MATCH) {
+                skipChest(openChest);
+                openChest = null;
+                cooldown = PACE_STEP;
+                return;
+            }
+
+            // 当前箱子确实空了
             if (chestMode.get() == ChestMode.SINGLE && waitForFill.get() && !finalTrip) {
                 refillStartTick = tick;
                 moverState = MoverState.REFILL;
@@ -1296,7 +1323,11 @@ public class StashMover extends Module {
 
         BlockPos chest = nextLootChest();
         if (chest == null) {
-            warnThrottled("箱子搜索半径内没有待搬运箱，请检查重生点是否在箱子旁边");
+            if (filteredCount() > 0) {
+                warnFiltered();
+            } else {
+                warnThrottled("箱子搜索半径内没有待搬运箱，请检查重生点是否在箱子旁边");
+            }
             return;
         }
         if (!approachForOpen(chest)) return;
@@ -1372,6 +1403,7 @@ public class StashMover extends Module {
         PathManagers.get().stop();
         pathTarget = null;
         blacklist.clear();
+        skippedUntil.clear();
         chestQueue.clear();
         queueIndex = 0;
         openChest = null;
@@ -1902,9 +1934,20 @@ public class StashMover extends Module {
             return;
         }
         if (containerOpen()) {
-            if (takeFromContainer()) return;
-            debugMsg("[取货] 这个箱子取完了，拉黑并找下一个");
+            StashMoveLogic.TakeOutcome outcome = takeFromContainer();
+            if (outcome == StashMoveLogic.TakeOutcome.TAKEN) return;
+
             closeScreen();
+            // V6.7p21：箱内有物品但都不符合过滤条件 —— 不拉黑、不判「搬空」，跳过后找下一个
+            if (outcome == StashMoveLogic.TakeOutcome.NO_MATCH) {
+                skipChest(openChest);
+                openChest = null;
+                trapdoorClickAttempts = 0;
+                cooldown = PACE_STEP;
+                return;
+            }
+
+            debugMsg("[取货] 这个箱子取完了，拉黑并找下一个");
             blacklistChest(openChest);
             openChest = null;
             trapdoorClickAttempts = 0;
@@ -1913,6 +1956,13 @@ public class StashMover extends Module {
         }
         BlockPos chest = nextLootChest();
         if (chest == null) {
+            // V6.7p21：有箱子、只是都被「只拿潜影盒」挡掉时，不能报「已搬空」——
+            // 那会让用户以为没货。留在取货状态等补货/改设置，并定期说明原因。
+            if (filteredCount() > 0) {
+                warnFiltered();
+                progress();
+                return;
+            }
             enterStuck("待搬运箱区已搬空（没有可搬的箱子了）");
             return;
         }
@@ -2233,15 +2283,36 @@ public class StashMover extends Module {
     }
 
     /**
-     * 这个方块是不是「存储侧」的箱子（存储箱 / 珍珠箱，含双箱搭档另一半）。
+     * 这个方块是不是「自家仓库」的箱子（存储箱 / 珍珠箱，含双箱搭档另一半）。
      *
      * <p>扫出来的待搬运队列里必须把它们剔掉：判区万一失误（基地太大、人站在判定半径外），
      * 至少不会把自家仓库当待搬运箱搬走。
+     *
+     * <p>V6.7p21：双号 + 三号的全部锚点都进名单。旧实现只比双号的两个坐标，
+     * 三号模式会把本区珍珠箱 / 三号存储箱当物资箱搬空，补货时直接报「珍珠箱里没有珍珠」。
      */
     private boolean isStoreSideChest(BlockPos pos) {
         if (pos == null) return false;
-        return pos.equals(storeChest.get()) || pos.equals(pearlChest.get())
-            || pos.equals(chestPartner(storeChest.get())) || pos.equals(chestPartner(pearlChest.get()));
+        return StashMoveLogic.isProtectedChest(pos.getX(), pos.getY(), pos.getZ(), protectedChestAnchors());
+    }
+
+    /** 收集所有「自家仓库」坐标（双号 + 三号，含双箱搭档另一半）。 */
+    private List<int[]> protectedChestAnchors() {
+        List<int[]> out = new ArrayList<>(12);
+        addProtectedAnchor(out, storeChest.get());
+        addProtectedAnchor(out, pearlChest.get());
+        addProtectedAnchor(out, trioStoreChest.get());
+        addProtectedAnchor(out, trioPearlChest.get());
+        addProtectedAnchor(out, sourcePearlChest.get());
+        addProtectedAnchor(out, storePearlChest.get());
+        return out;
+    }
+
+    private void addProtectedAnchor(List<int[]> out, BlockPos anchor) {
+        if (anchor == null || anchor.equals(BlockPos.ORIGIN)) return;
+        out.add(new int[]{anchor.getX(), anchor.getY(), anchor.getZ()});
+        BlockPos partner = chestPartner(anchor);
+        if (partner != null) out.add(new int[]{partner.getX(), partner.getY(), partner.getZ()});
     }
 
     /** 本 tick 的移动包（带朝向）发完之后再执行挂起的交互动作。 */
@@ -2866,6 +2937,7 @@ public class StashMover extends Module {
         if (lastPos != null && StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, now.x, now.z, 32)) {
             trioZone = trioZone == StashMoveLogic.Zone.SOURCE ? StashMoveLogic.Zone.STORE : StashMoveLogic.Zone.SOURCE;
                 blacklist.clear();
+            skippedUntil.clear();
             chestQueue.clear();
             queueIndex = 0;
             throwSub = 0;
@@ -3398,14 +3470,21 @@ public class StashMover extends Module {
         mc.interactionManager.clickSlot(handler.syncId, slot, button, type, mc.player);
     }
 
-    /** 容器区（非玩家背包）拿物品：拿一摞就返回 true；已空返回 false。 */
-    private boolean takeFromContainer() {
+    /**
+     * 容器区（非玩家背包）拿物品：拿一摞算 {@code TAKEN}。
+     *
+     * <p>V6.7p21：返回值从 boolean 改成三态 —— 「箱空」与「箱里有东西但全被过滤」必须分开，
+     * 否则「只拿潜影盒」会把普通物资箱当空箱拉黑（见 {@link StashMoveLogic#takeOutcome}）。
+     */
+    private StashMoveLogic.TakeOutcome takeFromContainer() {
         ScreenHandler handler = containerHandler();
-        if (handler == null) return false;
+        if (handler == null) return StashMoveLogic.TakeOutcome.EMPTY;
         int size = handler.slots.size();
+        boolean anyItem = false;
         for (int i = 0; i < size - 36; i++) {
             ItemStack stack = handler.getSlot(i).getStack();
             if (stack.isEmpty()) continue;
+            anyItem = true;
             if (onlyShulker.get() && !StashPearlLogic.isShulkerBoxId(Registries.ITEM.getId(stack.getItem()).toString())) continue;
             clickSlot(i, SlotActionType.QUICK_MOVE);
             if (StashPearlLogic.isShulkerBoxId(Registries.ITEM.getId(stack.getItem()).toString())) {
@@ -3413,9 +3492,9 @@ public class StashMover extends Module {
             }
             cooldown = Math.max(1, clickDelay.get());
             progress();
-            return true;
+            return StashMoveLogic.takeOutcome(anyItem, true);
         }
-        return false;
+        return StashMoveLogic.takeOutcome(anyItem, false);
     }
 
     private boolean inventoryFull() {
@@ -3669,7 +3748,7 @@ public class StashMover extends Module {
         return switch (m) {
             case SINGLE -> {
                 BlockPos t = mode.get() == Mode.TRIO ? sourceTarget.get() : targetChest.get();
-                if (t.equals(BlockPos.ORIGIN) || blacklist.contains(t)) yield null;
+                if (t.equals(BlockPos.ORIGIN) || blacklist.contains(t) || isSkipped(t)) yield null;
                 yield t;
             }
             case RANGE -> nextFromQueue(true);
@@ -3702,7 +3781,7 @@ public class StashMover extends Module {
         }
         while (queueIndex < chestQueue.size()) {
             BlockPos p = chestQueue.get(queueIndex);
-            if (blacklist.contains(p)) {
+            if (blacklist.contains(p) || isSkipped(p)) {
                 queueIndex++;
                 continue;
             }
@@ -3747,6 +3826,51 @@ public class StashMover extends Module {
         blacklist.add(pos);
         BlockPos partner = chestPartner(pos);
         if (partner != null) blacklist.add(partner);
+    }
+
+    /**
+     * 把「有物品、但不符合过滤条件」的箱子跳过一小段时间（V6.7p21）。
+     *
+     * <p>刻意<b>不</b>拉黑：拉黑会让它整趟都不再被看，即使之后补了潜影盒也搬不到；
+     * 跳过 {@link #SKIP_TICKS} 后还会重试。
+     */
+    private void skipChest(BlockPos pos) {
+        if (pos == null) return;
+        skippedUntil.put(pos, tick + SKIP_TICKS);
+        debugMsg("[取货] 箱内有物品但不符合过滤条件，跳过（" + (SKIP_TICKS / 20) + " 秒后可重试）");
+    }
+
+    /** 当前仍在跳过期内的箱子数量（顺便清掉过期项）。 */
+    private int filteredCount() {
+        if (skippedUntil.isEmpty()) return 0;
+        skippedUntil.entrySet().removeIf(e -> tick >= e.getValue());
+        return skippedUntil.size();
+    }
+
+    /** 这个箱子是否还在跳过期。过期即移除，允许重新打开。 */
+    private boolean isSkipped(BlockPos pos) {
+        if (pos == null) return false;
+        Long until = skippedUntil.get(pos);
+        if (until == null) return false;
+        if (tick >= until) {
+            skippedUntil.remove(pos);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 「箱子都被过滤条件挡掉」的定期说明（30 秒一条）。
+     *
+     * <p>顺带调 {@link #progress()}：这是「在等补货/等用户改设置」的正常状态，
+     * 不该被 2 分钟看门狗当成卡死。
+     */
+    private void warnFiltered() {
+        progress();
+        if (tick - lastFilteredWarnTick < FILTERED_WARN_INTERVAL) return;
+        lastFilteredWarnTick = tick;
+        warning("待搬运箱区有 " + filteredCount() + " 个箱子不符合「只拿潜影盒」，已跳过（不会搬空它们）；"
+            + "如果这不是你要的，请关掉「只拿潜影盒」");
     }
 
     private BlockPos findNearestLava(BlockPos center, int radius) {
