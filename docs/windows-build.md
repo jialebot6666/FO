@@ -243,6 +243,14 @@ Invoke-RestMethod -Uri $url -Method POST -Headers $hdr -Body $bytes `
 
 > ⚠️ 上面 ② 的「把 jar 归档进 `releases/`」是 V5.x 时代的旧流程，**已废弃**：
 > 按 `AGENTS.md` 硬性规范 6，`releases/*.jar` 已被 `.gitignore` 拦截，jar 只作为 GitHub Release 附件分发。
+>
+> ⚠️ **现行发版准则（覆盖上面 ③ 之后的部分，以 `AGENTS.md` 硬性规范 6 为准）**：
+> ① Release 附件名**必须与构建产物同名**（`FO-<mod版本>-<MC版本>.jar`），禁止改名、加 `V`、加短哈希/日期；
+> ② 每次发版传完新附件后，**必须删除此前所有 Release 里的 `.jar` 附件**，保证仓库里有且只有一个 jar（最新版）；
+>    Release 的历史说明与 tag 保留，只删附件，不要删整个 Release；
+> ③ 删完必须校验：`GET /releases?per_page=100` 汇总后，`.jar` 附件只应出现一行且 tag = 本次版本；
+> ④ 纯代码/文档推送但没有新 jar 时，**不要**动已有附件（否则会把唯一下载入口删掉）。
+> 完整 REST API 步骤与校验命令见 `AGENTS.md` 的「Release 附件清理」一节。
 
 > **纯文档改动不要发版**：没有新 jar 就不升版本、不建 Release，否则会污染版本历史
 > （会出现两个内容完全相同的 jar）。

@@ -8,6 +8,9 @@
   （`releases/FO-V*.jar` 是历史归档名，带 `V` 前缀，属旧格式，不必回改）。
 - 每个功能/修复版本的标准发布流程：改代码 → 补单测 → `cd fo && ./gradlew build` 全绿 →
   commit（信息含模块名+摘要）→ 打 tag（`<版本>`，**不带 V**）→ GitHub Release（附 `FO-<版本>-<MC版本>.jar` + 更新说明）→ 本文件加一行。
+- ⚠️ **jar 只保留最新版**：每次发版传完新附件后，要删掉此前所有 Release 里的 `.jar` 附件（Release 说明与 tag 保留），
+  保证 Releases 里只有一个 jar。纯代码/文档推送不要动已有附件。操作步骤与校验命令见 `AGENTS.md` 硬性规范 6
+  与「Release 附件清理」。
 
 ## 命名规范
 
