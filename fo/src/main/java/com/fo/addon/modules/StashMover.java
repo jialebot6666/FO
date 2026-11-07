@@ -6,8 +6,6 @@ import com.fo.addon.utils.BlockClicker;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.PeerMessageLogic;
 import com.fo.addon.utils.StashMoveLogic;
-import com.fo.addon.utils.StashMoveLogic.BoxSide;
-import com.fo.addon.utils.StashChestSpotLogic;
 import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
@@ -24,7 +22,6 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockPosSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -34,11 +31,8 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.AbstractSignBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
-import net.minecraft.block.EnderChestBlock;
-import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.entity.SignBlockEntity;
 import net.minecraft.block.enums.ChestType;
@@ -59,15 +53,12 @@ import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 
 /**
@@ -176,8 +167,8 @@ public class StashMover extends Module {
      */
     private enum MoverState {
         ZONE_CHECK,
-        LOOT, ENDER_PUT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
-        UNLOAD, ENDER_TAKE, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
+        LOOT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
+        UNLOAD, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
         SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
@@ -188,7 +179,7 @@ public class StashMover extends Module {
      * （用户实机反馈：以前一落地就立刻开活板门/脱离，地形还没同步，判断全乱）。
      */
     private enum TrioState {
-        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, ENDER_PUT, UNLOAD, ENDER_TAKE, SEND, WAIT_TELEPORT, STUCK
+        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, UNLOAD, SEND, WAIT_TELEPORT, STUCK
     }
 
     // ==================== 设置 ====================
@@ -197,7 +188,6 @@ public class StashMover extends Module {
     private final SettingGroup sgMover = settings.createGroup("搬运（双号）");
     private final SettingGroup sgPearl = settings.createGroup("拉珍珠");
     private final SettingGroup sgTrio = settings.createGroup("三号模式");
-    private final SettingGroup sgEnder = settings.createGroup("末影箱");
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
         .name("模式")
@@ -229,77 +219,9 @@ public class StashMover extends Module {
         .defaultValue(false)
         .build());
 
-    private final Setting<Double> openReach = sgGeneral.add(new DoubleSetting.Builder()
-        .name("开箱距离")
-        .description("眼睛到方块**包围盒**的最大距离（与服务端 canInteractWithBlockAt 同一口径）。"
-            + "反作弊严格的服建议 2.0；调大只会在更远处点击，可能被服务端静默拒绝。")
-        .defaultValue(2.0)
-        .min(1.0)
-        .sliderMax(4.0)
-        .build());
-
-    private final Setting<Boolean> oneTickTransfer = sgGeneral.add(new BoolSetting.Builder()
-        .name("1 tick 瞬时存取")
-        .description("测试功能（默认关）：开箱后把「全量取货 / 全量存货 / 末影箱存取」的全部窗口点击压缩到"
-            + " 1 tick 内完成，不再分 tick 慢速搬运。用于验证服务器反作弊是否放行 1 tick 存取"
-            + "（参考 zenithproxy 可 1 tick 存取不被踢）。双号/三号通用，关掉即恢复原有节奏。")
-        .defaultValue(false)
-        .build());
-
     private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
         .name("本次搬运")
         .description("只统计本次在线：趟数 + 潜影盒数。关模块不清零，断线/退服清零；右侧按钮可手动重置。")
-        .build());
-
-    // ---------- 末影箱（V6.7p27，双号 + 三号共用） ----------
-
-    private final Setting<Boolean> enderEnabled = sgEnder.add(new BoolSetting.Builder()
-        .name("启用末影箱中转")
-        .description("背包装满后先把货存进末影箱，到存储区再取出来 —— 单趟多搬 27 个潜影盒。"
-            + "末影箱需预先放在待取货箱区和存储区旁边：分区坐标填了就用坐标那台（会校验方块），"
-            + "留空则自动找最近的。默认开。")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> enderSearchRadius = sgEnder.add(new IntSetting.Builder()
-        .name("末影箱搜索半径")
-        .description("自动扫描时在玩家周围多少格内找末影箱（水平/垂直同一半径）。"
-            + "下面两条分区坐标填了就以坐标为准，这项不参与。")
-        .defaultValue(6)
-        .min(2)
-        .sliderMax(12)
-        .visible(enderEnabled::get)
-        .build());
-
-    // 末影箱分区坐标（V6.7p30，混合模式：坐标优先 + 校验 + 自动扫描兜底）
-    // ⚠️ 约定与存储箱/珍珠箱一致：0,0,0 = 未设置 = 自动扫描
-
-    private final Setting<BlockPos> enderLootChest = sgEnder.add(new BlockPosSetting.Builder()
-        .name("取货区末影箱位置")
-        .description("双号模式：待取货箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
-        .defaultValue(new BlockPos(0, 0, 0))
-        .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
-        .build());
-
-    private final Setting<BlockPos> enderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
-        .name("存储区末影箱位置")
-        .description("双号模式：存储区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
-        .defaultValue(new BlockPos(0, 0, 0))
-        .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
-        .build());
-
-    private final Setting<BlockPos> trioEnderLootChest = sgEnder.add(new BlockPosSetting.Builder()
-        .name("待搬运箱区末影箱位置")
-        .description("三号模式：待搬运箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
-        .defaultValue(new BlockPos(0, 0, 0))
-        .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
-        .build());
-
-    private final Setting<BlockPos> trioEnderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
-        .name("存储箱区末影箱位置")
-        .description("三号模式：存储箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
-        .defaultValue(new BlockPos(0, 0, 0))
-        .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
         .build());
 
     // ---------- 搬运端（双号） ----------
@@ -777,16 +699,6 @@ public class StashMover extends Module {
     // ===== V6.7p11：照 PearlDrop 校准的一套判定阈值与超时 =====
     /** 判定「已居中」的最大水平距离（格）。超过说明还没到边缘。 */
     private static final double TRIO_CENTER_DIST = 1.2;
-    /** 判定「人在门板正对面那一格」的水平容差（格）：格子半宽 0.5，留 0.05 余量。 */
-    private static final double FRONT_CELL_TOLERANCE = 0.45;
-    /** 四个水平方向（告示牌扫描 / 方向换算用）。 */
-    private static final Direction[] HORIZONTAL_DIRS = {
-        Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
-    };
-    /** 告示牌扫描高度：活板门正上方 1~3 格（用户口径：这段内必定有告示牌）。 */
-    private static final int SIGN_SCAN_UP = 3;
-    /** 判定珍珠「在 1×1 柱内」的水平容差（格）：半宽 0.5，留 0.05 余量（V6.7p22 收紧，原 0.9）。 */
-    private static final double PEARL_IN_COLUMN_XZ = 0.55;
     /** 判定「已居中」需要连续满足的 tick 数（PearlDrop centerStallTicks）。 */
     private static final int TRIO_CENTER_STALL_TICKS = 6;
     /** 单次投掷确认超时（tick）。PearlDrop throwTimeoutTicks。 */
@@ -840,59 +752,6 @@ public class StashMover extends Module {
     private int openAttempts;
     /** 当前寻路目标（寻路守卫：同一目标不重复下发，避免每 tick 重置 Baritone 路径）。 */
     private BlockPos pathTarget;
-    /**
-     * 当前寻路目标的类型（V6.7p23）。
-     *
-     * <p>同一个坐标在不同层之间切换时，目标类型也要跟着变，否则「同目标不重复下发」的守卫
-     * 会把新目标吞掉。
-     */
-    private PathGoal pathGoal;
-    /**
-     * 每个箱子算好的落脚点（V6.7p25）：spot = 该站的空气格，los = 从那里能不能直视箱子。
-     * 箱子换层/被拆/不再可站时重算；{@link #chestNoSpot} 记「算过，周围确实没有可站格」。
-     */
-    private final Map<BlockPos, ChestApproach> chestApproachCache = new HashMap<>();
-    /** 四周 3 格内没有可站格的箱子（本次会话不再尝试，避免每 tick 重算 + 反复走箱子正上方）。 */
-    private final Set<BlockPos> chestNoSpot = new HashSet<>();
-    /**
-     * 换格机制（V6.7p33）：每个箱子「试过失败的落脚点」→ 失败时刻。
-     * 选格时跳过它们；{@link #SPOT_RETRY_AFTER_TICKS} 之后自动过期（地形可能变了）。
-     */
-    private final Map<BlockPos, LinkedHashMap<BlockPos, Long>> chestFailedSpots = new HashMap<>();
-    /** 失败落脚点的重试间隔：60 秒。 */
-    private static final long SPOT_RETRY_AFTER_TICKS = 1200;
-    /** 上次换格的 tick（40 tick 节流：一次失败只换一次格）。 */
-    private long lastSpotRotateTick;
-    /** 当前正在接近的箱子 + 开始时间（走不到就报警/跳过，别无限挂着）。 */
-    private BlockPos approachChest;
-    private long approachStartTick;
-    /** 单个箱子「走到落脚点」的等待上限（30 秒）；超时按模式决定跳过还是继续。 */
-    private static final int APPROACH_TIMEOUT = 600;
-    /** 选箱子时最多向后看几个，挑「落脚点有视线」的那个（V6.7p25）。 */
-    private static final int LOS_LOOKAHEAD = 4;
-
-    // ===== V6.7p27：末影箱中转 =====
-    /** 本趟是否已经往末影箱存过货（一趟只存一次，避免来回倒腾）。 */
-    private boolean enderPutDone;
-    /** 本趟是否已经从末影箱取过货（一趟只取一次）。 */
-    private boolean enderTakeDone;
-    /** 本次要打开的那台末影箱（进状态时扫出来的）。 */
-    private BlockPos enderTarget;
-    /** 末影箱扫描缓存（附近没有时也缓存一小会儿，别每 tick 全立方体扫一遍）。 */
-    private BlockPos enderChestCache;
-    private long enderChestCacheTick;
-    /** 进入末影箱状态的 tick（用于「打不开就放弃本趟」的超时）。 */
-    private long enderStateStart;
-    /** 单次末影箱操作（存/取）的等待上限：30 秒（含从 2~6 格外走过来的时间）。 */
-    private static final int ENDER_STATE_TIMEOUT = 600;
-    /** 末影箱状态里「关掉非末影箱界面」的容忍次数，超过就判定识别异常并降级（V6.7p29）。 */
-    private static final int ENDER_CLOSE_LIMIT = 3;
-    /** 本状态里已经关掉过几次「不是末影箱」的界面（防止打开/关闭死循环）。 */
-    private int enderCloseCount;
-    /** 是否已经打过「末影箱界面已就绪」的调试行（每趟只打一次）。 */
-    private boolean enderOpenLogged;
-    /** 「附近没有末影箱」的负缓存时长（tick）。 */
-    private static final int ENDER_SCAN_TTL = 20;
     private long pathStartTick;
     /** 同一个精确走位目标开始的时间（用于 20 秒超时判定，不随每次重发归零）。 */
     private long pathToSince;
@@ -972,6 +831,10 @@ public class StashMover extends Module {
     private static final double STEP_ARRIVE_EPS = 0.35;
     /** 挂起的交互动作：等本 tick 的移动包（带新朝向）发完再执行。 */
     private Runnable afterMoveAction;
+    /** 四个水平方向（站位候选 / 活板门朝向判断用）。 */
+    private static final Direction[] HORIZONTALS = {
+        Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
+    };
 
     /** 每个区第一次找到的安全站位（缓存后复用，避免每次传送过来都重新搜一遍）。 */
     private final java.util.Map<StashMoveLogic.Zone, BlockPos> zoneSafeSpot = new java.util.HashMap<>();
@@ -988,8 +851,6 @@ public class StashMover extends Module {
     private int trapdoorClickAttempts;
     /** 「退开重来」轮数（V6.7p12，连点 6 次没开就退开换角度，最多 2 轮）。 */
     private int trapdoorRetreats;
-    /** 上一次打印的「朝向三来源」摘要（只在结论变化时打印，避免每 tick 刷屏）。 */
-    private String lastSideDump = "";
     /** 调试心跳：上次打印摘要的 tick。 */
     private long lastHeartbeatTick;
     /** 心跳摘要真正打印出去的 tick（内容不变时用它控制「仍在…」的间隔）。 */
@@ -1049,16 +910,13 @@ public class StashMover extends Module {
         tick = 0;
         cooldown = 0;
         blacklist.clear();
-        chestApproachCache.clear();
-        chestNoSpot.clear();
-        chestFailedSpots.clear();
         skippedUntil.clear();
         lastFilteredWarnTick = 0;
         chestQueue.clear();
         queueIndex = 0;
         openChest = null;
         openAttempts = 0;
-        clearPathTarget();
+        pathTarget = null;
         pathStartTick = 0;
         pathRetries = 0;
         finalTrip = false;
@@ -1075,8 +933,6 @@ public class StashMover extends Module {
         pullActive = false;
         unloadedSomething = false;
         lastProgressTick = 0;
-        resetEnderTrip();
-        invalidateEnderCache();
 
         // V6.7p14：双号新增的几个阶段状态
         dualTeleportWaitStart = 0;
@@ -1129,9 +985,6 @@ public class StashMover extends Module {
         PathManagers.get().stop();
         PathManagers.get().setAllowBreak(true);
         blacklist.clear();
-        chestApproachCache.clear();
-        chestNoSpot.clear();
-        chestFailedSpots.clear();
         chestQueue.clear();
         pullActive = false;
     }
@@ -1170,7 +1023,7 @@ public class StashMover extends Module {
         antiStuckCount++;
         releaseMovementKeys();
         PathManagers.get().stop();
-        clearPathTarget();
+        pathTarget = null;
         warning("检测到频繁传送（5 秒内 " + teleportFlood.count(System.currentTimeMillis())
             + " 次），判定卡脚，开始脱困");
         info("我卡住了！请手动检查站位");
@@ -1318,8 +1171,6 @@ public class StashMover extends Module {
         switch (moverState) {
             case ZONE_CHECK -> dualZoneCheck();
             case LOOT -> dualLoot();
-            case ENDER_PUT -> dualEnderPut();
-            case ENDER_TAKE -> dualEnderTake();
             case SEND -> dualSend();
             case WAIT_ACK -> dualWaitAck();
             case WAIT_TELEPORT -> dualWaitTeleport();
@@ -1433,9 +1284,8 @@ public class StashMover extends Module {
     }
 
     private void dualLoot() {
-        // 背包满优先：先试着塞进附近末影箱（V6.7p27），塞不了再去发请求
+        // 背包满优先：关掉容器直接去发请求（否则容器里点击 QUICK_MOVE 一发都放不进去，会死循环）
         if (inventoryFull()) {
-            if (tryEnterEnderPut(() -> moverState = MoverState.ENDER_PUT)) return;
             closeScreen();
             moverState = MoverState.SEND;
             return;
@@ -1467,7 +1317,6 @@ public class StashMover extends Module {
         }
 
         if (inventoryFull()) {
-            if (tryEnterEnderPut(() -> moverState = MoverState.ENDER_PUT)) return;
             moverState = MoverState.SEND;
             return;
         }
@@ -1481,25 +1330,8 @@ public class StashMover extends Module {
             }
             return;
         }
-        if (!goOpenChest(chest)) return;
-    }
-
-    /** 双号：把货存进附近末影箱（V6.7p27）。 */
-    private void dualEnderPut() {
-        if (!enderPutTick()) {
-            moverState = MoverState.LOOT;
-            cooldown = PACE_STEP;
-            debugMsg("[末影箱] 存货结束，回取货");
-        }
-    }
-
-    /** 双号：到存储区后把末影箱里的货取出来（V6.7p27）。 */
-    private void dualEnderTake() {
-        if (!enderTakeTick()) {
-            moverState = MoverState.UNLOAD;
-            cooldown = PACE_STEP;
-            debugMsg("[末影箱] 取货结束，回卸货");
-        }
+        if (!approachForOpen(chest)) return;
+        openChestAt(chest);
     }
 
     private void dualSend() {
@@ -1527,7 +1359,7 @@ public class StashMover extends Module {
     private void startTeleportWait() {
         releaseMovementKeys();
         PathManagers.get().stop();
-        clearPathTarget();
+        pathTarget = null;
         closeScreen();
         dualTeleportWaitStart = tick;
         dualTeleportResends = 0;
@@ -1569,11 +1401,8 @@ public class StashMover extends Module {
         closeScreen();
         releaseMovementKeys();
         PathManagers.get().stop();
-        clearPathTarget();
+        pathTarget = null;
         blacklist.clear();
-        chestApproachCache.clear();
-        chestNoSpot.clear();
-        chestFailedSpots.clear();
         skippedUntil.clear();
         chestQueue.clear();
         queueIndex = 0;
@@ -1708,7 +1537,8 @@ public class StashMover extends Module {
             cooldown = Math.max(1, clickDelay.get());
             return;
         }
-        if (!goOpenChest(chestPos)) return;
+        if (!approachForOpen(chestPos)) return;
+        openChestAt(chestPos);
     }
 
     private void dualThrow() {
@@ -1757,7 +1587,8 @@ public class StashMover extends Module {
             enterStuck("请先设置珍珠箱位置");
             return;
         }
-        if (!goOpenChest(chestPos)) return;
+        if (!approachForOpen(chestPos)) return;
+        openChestAt(chestPos);
     }
 
     /**
@@ -1842,13 +1673,10 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
-                finishDualUnload();
+                onUnloadDone();
                 return;
             }
-            // V6.7p25：和取货/珍珠箱统一走 goOpenChest（走到箱子旁落脚点就停，不上箱子）。
-            // 之前这里直连 openChestAt —— 它只在「已经够得着」时点击，不会走过去，
-            // 被拉到存储区后只要离箱子 >3.5 格就会原地空转（双号专属漏洞）。
-            if (!goOpenChest(store)) return;
+            openChestAt(store);
             return;
         }
         if (containerIsFull()) {
@@ -1861,23 +1689,10 @@ public class StashMover extends Module {
             }
             return;
         }
-        // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
-        if (oneTickTransfer.get()) {
-            if (!unloadAllInOneTick()) {
-                closeScreen();
-                finishDualUnload();
-                return;
-            }
-            return;   // cooldown 已在批量里压到 2 tick，等服务端确认后再看下一步
-        }
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
-            // ⚠️ V6.7p31 修复：这是双号卸货的主出口（最后一格 QUICK_MOVE 后界面还开着，
-            // 下一 tick 就会走到这里）。p27 只给「界面没开」的出口接了末影箱取货，
-            // 这个出口直接 onUnloadDone() → 跳过取货 → 直接进投珍珠，还打出
-            // 「附近没找到末影箱？」的误导报警。现在统一走 finishDualUnload()。
-            finishDualUnload();
+            onUnloadDone();
             return;
         }
         unloadedSomething = true;
@@ -1886,32 +1701,14 @@ public class StashMover extends Module {
         progress();
     }
 
-    /**
-     * 双号卸货收尾（V6.7p31）：dualUnload 的**所有**「卸完了」出口都走这里。
-     *
-     * <p>顺序固定：先问末影箱要不要取货（本趟存过且还没取）→ 取完回 UNLOAD 再卸一轮 →
-     * 全部落袋才真正收尾进投珍珠。收尾只有一个实现，杜绝「改一处漏一处」。
-     */
-    private void finishDualUnload() {
-        if (tryEnterEnderTake(() -> moverState = MoverState.ENDER_TAKE)) return;
-        onUnloadDone();
-    }
-
     private void onUnloadDone() {
         if (unloadedSomething) StashStats.get().addTrip();
         unloadedSomething = false;
-        if (enderPutDone && !enderTakeDone) {
-            warning("本趟末影箱里的货没取出来（存储区附近没找到末影箱？可填「存储区末影箱位置」坐标指定），会留到下一趟");
-        }
-        resetEnderTrip();
-        invalidateEnderCache();
         if (finalTrip) {
-            info("最后一趟运输完成（" + StashStats.get().displayText() + "），关闭模块");
+            info("最后一趟运输完成，关闭模块");
             toggle();
             return;
         }
-        // V6.7p25：每趟卸完都把「趟数 + 盒数」报一次，方便实机核对统计
-        info("本趟卸货完成：本次共 " + StashStats.get().displayText());
         // V6.7p14：卸完货才去投「回程票」——货先落袋，投掷链路再出问题也不会把货背死。
         pearlConfirmedTick = 0;
         pearlConfirmStreak = 0;
@@ -1987,7 +1784,7 @@ public class StashMover extends Module {
             pearlConfirmStreak = 0;
             pearlConfirmRetries = 0;
             lastPearlThrowTick = 0;
-            clearPathTarget();
+            pathTarget = null;
             moverState = MoverState.LOOT;
             cooldown = 40;
             debugMsg("[双号][重生] 已重生，等区块加载后继续取货");
@@ -2005,7 +1802,8 @@ public class StashMover extends Module {
             return;
         }
         if (!containerOpen()) {
-            if (!goOpenChest(chestPos)) return;
+            if (!approachForOpen(chestPos)) return;
+            openChestAt(chestPos);
             return;
         }
         if (!containerEmpty()) {
@@ -2102,9 +1900,7 @@ public class StashMover extends Module {
             case RESTOCK -> trioRestock();
             case THROW -> trioThrow();
             case LOOT -> trioLoot();
-            case ENDER_PUT -> trioEnderPut();
             case UNLOAD -> trioUnload();
-            case ENDER_TAKE -> trioEnderTake();
             case SEND -> trioSend();
             case WAIT_TELEPORT -> trioWaitTeleport();
             case STUCK -> tickStuck();
@@ -2132,7 +1928,6 @@ public class StashMover extends Module {
 
     private void trioLoot() {
         if (inventoryFull()) {
-            if (tryEnterEnderPut(() -> setTrioState(TrioState.ENDER_PUT, "背包满，先存末影箱"))) return;
             closeScreen();
             debugMsg("[取货] 背包已满，结束取货");
             setTrioState(TrioState.SEND, "背包已满，取货结束");
@@ -2171,7 +1966,8 @@ public class StashMover extends Module {
             enterStuck("待搬运箱区已搬空（没有可搬的箱子了）");
             return;
         }
-        if (!goOpenChest(chest)) return;
+        if (!approachForOpen(chest)) return;
+        openChestAt(chest);
     }
 
     private void trioUnload() {
@@ -2182,14 +1978,18 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
-                finishTrioUnload();
+                if (unloadedSomething) StashStats.get().addTrip();
+                unloadedSomething = false;
+                debugMsg("[存货] 没有可卸物品，结束存货");
+                setTrioState(TrioState.SEND, "存货完成");
                 return;
             }
             if (!(mc.world.getBlockState(store).getBlock() instanceof ChestBlock)) {
                 enterStuck("存储箱不存在");
                 return;
             }
-            if (!goOpenChest(store)) return;
+            if (!approachForOpen(store)) return;
+            openChestAt(store);
             return;
         }
         if (containerIsFull()) {
@@ -2197,61 +1997,19 @@ public class StashMover extends Module {
             enterStuck("存储箱已满，请清理");
             return;
         }
-        // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
-        if (oneTickTransfer.get()) {
-            if (!unloadAllInOneTick()) {
-                closeScreen();
-                finishTrioUnload();
-                return;
-            }
-            return;
-        }
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
-            finishTrioUnload();
+            if (unloadedSomething) StashStats.get().addTrip();
+            unloadedSomething = false;
+            debugMsg("[存货] 背包里没有可卸的物品了");
+            setTrioState(TrioState.SEND, "存货完成");
             return;
         }
         unloadedSomething = true;
         clickSlot(slot, SlotActionType.QUICK_MOVE);
         cooldown = Math.max(1, clickDelay.get());
         progress();
-    }
-
-    /** 三号：把货存进附近末影箱（V6.7p27）。 */
-    private void trioEnderPut() {
-        if (!enderPutTick()) {
-            setTrioState(TrioState.LOOT, "末影箱存货完成，继续取货");
-            cooldown = PACE_STEP;
-        }
-    }
-
-    /** 三号：到存储区后把末影箱里的货取出来（V6.7p27）。 */
-    private void trioEnderTake() {
-        if (!enderTakeTick()) {
-            setTrioState(TrioState.UNLOAD, "末影箱取货完成，继续卸货");
-            cooldown = PACE_STEP;
-        }
-    }
-
-    /** 三号：卸货真正结束（卸空 + 末影箱也取完）→ 计趟数、清标记、回发信。 */
-    /**
-     * 三号卸货收尾（V6.7p31 改成统一入口）：trioUnload 的**所有**「卸完了」出口都走这里。
-     *
-     * <p>顺序与 {@link #finishDualUnload()} 同构：先问末影箱要不要取货 →
-     * 取完回 UNLOAD 再卸一轮 → 全部落袋才真正收尾回发信。
-     */
-    private void finishTrioUnload() {
-        if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
-        if (unloadedSomething) StashStats.get().addTrip();
-        unloadedSomething = false;
-        info("本趟卸货完成：本次共 " + StashStats.get().displayText());
-        if (enderPutDone && !enderTakeDone) {
-            warning("本趟末影箱里的货没取出来（存储区附近没找到末影箱？可填「存储箱区末影箱位置」坐标指定），会留到下一趟");
-        }
-        resetEnderTrip();
-        invalidateEnderCache();
-        setTrioState(TrioState.SEND, "存货完成");
     }
 
     private void trioRestock() {
@@ -2283,13 +2041,15 @@ public class StashMover extends Module {
                 cooldown = 5;
                 return;
             }
-            // V6.7p25：和取货同一套靠近逻辑（能开就开、要走走到能开、目标是箱子旁落脚点）
-            if (!goOpenChest(chestPos)) {
+            if (distSq > 400) {
+                // 用 pathTo 而不是裸 moveTo：带「同目标不重复下发 + 240 tick 重设」的保护
+                pathTo(chestPos, true);
                 if (debug.get() && tick % 40 == 0) {
-                    info("[补珍珠] 走近珍珠箱（" + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外）");
+                    info("[补珍珠] 珍珠箱在 " + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外，走过去");
                 }
                 return;
             }
+            openChestAt(chestPos);
             return;
         }
 
@@ -2482,7 +2242,7 @@ public class StashMover extends Module {
             // 射线打到搭档那半块时旧写法一律判“没对上”→ 每次点击都掉进手搓包兜底（无预测）；
             // 而两半块点开的是同一个箱子，认它没有副作用。
             BlockPos partner = chestPartner(pos);
-            if (mc.player.raycast(openReach.get() + 1.5, 1.0F, false) instanceof BlockHitResult hit
+            if (mc.player.raycast(OPEN_REACH + 1.0, 1.0F, false) instanceof BlockHitResult hit
                 && isSameChest(hit.getBlockPos(), pos, partner)) {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
                 return;
@@ -2613,122 +2373,22 @@ public class StashMover extends Module {
     // ==================== 站位（V6.7p10：短按键，1 格级不再调寻路） ====================
 
     /**
-     * 活板门上方 1~3 格内找告示牌，返回**牌面朝向**（= 人该站的那一侧，V6.7p24）。
+     * 柱子旁边「该站哪一格」（V6.7p10，用户口径：只有一侧贴住走不过去，其余能站）。
      *
-     * <p>用户场地铁律：活板门正上方 1~3 格内必定有告示牌，人站在告示牌正对面（也就是
-     * 牌面所指的那一侧）投掷。告示牌是**门关着时也能读**的锚点 —— 旧实现只看「开启后的
-     * 门板碰撞箱」，门一关就什么都读不出，只能退回环形搜索，于是站到南/北侧去投。
+     * <p>不把方向写死：四个邻格逐个用碰撞箱判（{@link #isStandable}），站得了的才算候选；
+     * 活板门朝向（`FACING`）只用来把那一侧的**优先级压低**（贴住/门轴那侧通常站不了）。
+     * 四邻格都不行时，退回半径 1~4 的 {@link #pearlStandSpot}。
      *
-     * <p>四种告示牌（立牌 / 墙牌 / 挂牌 / 墙挂牌）都由
-     * {@link AbstractSignBlock#getRotationDegrees} 给出「文字正面朝哪」的角度，
-     * 直接 {@link Direction#fromHorizontalDegrees} 即可，不用自己按 ROTATION 算。
-     *
-     * <p>扫描顺序：先把「正上方」1~3 格扫完（立牌/挂牌/水下的墙牌都可能正好在这一列），
-     * 再扫四个水平邻格（贴旁边墙上的墙牌会偏出 1 格）。
-     *
-     * @return 牌面朝向；1~3 格内没有告示牌时返回 null
+     * <p>结果按区缓存：结构没变就一直用同一格，避免每趟重算。
      */
-    private Direction signThrowSide(BlockPos trapdoor) {
-        if (mc.world == null) return null;
-        // 第一遍只扫「正上方」：立牌/挂牌/水下的墙牌都可能正好在这一列
-        for (int dy = 1; dy <= SIGN_SCAN_UP; dy++) {
-            Direction face = signFaceAt(trapdoor.up(dy));
-            if (face != null) return face;
-        }
-        // 第二遍才扫四个邻格：贴在旁边墙上的墙牌会偏出 1 格
-        for (int dy = 1; dy <= SIGN_SCAN_UP; dy++) {
-            BlockPos base = trapdoor.up(dy);
-            for (Direction h : HORIZONTAL_DIRS) {
-                Direction face = signFaceAt(base.offset(h));
-                if (face != null) return face;
-            }
-        }
-        return null;
-    }
-
-    /** 该格是告示牌就返回牌面朝向，否则 null。 */
-    private Direction signFaceAt(BlockPos p) {
-        var st = mc.world.getBlockState(p);
-        if (!(st.getBlock() instanceof AbstractSignBlock sign)) return null;
-        Direction face = Direction.fromHorizontalDegrees(sign.getRotationDegrees(st));
-        return face.getAxis().isHorizontal() ? face : null;
-    }
-
     /**
-     * 投掷/贴边必须站的那一侧（V6.7p24）。
+     * 开着的活板门「门板占哪一侧」（V6.7p12）。
      *
-     * <p>三个来源，优先级从高到低：
-     * <ol>
-     *   <li><b>告示牌牌面</b>：用户场地的固定标志，门关着也能读；</li>
-     *   <li><b>活板门 FACING</b>：放置朝向。原版门板恒在 FACING 的对侧（字节码里
-     *       {@code shapeByDirection} 的基准形状就贴在 FACING 的对边），所以站 FACING 侧
-     *       就是站门板对面；门关着也能读；</li>
-     *   <li><b>开启后的门板</b>：p22 的几何口径，取其对面。</li>
-     * </ol>
+     * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，贴在自己那一格的某一侧，
+     * 包围盒能看出来（maxX≈1 → 东侧，minX≈0 → 西侧……）。
+     * 关着的时候是平铺的薄板（X/Z 占满），那种情况返回 null——哪边都不挡。
      *
-     * <p>三者理论上指向同一侧；真出现告示牌贴反/结构异常时，
-     * {@link StashMoveLogic#pickThrowSide} 会用「门板侧不能站人」做物理否决。
-     *
-     * @return 该站的一侧；三个来源都读不出时返回 null（投掷阶段会拒绝侧站）
-     */
-    private Direction throwFrontSide(BlockPos trapdoor) {
-        if (mc.world == null || trapdoor == null) return null;
-        var st = mc.world.getBlockState(trapdoor);
-        if (!(st.getBlock() instanceof TrapdoorBlock)) return null;
-
-        BoxSide sign = boxSideOf(signThrowSide(trapdoor));
-        BoxSide facing = boxSideOf(st.get(TrapdoorBlock.FACING));
-        BoxSide panel = boxSideOf(openLidSide(trapdoor));
-        BoxSide picked = StashMoveLogic.pickThrowSide(sign, facing, panel);
-
-        String dump = "告示牌=" + boxSideName(sign) + " 门FACING=" + boxSideName(facing)
-            + " 门板=" + boxSideName(panel);
-        if (!dump.equals(lastSideDump)) {
-            lastSideDump = dump;
-            if (picked == BoxSide.UNKNOWN) {
-                debugMsg("[朝向] " + dump + " → 读不出投掷侧（门开后会重试）");
-            } else {
-                debugMsg("[朝向] " + dump + " → 站 " + boxSideName(picked) + " 侧");
-            }
-        }
-        return directionOf(picked);
-    }
-
-    private static BoxSide boxSideOf(Direction d) {
-        if (d == null) return BoxSide.UNKNOWN;
-        return switch (d) {
-            case EAST -> BoxSide.EAST;
-            case WEST -> BoxSide.WEST;
-            case SOUTH -> BoxSide.SOUTH;
-            case NORTH -> BoxSide.NORTH;
-            default -> BoxSide.UNKNOWN;
-        };
-    }
-
-    private static Direction directionOf(BoxSide s) {
-        if (s == null) return null;
-        return switch (s) {
-            case EAST -> Direction.EAST;
-            case WEST -> Direction.WEST;
-            case SOUTH -> Direction.SOUTH;
-            case NORTH -> Direction.NORTH;
-            default -> null;
-        };
-    }
-
-    private static String boxSideName(BoxSide s) {
-        return s == null ? "?" : s.name();
-    }
-
-    /**
-     * 开着的活板门「门板占哪一侧」（V6.7p12，V6.7p22 修判定）。
-     *
-     * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，在薄的轴上只占 0.1875，
-     * 另一条水平轴占满 0~1。**必须先找薄轴再判方向**——旧实现按 maxX 优先，
-     * 门板贴南/北时也会命中「东」，正对面就被算成了垂直的侧面（实机「往两旁投」的根因）。
-     * 关着的时候是平铺的薄板（X/Z 占满），返回 null。
-     *
-     * @return 门板贴着的那一侧；关着 / 不是活板门 / 形状不可判时返回 null
+     * @return 门板贴着的那一侧；关着/不是活板门/看不出时返回 null
      */
     private Direction openLidSide(BlockPos trapdoor) {
         var st = mc.world.getBlockState(trapdoor);
@@ -2737,61 +2397,72 @@ public class StashMover extends Module {
         VoxelShape shape = st.getCollisionShape(mc.world, trapdoor);
         if (shape.isEmpty()) return null;
         Box b = shape.getBoundingBox();
-        return switch (StashMoveLogic.thinPanelSide(b.minX, b.minZ, b.maxX, b.maxZ)) {
-            case EAST -> Direction.EAST;
-            case WEST -> Direction.WEST;
-            case SOUTH -> Direction.SOUTH;
-            case NORTH -> Direction.NORTH;
-            default -> null;
-        };
+        if (b.maxX >= 0.99) return Direction.EAST;
+        if (b.minX <= 0.01) return Direction.WEST;
+        if (b.maxZ >= 0.99) return Direction.SOUTH;
+        if (b.minZ <= 0.01) return Direction.NORTH;
+        return null;
     }
 
     /**
-     * 柱子旁边「该站哪一格」（V6.7p18 重写，V6.7p22 收紧为「只认正对面」）。
+     * 柱子旁边「该站哪一格」（V6.7p18 重写）。
      *
      * <p>为什么必须正对面：门板立在自己那一格的某一侧，站对面贴到边缘也碰不到它；
      * 站侧面或门板那一侧，按住 Shift 往前贴的时候人物碰撞箱（0.6 宽）会顶到门板，
-     * 走不到位 → 珍珠投不进腔室。
+     * 走不到位 → 珍珠投不进腔室。这正是实机反馈的「走不到合适位置」。
      *
-     * <p>⚠️ V6.7p22 修掉的两个「向两旁扩展」来源：
+     * <p>⚠️ 旧实现（p12~p17）有两个连着的坑，也是「每次都在旁边投」的真正原因：
      * <ol>
-     *   <li>{@link #openLidSide} 原来按 maxX 优先判方向，南北朝向的门板会被误判成东侧 →
-     *       「正对面」算成垂直侧面；</li>
-     *   <li>正前方站不了时会打挑一个侧面（+100 分）甚至退回 {@link #pearlStandSpot} 的环形搜索。
-     *       现在投掷阶段（{@link SettlePurpose#THROW}）**只返回正前方那一格**，站不了就返回 null，
-     *       由调用方报警，不再侧站。</li>
+     *   <li>站位发生在开门**之前**，此时 {@link #openLidSide} 返回 null（平铺的薄板看不出占哪侧），
+     *       于是只按「离得近」挑一格，根本没有正前方概念；</li>
+     *   <li>挑出来的格子还会写进缓存并**永久短路**，门开了也不会重算。</li>
      * </ol>
+     * 现在：门关着只给一个「够得着」的临时落脚点（{@link #pearlStandSpot}），
+     * 门开之后才按门板侧算正对面，而且**不缓存**（每次现算，就几次方块查询）。
      */
-    private BlockPos throwStandSpot(BlockPos trapdoor, SettlePurpose purpose) {
+    private BlockPos throwStandSpot(BlockPos trapdoor) {
         if (mc.world == null || mc.player == null) return null;
         BlockPos water = trapdoor.down(1);
-        // V6.7p24：不再只看「开启后的门板」——告示牌 / 活板门 FACING 在门关着时也能定侧。
-        Direction front = throwFrontSide(trapdoor);
-        if (front == null) {
-            // 三个来源全读不出（不是活板门 / 形状异常 / 上方没告示牌）：
-            // 脱困可以就近找一格；投掷绝不允许（宁可报警也不乱投）
-            return purpose == SettlePurpose.THROW ? null : pearlStandSpot(trapdoor);
+        Direction lid = openLidSide(trapdoor);
+        if (lid == null) {
+            // 门还关着：读不出门板占哪侧，先给个能站人的临时点。
+            // 开门后 tickThrowSequence 会再调一次 settlePosition，那时才算正前方。
+            return pearlStandSpot(trapdoor);
         }
 
-        BlockPos frontSpot = frontStandSpot(trapdoor, water, front);
-        if (frontSpot != null) {
-            return frontSpot;
-        }
-
-        // V6.7p22：正前方站不了时**不再退回侧面**。投掷阶段直接失败；脱困阶段才允许就近站一格。
-        if (purpose == SettlePurpose.THROW) return null;
-        return pearlStandSpot(trapdoor);
-    }
-
-    /** 正前方那一格（脚与门同层或上一层）；两格都站不了返回 null。 */
-    private BlockPos frontStandSpot(BlockPos trapdoor, BlockPos water, Direction front) {
+        Direction front = lid.getOpposite();
         for (int level = 0; level <= 1; level++) {
             BlockPos p = new BlockPos(trapdoor.getX() + front.getOffsetX(),
                 trapdoor.getY() + level, trapdoor.getZ() + front.getOffsetZ());
-            if (p.equals(water)) continue;
-            if (isStandable(p)) return p;
+            if (p.equals(water) || !isStandable(p)) continue;
+            if (debug.get() && tick % 100 == 0) {
+                debugMsg("[站位] 门板占" + lid.asString() + "侧 → 站正对面");
+            }
+            return p;
         }
-        return null;
+
+        // 正前方站不了（用户口径：正常结构永远可站，这里只是兜底，避免直接卡死）
+        BlockPos best = null;
+        for (int level = 0; level <= 1 && best == null; level++) {
+            int feetY = trapdoor.getY() + level;
+            double bestScore = Double.MAX_VALUE;
+            for (Direction d : HORIZONTALS) {
+                BlockPos p = new BlockPos(trapdoor.getX() + d.getOffsetX(), feetY, trapdoor.getZ() + d.getOffsetZ());
+                if (p.equals(water) || !isStandable(p)) continue;
+                double score = p.getSquaredDistance(mc.player.getBlockPos());
+                if (d == lid) score += 1000;                       // 门板那一侧：贴过去必撞
+                else if (d != front) score += 100;                 // 垂直两侧次之
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = p;
+                }
+            }
+        }
+        if (best != null) {
+            warnThrottled("活板门正前方那一格站不了，退回侧面站位（建议检查结构）");
+            return best;
+        }
+        return pearlStandSpot(trapdoor);
     }
 
     /**
@@ -2881,21 +2552,11 @@ public class StashMover extends Module {
      * @return true = 已站好（并记下“原位”，投完退回这里）
      */
     private boolean settlePosition(BlockPos trapdoorPos) {
-        return settlePosition(trapdoorPos, SettlePurpose.ESCAPE);
-    }
-
-    private boolean settlePosition(BlockPos trapdoorPos, SettlePurpose purpose) {
         if (mc.player == null) return false;
-        BlockPos spot = throwStandSpot(trapdoorPos, purpose);
+        BlockPos spot = throwStandSpot(trapdoorPos);
         if (spot == null) {
             dumpStandSpotFailure(trapdoorPos);
-            if (purpose == SettlePurpose.THROW) {
-                // 交给 tickThrowSequence 的「重走」计时器处理（门可能刚开、方块状态还没同步完），
-                // 但无论如何都不会退到侧面投掷。
-                debugMsg("[站位] 正前方站不了或读不出门板朝向，拒绝侧站投掷");
-            } else {
-                enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
-            }
+            enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
             return false;
         }
 
@@ -2947,25 +2608,9 @@ public class StashMover extends Module {
      * <p>只用在「已经站在柱子旁那一格中心」之后，位移最多 1 格，蹲着不会掉进柱子里；
      * 走不动就说明到边缘了，可以直接低头投。
      *
-     * <p>V6.7p22：进门先确认「人就在门板正对面那一格」——不在就返回 3 让调用方重站，
-     * 保证任何情况下都不会从侧面/门板侧起投。
-     *
-     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退 3=不在活板门正对面（需重站）
+     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退
      */
-    private int sneakStepToEdge(BlockPos trapdoor, int maxTicks) {
-        BlockPos water = trapdoor.down(1);
-        // V6.7p24：和站位同源（告示牌 → FACING → 门板），不再只依赖开启后的碰撞箱
-        Direction front = throwFrontSide(trapdoor);
-        if (front == null) return 3;
-        // 用「沿正前方轴的投影」判定，而不是到格心的距离：贴边时人会朝柱心移动，
-        // 到格心的距离会变大，用距离会在半途把人退回。
-        double dx = mc.player.getX() - (trapdoor.getX() + 0.5);
-        double dz = mc.player.getZ() - (trapdoor.getZ() + 0.5);
-        if (!StashMoveLogic.onFrontSide(dx, dz, front.getOffsetX(), front.getOffsetZ(),
-                FRONT_CELL_TOLERANCE)) {
-            return 3;
-        }
-
+    private int sneakStepToEdge(BlockPos water, int maxTicks) {
         sneakForThrow();
         Vec3d aim = columnAimPoint(water);
         float yaw = (float) (Math.toDegrees(Math.atan2(aim.z - mc.player.getZ(), aim.x - mc.player.getX())) - 90.0);
@@ -3016,24 +2661,6 @@ public class StashMover extends Module {
 
     /** 「投一颗珍珠进柱子」共享子流程的结果（V6.7p13 起，三人 1号 与 双号搬运端共用）。 */
     private enum ThrowSeq { RUNNING, DONE, NO_PEARL, FAILED }
-
-    /**
-     * 站位目的（V6.7p22）。
-     *
-     * <ul>
-     *   <li>{@link #ESCAPE}：先从气泡柱里出来，允许站到附近任意能站的格；</li>
-     *   <li>{@link #THROW}：投掷前的站位，**只允许活板门门板的正对面**，正前方被挡就拒绝投掷，
-     *       绝不退到侧面（旧实现会打分挑侧面，实机就是「往两旁投」）。</li>
-     * </ul>
-     */
-    private enum SettlePurpose { ESCAPE, THROW }
-
-    /** 箱子旁算好的落脚点（V6.7p25）：spot 是空气格，los = 从那里能不能直视箱子。 */
-    private record ChestApproach(BlockPos spot, boolean los) {
-    }
-
-    /** 靠近箱子的三种结果（V6.7p25）：已经能开 / 正在走 / 周围没有可站格。 */
-    private enum Approach { IN_RANGE, MOVING, NO_SPOT }
 
     /** 三人模式 1 号的投掷入口（具体步骤在 {@link #tickThrowSequence}）。 */
     private void trioThrow() {
@@ -3092,8 +2719,8 @@ public class StashMover extends Module {
                     trapdoorClickAttempts = 0;
                     trapdoorRetreats = 0;
                     // V6.7p18：门开着才读得出门板占哪侧 —— 到这里才把站位纠到「正前方」。
-                    // V6.7p22：这里必须用 THROW 口径（只认正对面），且站不了时不再退侧面。
-                    if (!settlePosition(stand, SettlePurpose.THROW)) {
+                    // 旧实现在开门前就选好站位还写了缓存，门开了也不重算，于是每次都站旁边。
+                    if (!settlePosition(stand)) {
                         if (frontWalkStart == 0) {
                             frontWalkStart = tick;
                         } else if (tick - frontWalkStart > FRONT_ALIGN_TIMEOUT) {
@@ -3101,13 +2728,8 @@ public class StashMover extends Module {
                             frontWalkStart = tick;
                             PathManagers.get().stop();
                             if (frontAlignTries > FRONT_ALIGN_MAX_TRIES) {
-                                // V6.7p24：三来源（告示牌/朝向/门板）任一能读出就给具体方向
-                                Direction frontNow = throwFrontSide(stand);
-                                enterStuck(frontNow == null
-                                    ? "活板门已开，但告示牌/朝向/门板三处都读不出投掷侧，拒绝投掷"
-                                    : "投掷侧（" + frontNow.asString()
-                                        + " 侧）那一格站不了，已重走 " + FRONT_ALIGN_MAX_TRIES
-                                        + " 次；本模块只在正对面投掷，不会退到侧面");
+                                enterStuck("活板门已开，但走不到正前方（已重走 " + FRONT_ALIGN_MAX_TRIES
+                                    + " 次），请检查正前方那一格是否被占");
                                 return ThrowSeq.FAILED;
                             }
                             warnThrottled("还没站到活板门正前方，重走（第 " + frontAlignTries + " 次）");
@@ -3162,18 +2784,13 @@ public class StashMover extends Module {
             case 3 -> {
                 // V6.7p10：站位已经由 settlePosition 站到「柱子旁那一格中心」，
                 // 这里只做最后 1 格的潜行贴边（蹲着不会掉进柱子里），走不动就说明到边缘了。
-                int r = sneakStepToEdge(stand, TRIO_APPROACH_TIMEOUT);
+                int r = sneakStepToEdge(water, TRIO_APPROACH_TIMEOUT);
                 if (r == 1) {
                     setThrowSub(4, "已到柱子边缘，低头投掷");
                     cooldown = PACE_STEP;
                 } else if (r == 2) {
                     debugMsg("[贴边] 踩进气泡柱了，先退开重来");
                     setThrowSub(5, "贴边时踩进水里");
-                    cooldown = PACE_STEP;
-                } else if (r == 3) {
-                    // V6.7p22：人不在门板正对面 → 回去重新站位，绝不从侧面投
-                    debugMsg("[贴边] 人不在活板门正前方，退回重新站位");
-                    setThrowSub(2, "不在正前方，重新站位");
                     cooldown = PACE_STEP;
                 }
             }
@@ -3320,9 +2937,6 @@ public class StashMover extends Module {
         if (lastPos != null && StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, now.x, now.z, 32)) {
             trioZone = trioZone == StashMoveLogic.Zone.SOURCE ? StashMoveLogic.Zone.STORE : StashMoveLogic.Zone.SOURCE;
                 blacklist.clear();
-        chestApproachCache.clear();
-        chestNoSpot.clear();
-        chestFailedSpots.clear();
             skippedUntil.clear();
             chestQueue.clear();
             queueIndex = 0;
@@ -3735,16 +3349,10 @@ public class StashMover extends Module {
         if (!debug.get() || mc.world == null || mc.player == null) return;
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
-        Direction lid = openLidSide(trapdoorPos);
-        Direction sign = signThrowSide(trapdoorPos);
-        Direction front = throwFrontSide(trapdoorPos);
         debugMsg("[脱困] 找不到可站格｜自身=" + blockName(feet)
             + " 脚下=" + blockName(feet.down())
             + " 水中=" + mc.player.isTouchingWater()
             + "｜活板门打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
-            + " 门板=" + (lid == null ? "不可判" : lid.asString())
-            + " 告示牌=" + (sign == null ? "1~3 格内没找到" : sign.asString())
-            + " 投掷侧=" + (front == null ? "不可判" : front.asString())
             + " 水格=" + blockName(water));
     }
 
@@ -3753,6 +3361,12 @@ public class StashMover extends Module {
         return net.minecraft.registry.Registries.BLOCK.getId(mc.world.getBlockState(p).getBlock()).getPath();
     }
 
+    /**
+     * 投掷前的站位与活板门准备：
+     * ① 走到活板门旁边的实心格（绝不踩气泡柱）；② 活板门关着就点开。
+     *
+     * @return true = 已就位且活板门开着，可以投
+     */
     /** 投掷时按住潜行键（防止走位滑进气泡柱）。 */
     private void sneakForThrow() {
         if (mc.options == null) return;
@@ -3768,25 +3382,21 @@ public class StashMover extends Module {
     }
 
     /**
-     * 气泡柱里是否已经有<b>自己的</b>珍珠（严格判定：XZ 必须真在 1×1 柱内、Y 在水柱内）。
+     * 气泡柱里是否已经有<b>自己的</b>珍珠（严格判定：XZ 误差 ≤0.9 格、Y 在水柱内）。
      *
      * <p>用途有两个：① 投掷前先查——已经有珍珠就不必再投（用户口径）；
-     * ② 投掷后校验——必须真的落在柱内才算成功。
-     *
-     * <p>V6.7p22：XZ 容差从 0.9 收紧到 {@link #PEARL_IN_COLUMN_XZ}（0.55）。原来的 0.9
-     * 会把落在**旁边方块**上的珍珠也算成「柱内」（用户说的「检测向两旁扩展」），
-     * 结果是回程票没投进去、模块却以为成功，下一趟拉不回来。
+     * ② 投掷后校验——必须真的落在柱内才算成功（原来 Y±8 的宽松范围会把落在活板门上的也算成功）。
      */
     private boolean ownPearlInColumn(BlockPos water) {
-        if (mc.world == null || mc.player == null) return false;
+        if (mc.world == null) return false;
         for (Entity e : mc.world.getEntities()) {
             if (!(e instanceof EnderPearlEntity pearl)) continue;
             Entity owner = pearl.getOwner();
             boolean mine = owner == mc.player
                 || (owner != null && owner.getUuid().equals(mc.player.getUuid()));
             if (!mine) continue;
-            if (StashMoveLogic.pearlInColumn(pearl.getX(), pearl.getZ(),
-                    water.getX(), water.getZ(), PEARL_IN_COLUMN_XZ)
+            if (Math.abs(pearl.getX() - (water.getX() + 0.5)) <= 0.9
+                && Math.abs(pearl.getZ() - (water.getZ() + 0.5)) <= 0.9
                 && pearl.getY() >= water.getY() - 8.0
                 && pearl.getY() <= water.getY() + 1.6) {
                 return true;
@@ -3869,8 +3479,6 @@ public class StashMover extends Module {
     private StashMoveLogic.TakeOutcome takeFromContainer() {
         ScreenHandler handler = containerHandler();
         if (handler == null) return StashMoveLogic.TakeOutcome.EMPTY;
-        // V6.7p34：1 tick 瞬时存取 —— 容器里所有符合条件的物品一次点完
-        if (oneTickTransfer.get()) return takeAllInOneTick();
         int size = handler.slots.size();
         boolean anyItem = false;
         for (int i = 0; i < size - 36; i++) {
@@ -3925,93 +3533,6 @@ public class StashMover extends Module {
         return true;
     }
 
-    // ==================== 1 tick 瞬时存取（V6.7p34，测试开关） ====================
-
-    /**
-     * 1 tick 全量取货：把容器里所有（符合「只拿潜影盒」过滤的）物品一次点完。
-     * 三态口径与 {@link #takeFromContainer} 一致。
-     *
-     * <p>按索引单遍、每格最多点一次：1.17+ 容器点击没有客户端预测，本 tick 内槽位内容不变，
-     * 不会「同一格点两次搬回去」；服务端确认晚到时最多多几个空点击（无副作用），所以批量后
-     * 冷却压到 2 tick 等确认，而不是沿用 clickDelay。
-     */
-    private StashMoveLogic.TakeOutcome takeAllInOneTick() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return StashMoveLogic.TakeOutcome.EMPTY;
-        int size = handler.slots.size();
-        boolean anyItem = false;
-        boolean clicked = false;
-        for (int i = 0; i < size - 36; i++) {
-            ItemStack stack = handler.getSlot(i).getStack();
-            if (stack.isEmpty()) continue;
-            anyItem = true;
-            String itemId = Registries.ITEM.getId(stack.getItem()).toString();
-            if (onlyShulker.get() && !StashPearlLogic.isShulkerBoxId(itemId)) continue;
-            if (StashPearlLogic.isShulkerBoxId(itemId)) {
-                StashStats.get().addShulkers(stack.getCount());
-            }
-            clickSlot(i, SlotActionType.QUICK_MOVE);
-            clicked = true;
-        }
-        if (clicked) {
-            cooldown = 2;
-            progress();
-        }
-        return StashMoveLogic.takeOutcome(anyItem, clicked);
-    }
-
-    /**
-     * 1 tick 全量存货：把背包里所有可卸物品（珍珠/只拿潜影盒的非潜影盒排除）一次点完。
-     * @return 是否点过（点了就视为本趟卸了东西，统计口径与单格版一致）
-     */
-    private boolean unloadAllInOneTick() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return false;
-        int size = handler.slots.size();
-        boolean clicked = false;
-        for (int i = size - 36; i < size; i++) {
-            if (!isUnloadCandidate(handler.getSlot(i).getStack())) continue;
-            clickSlot(i, SlotActionType.QUICK_MOVE);
-            clicked = true;
-        }
-        if (clicked) {
-            unloadedSomething = true;
-            cooldown = 2;
-            progress();
-        }
-        return clicked;
-    }
-
-    /** 1 tick 全量存末影箱：背包里所有可存物品（珍珠除外）一次点完。@return 是否点过。 */
-    private boolean depositAllInOneTick() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return false;
-        int size = handler.slots.size();
-        boolean clicked = false;
-        for (int i = size - 36; i < size; i++) {
-            ItemStack stack = handler.getSlot(i).getStack();
-            if (stack.isEmpty()) continue;
-            if (!StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) continue;
-            clickSlot(i, SlotActionType.QUICK_MOVE);
-            clicked = true;
-        }
-        return clicked;
-    }
-
-    /** 1 tick 全量取末影箱：容器里所有非空槽位一次点完。@return 是否点过。 */
-    private boolean withdrawAllInOneTick() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return false;
-        int size = handler.slots.size();
-        boolean clicked = false;
-        for (int i = 0; i < size - 36; i++) {
-            if (handler.getSlot(i).getStack().isEmpty()) continue;
-            clickSlot(i, SlotActionType.QUICK_MOVE);
-            clicked = true;
-        }
-        return clicked;
-    }
-
     private int findInventorySlotToUnload() {
         ScreenHandler handler = containerHandler();
         if (handler == null) return -1;
@@ -4021,385 +3542,6 @@ public class StashMover extends Module {
             if (isUnloadCandidate(stack)) return i;
         }
         return -1;
-    }
-
-    // ==================== 末影箱中转（V6.7p27，双号 + 三号共用） ====================
-
-    /**
-     * 末影箱功能当前是否可用：开关打开 + 本号是搬运端（拉珍珠端不参与）+ 世界/玩家就绪。
-     */
-    private boolean enderUsable() {
-        return enderEnabled.get() && isMoverRole() && mc.player != null && mc.world != null;
-    }
-
-    /**
-     * 当前打开的是不是**我们要用的那台末影箱**（V6.7p27 引入，V6.7p29 修判定）。
-     *
-     * <p>⚠️ 不能再用 {@code getInventory() instanceof EnderChestInventory} 判断。客户端收到的
-     * 只有 {@code OpenScreenS2CPacket(GENERIC_9X3)}，{@code HandledScreens} 会用
-     * {@code GenericContainerScreenHandler.createGeneric9x3(syncId, inv)} 建界面，而那个工厂
-     * 内部是 {@code new SimpleInventory(9 * 3)} —— <b>客户端永远看不到 {@code EnderChestInventory}</b>
-     * （它只存在于服务端那一侧）。
-     *
-     * <p>旧判定因此恒为 false，实机表现为：打开末影箱 → 被判成「不是末影箱」→ 关掉 →
-     * 下一 tick 再打开 → 再关掉 …… 一直循环到 15 秒超时。
-     *
-     * <p>现在按「界面形态 + 点击位置 + 方块类型」三重认定：9x3 通用容器（63 槽）、
-     * 我们最后一次点击的就是 {@link #enderTarget}、而且那一格现在仍然是末影箱。
-     * 这样既不会把普通箱子误认成末影箱（位置对不上），也不会被客户端背包类型骗到。
-     */
-    private boolean enderChestOpen() {
-        if (enderTarget == null || !containerOpen()) return false;
-        ScreenHandler handler = containerHandler();
-        if (!StashMoveLogic.isEnderScreenShape(handler instanceof GenericContainerScreenHandler,
-            handler == null ? 0 : handler.slots.size())) return false;
-        if (!enderTarget.equals(openChest)) return false;  // 我们点的就是这一台
-        return mc.world != null && mc.world.getBlockState(enderTarget).getBlock() == Blocks.ENDER_CHEST;
-    }
-
-    /**
-     * 选出本次要用的末影箱（V6.7p30 混合模式：坐标优先 + 校验 + 自动扫描兜底）。
-     *
-     * <p>分区坐标填了就强制用那一台，但**必须校验那一格真的是末影箱**——
-     * 被挪走 / 填错坐标时绝不能把货倒进普通箱子，报警一次并回退自动扫描。
-     * 坐标留空（0,0,0）= 维持 p27 的自动扫描（就近找一台）。
-     *
-     * @param storageZone true = 存储区的末影箱（取货用）；false = 待取货箱区的（存货用）
-     */
-    private BlockPos resolveEnderTarget(boolean storageZone) {
-        BlockPos coord = storageZone
-            ? (mode.get() == Mode.TRIO ? trioEnderStoreChest.get() : enderStoreChest.get())
-            : (mode.get() == Mode.TRIO ? trioEnderLootChest.get() : enderLootChest.get());
-        boolean coordSet = coord != null && StashMoveLogic.isCoordSet(coord.getX(), coord.getY(), coord.getZ());
-        if (coordSet) {
-            boolean ok = mc.world != null && mc.world.getBlockState(coord).getBlock() == Blocks.ENDER_CHEST;
-            if (ok) {
-                debugMsg("[末影箱] 使用分区坐标指定的那台（" + (storageZone ? "存储区" : "取货区") + "）");
-                return coord;
-            }
-            warnThrottled("末影箱分区坐标处不是末影箱（被挪走或填错？），本趟改用自动扫描");
-        }
-        return findNearbyEnderChest();
-    }
-
-    /**
-     * 在玩家周围找最近的末影箱（V6.7p27）。
-     *
-     * <p>检测方式：以玩家脚所在格为中心、{@code 末影箱搜索半径}（默认 6 格）为半边长扫一个立方体，
-     * 取欧氏距离最近的一台。用户场地是「预先放好、就在箱子旁边」，所以正常情况都在 1~2 格内。
-     *
-     * <p>结果带缓存：命中就复用（每 tick 校验方块还在）；**没命中也会缓存
-     * {@link #ENDER_SCAN_TTL} tick**，避免每 tick 扫 13³ 个方块。
-     */
-    private BlockPos findNearbyEnderChest() {
-        if (!enderUsable()) return null;
-        if (enderChestCache != null) {
-            if (mc.world.getBlockState(enderChestCache).getBlock() == Blocks.ENDER_CHEST) return enderChestCache;
-            enderChestCache = null;   // 被拆了/换地方了
-        }
-        if (tick - enderChestCacheTick < ENDER_SCAN_TTL) return null;
-
-        enderChestCacheTick = tick;
-        int r = Math.max(2, enderSearchRadius.get());
-        BlockPos base = mc.player.getBlockPos();
-        BlockPos best = null;
-        double bestD = Double.MAX_VALUE;
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    BlockPos p = base.add(dx, dy, dz);
-                    if (mc.world.getBlockState(p).getBlock() != Blocks.ENDER_CHEST) continue;
-                    double d = base.getSquaredDistance(p);
-                    if (d < bestD) {
-                        bestD = d;
-                        best = p;
-                    }
-                }
-            }
-        }
-        enderChestCache = best;
-        if (best != null) {
-            debugMsg("[末影箱] 附近找到一台，格距 " + String.format(Locale.ROOT, "%.1f", Math.sqrt(bestD))
-                + "，眼→箱体 " + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(best))
-                + " 格（开箱距离 " + String.format(Locale.ROOT, "%.1f", openReach.get()) + "）");
-        }
-        return best;
-    }
-
-    private void invalidateEnderCache() {
-        enderChestCache = null;
-        enderChestCacheTick = 0;
-    }
-
-    /** 背包里还有没有「该存进末影箱」的东西（珍珠永远不存）。 */
-    private boolean hasLootToDeposit() {
-        if (mc.player == null) return false;
-        var inv = mc.player.getInventory();
-        for (int i = 0; i < 36; i++) {
-            ItemStack stack = inv.getStack(i);
-            if (stack.isEmpty()) continue;
-            if (StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 背包满时：如果开着末影箱、附近有末影箱、本趟还没存过 → 切到「存末影箱」。
-     *
-     * @return true = 本 tick 已经切状态，调用方不要再往下走
-     */
-    private boolean tryEnterEnderPut(Runnable enterState) {
-        if (!enderUsable() || enderPutDone) return false;
-        if (!hasLootToDeposit()) return false;
-        BlockPos ender = resolveEnderTarget(false);
-        if (ender == null) return false;
-        enderTarget = ender;
-        enderStateStart = tick;
-        enderCloseCount = 0;
-        enderOpenLogged = false;
-        closeScreen();
-        enterState.run();
-        debugMsg("[末影箱] 背包满 → 先把货存进附近末影箱（眼→箱体 "
-            + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(ender)) + " 格 / 开箱距离 "
-            + String.format(Locale.ROOT, "%.1f", openReach.get()) + "，"
-            + (eyeBoxDistance(ender) <= openReach.get() ? "够得着" : "需要走近") + "）");
-        return true;
-    }
-
-    /**
-     * 到存储区、背包已经卸空时：如果本趟存过末影箱、还没取过 → 切到「取末影箱」。
-     *
-     * <p>注意：末影箱内容只有服务端知道（客户端方块实体里没有），所以「取」必须打开一次才知道空不空，
-     * 空箱会多一次开箱动作，这是可接受的。
-     *
-     * @return true = 本 tick 已经切状态
-     */
-    private boolean tryEnterEnderTake(Runnable enterState) {
-        if (!enderUsable() || !enderPutDone || enderTakeDone) return false;
-        BlockPos ender = resolveEnderTarget(true);
-        if (ender == null) return false;
-        enderTarget = ender;
-        enderStateStart = tick;
-        enderCloseCount = 0;
-        enderOpenLogged = false;
-        enterState.run();
-        debugMsg("[末影箱] 背包卸空 → 去把末影箱里的货取出来（眼→箱体 "
-            + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(ender)) + " 格 / 开箱距离 "
-            + String.format(Locale.ROOT, "%.1f", openReach.get()) + "）");
-        return true;
-    }
-
-    /** 存末影箱的一 tick：返回 false = 结束（调用方切回原状态）。 */
-    private boolean enderPutTick() {
-        if (enderTarget == null || mc.world.getBlockState(enderTarget).getBlock() != Blocks.ENDER_CHEST) {
-            enderPutDone = true;
-            return false;
-        }
-        if (tick - enderStateStart > ENDER_STATE_TIMEOUT) {
-            closeScreen();
-            enderPutDone = true;
-            warning("末影箱存货超时（" + (ENDER_STATE_TIMEOUT / 20) + " 秒），本趟不再存");
-            return false;
-        }
-        if (!enderChestOpen()) {
-            if (containerOpen()) {
-                // 上一个容器还没关干净（或手动开了别的箱子）：关掉重开，但不允许无限循环
-                if (++enderCloseCount > ENDER_CLOSE_LIMIT) {
-                    closeScreen();
-                    enderPutDone = true;
-                    warning("末影箱界面识别异常（连续关掉 " + enderCloseCount
-                        + " 次非末影箱界面），本趟跳过中转；请确认末影箱位置没有被别的箱子挡住");
-                    return false;
-                }
-                debugMsg("[末影箱] 当前界面不是那台末影箱，先关掉（第 " + enderCloseCount + " 次）");
-                closeScreen();
-                cooldown = 5;
-                return true;
-            }
-            if (!hasLootToDeposit()) {
-                enderPutDone = true;
-                return false;
-            }
-            goOpenChest(enderTarget, false);
-            // 四周确实没有「站过去够得着」的格子：立即降级，不要干等超时
-            if (chestNoSpot.contains(enderTarget)) {
-                closeScreen();
-                enderPutDone = true;
-                warning("末影箱四周没有可站的格子（或都超出开箱距离 "
-                    + String.format(Locale.ROOT, "%.1f", openReach.get()) + " 格），本趟跳过中转");
-                return false;
-            }
-            // 末影箱打不开就降级（不能让它触发 openChestAt 的「连续 8 次」硬停）
-            if (openAttempts >= 5) {
-                closeScreen();
-                enderPutDone = true;
-                warning("末影箱打不开（已点 5 次），本趟跳过中转");
-                return false;
-            }
-            return true;
-        }
-        if (!enderOpenLogged) {
-            enderOpenLogged = true;
-            enderCloseCount = 0;
-            debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始存货");
-        }
-        // V6.7p34：1 tick 瞬时存取 —— 全部可存物品一次点完，随即结束本状态；
-        // 末影箱中途装满时多出的点击会被服务端拒收（无副作用），剩余货物由正常卸货流程处理。
-        if (oneTickTransfer.get()) {
-            boolean full = containerIsFull();
-            if (!full) depositAllInOneTick();
-            closeScreen();
-            enderPutDone = true;
-            progress();
-            if (full) warning("末影箱已满（27 格），剩下的货继续背着走");
-            return false;
-        }
-        // 容量上限：27 格全满就停手，剩下的继续背着走（到存储区照常卸）
-        if (containerIsFull()) {
-            closeScreen();
-            enderPutDone = true;
-            warning("末影箱已满（27 格），剩下的货继续背着走");
-            return false;
-        }
-        int slot = findEnderDepositSlot();
-        if (slot < 0) {
-            closeScreen();
-            enderPutDone = true;
-            return false;
-        }
-        clickSlot(slot, SlotActionType.QUICK_MOVE);
-        cooldown = Math.max(1, clickDelay.get());
-        progress();
-        return true;
-    }
-
-    /** 取末影箱的一 tick：返回 false = 结束（调用方切回卸货）。 */
-    private boolean enderTakeTick() {
-        if (enderTarget == null || mc.world.getBlockState(enderTarget).getBlock() != Blocks.ENDER_CHEST) {
-            enderTakeDone = true;
-            return false;
-        }
-        if (tick - enderStateStart > ENDER_STATE_TIMEOUT) {
-            closeScreen();
-            enderTakeDone = true;
-            warning("末影箱取货超时（" + (ENDER_STATE_TIMEOUT / 20) + " 秒），剩余货物留在箱里");
-            return false;
-        }
-        if (!enderChestOpen()) {
-            if (containerOpen()) {
-                if (++enderCloseCount > ENDER_CLOSE_LIMIT) {
-                    closeScreen();
-                    enderTakeDone = true;
-                    warning("末影箱界面识别异常（连续关掉 " + enderCloseCount
-                        + " 次非末影箱界面），剩余货物留在箱里；请确认存储区末影箱位置");
-                    return false;
-                }
-                debugMsg("[末影箱] 当前界面不是那台末影箱，先关掉（第 " + enderCloseCount + " 次）");
-                closeScreen();
-                cooldown = 5;
-                return true;
-            }
-            goOpenChest(enderTarget, false);
-            if (chestNoSpot.contains(enderTarget)) {
-                closeScreen();
-                enderTakeDone = true;
-                warning("末影箱四周没有可站的格子（或都超出开箱距离 "
-                    + String.format(Locale.ROOT, "%.1f", openReach.get()) + " 格），剩余货物留在箱里");
-                return false;
-            }
-            if (openAttempts >= 5) {
-                closeScreen();
-                enderTakeDone = true;
-                warning("末影箱打不开（已点 5 次），剩余货物留在箱里");
-                return false;
-            }
-            return true;
-        }
-        if (!enderOpenLogged) {
-            enderOpenLogged = true;
-            enderCloseCount = 0;
-            debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始取货");
-        }
-        // V6.7p34：1 tick 瞬时存取 —— 全部非空槽位一次点完，随即结束本状态回卸货。
-        // 背包中途装满时多出的点击会被服务端拒收（无副作用），取剩的货留在末影箱下一趟继续。
-        if (oneTickTransfer.get()) {
-            boolean room = findEmptyPlayerSlotInHandler() >= 0;
-            boolean any = room && withdrawAllInOneTick();
-            closeScreen();
-            enderTakeDone = true;
-            progress();
-            if (!room) warning("背包已满，取不了末影箱（请检查存储箱是否够空）");
-            else if (!any) debugMsg("[末影箱] 是空的（本趟没存进去？），跳过");
-            return false;
-        }
-        if (containerEmpty()) {
-            closeScreen();
-            enderTakeDone = true;
-            debugMsg("[末影箱] 是空的（本趟没存进去？），跳过");
-            return false;
-        }
-        // 背包放不下就先停（正常流程：卸空后才来取，36 格 ≥ 末影箱 27 格）
-        if (findEmptyPlayerSlotInHandler() < 0) {
-            closeScreen();
-            enderTakeDone = true;
-            warning("背包已满，取不了末影箱（请检查存储箱是否够空）");
-            return false;
-        }
-        int slot = findEnderWithdrawSlot();
-        if (slot < 0) {
-            closeScreen();
-            enderTakeDone = true;
-            return false;
-        }
-        clickSlot(slot, SlotActionType.QUICK_MOVE);
-        cooldown = Math.max(1, clickDelay.get());
-        progress();
-        return true;
-    }
-
-    /** 末影箱界面里，背包部分第一个「可存入」的槽位（珍珠除外）。 */
-    private int findEnderDepositSlot() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return -1;
-        int size = handler.slots.size();
-        for (int i = size - 36; i < size; i++) {
-            ItemStack stack = handler.getSlot(i).getStack();
-            if (stack.isEmpty()) continue;
-            if (StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) return i;
-        }
-        return -1;
-    }
-
-    /** 末影箱容器部分第一个非空槽位（逐格 QUICK_MOVE 到背包）。 */
-    private int findEnderWithdrawSlot() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return -1;
-        int size = handler.slots.size();
-        for (int i = 0; i < size - 36; i++) {
-            if (!handler.getSlot(i).getStack().isEmpty()) return i;
-        }
-        return -1;
-    }
-
-    /** 末影箱界面里还有没有空的背包槽位。 */
-    private int findEmptyPlayerSlotInHandler() {
-        ScreenHandler handler = containerHandler();
-        if (handler == null) return -1;
-        int size = handler.slots.size();
-        for (int i = size - 36; i < size; i++) {
-            if (handler.getSlot(i).getStack().isEmpty()) return i;
-        }
-        return -1;
-    }
-
-    /** 本趟结束（卸货完成）时清掉末影箱标记，下一趟重新来。 */
-    private void resetEnderTrip() {
-        enderPutDone = false;
-        enderTakeDone = false;
-        enderTarget = null;
-        enderStateStart = 0;
-        enderCloseCount = 0;
-        enderOpenLogged = false;
     }
 
     /** 背包里是否还有“可以存进存储箱”的东西（珍珠、只拿潜影盒时的非潜影盒都排除）。 */
@@ -4480,6 +3622,7 @@ public class StashMover extends Module {
     }
 
     /** 开箱的有效距离（眼睛到方块中心，单位格）。超过就先寻路靠近，绝不隔空点。 */
+    private static final double OPEN_REACH = 3.5;
 
     /**
      * 统一的“走过去”入口（V6.7p5）。
@@ -4499,9 +3642,6 @@ public class StashMover extends Module {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
         if (!pos.equals(pathTarget)) {
             pathTarget = pos;
-            // 这条路径不走 pathTo，目标类型标记清零：之后同坐标若要改用 pathTo 的两种目标，
-            // 必须能重新下发一次（否则会被「同目标不重复下发」挡住）。
-            pathGoal = null;
             pathStartTick = tick;
             pathToSince = tick;
             pathRetries = 0;
@@ -4520,45 +3660,14 @@ public class StashMover extends Module {
         }
     }
 
-    /** 清掉「当前寻路目标」（连同它的目标类型一起清，避免下一次同坐标沿用旧类型）。 */
-    private void clearPathTarget() {
-        pathTarget = null;
-        pathGoal = null;
-        resetApproachTimer();
-    }
-
-    /**
-     * 寻路目标的两种口径（V6.7p25）。
-     *
-     * <ul>
-     *   <li>{@link #PRECISE}：GoalNear(pos, 0)，脚必须落在目标格（近处用，站得准）；</li>
-     *   <li>{@link #NEAR}：GoalNear(pos, 1)，3D 距离 1 格内（远处用，容错高）。</li>
-     * </ul>
-     *
-     * <p>⚠️ 两个都必须让 Y 参与，并且目标永远是**箱子旁边的空气格**，不是箱子本身 ——
-     * 这是「不会走到箱子正上方」的根本保证。
-     */
-    private enum PathGoal { PRECISE, NEAR }
-
-    private void applyGoal(BlockPos pos, PathGoal goal) {
-        if (goal == PathGoal.PRECISE) {
-            PathManagers.get().moveToPrecise(pos);
-        } else {
-            PathManagers.get().moveToNear(pos, 1);
-        }
-    }
-
-    private void pathTo(BlockPos pos, PathGoal goal) {
+    private void pathTo(BlockPos pos, boolean ignoreY) {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
-        // 目标坐标或「目标类型」任一变化都要重新下发：否则同坐标换目标类型时，
-        // 会被下面这条「同目标不重复下发」的守卫直接吞掉。
-        if (!pos.equals(pathTarget) || pathGoal != goal) {
+        if (!pos.equals(pathTarget)) {
             pathTarget = pos;
-            pathGoal = goal;
             pathStartTick = tick;
             pathRetries = 0;
             if (PathManagers.get().isPathing()) PathManagers.get().stop();
-            applyGoal(pos, goal);
+            PathManagers.get().moveTo(pos, ignoreY);
             return;
         }
         if (PathManagers.get().isPathing()) {
@@ -4567,7 +3676,7 @@ public class StashMover extends Module {
                 pathRetries++;
                 pathStartTick = tick;
                 PathManagers.get().stop();
-                applyGoal(pos, goal);
+                PathManagers.get().moveTo(pos, ignoreY);
                 debugMsg("寻路超时，重设目标（第 " + pathRetries + " 次）");
             }
             return;
@@ -4575,300 +3684,34 @@ public class StashMover extends Module {
         // Baritone 自己停下了 → 隔 20 tick 再试一次，避免每 tick 重算
         if (tick - pathStartTick > 20) {
             pathStartTick = tick;
-            applyGoal(pos, goal);
+            PathManagers.get().moveTo(pos, ignoreY);
         }
     }
 
     /**
-     * 眼睛到方块**包围盒**的距离（V6.7p28，与服务端同一口径）。
+     * 开箱前先靠近：眼睛到方块中心 ≤ {@link #OPEN_REACH} 格才允许点击。
      *
-     * <p>服务端 {@code PlayerEntity.canInteractWithBlockAt} 用的是
-     * {@code new Box(blockPos).squaredMagnitude(eyePos)}，不是「到方块中心」——
-     * 角落/斜向时两者能差 1 格以上，按中心算会误判成「够得着」。
-     */
-    private double eyeBoxDistance(BlockPos pos) {
-        if (mc.player == null || pos == null) return Double.MAX_VALUE;
-        return Math.sqrt(new Box(pos).squaredMagnitude(mc.player.getEyePos()));
-    }
-
-    /** 站在某个落脚点上时，眼睛到箱子包围盒的距离（选落脚点时预筛用）。 */
-    private double eyeBoxDistanceAt(BlockPos feet, BlockPos chest) {
-        Vec3d eye = new Vec3d(feet.getX() + 0.5, feet.getY() + 1.62, feet.getZ() + 0.5);
-        return Math.sqrt(new Box(chest).squaredMagnitude(eye));
-    }
-
-    /** 现在这一格够不够得着（眼睛到包围盒 ≤ 「开箱距离」设置）。 */
-    private boolean canOpenFromHere(BlockPos pos) {
-        return eyeBoxDistance(pos) <= openReach.get();
-    }
-
-    /**
-     * 在箱子周围找「站过去就能开」的落脚点（V6.7p25）。
+     * <p>服务端对交互有距离校验，隔空点击会被静默丢弃（表现为“点了没反应”）；
+     * 这里统一把“够不够近”前置判断，不够就先走。
      *
-     * <p>候选由 {@link StashChestSpotLogic} 生成（搬运专用，不复用挖沙那套）：
-     * 水平 1~3 圈 × {chestY, chestY+1}，**排除箱子自身那一列**，所以永远不会出现「站箱子上」。
-     * 排序：有视线 &gt; 离得近 &gt; 同层。
-     *
-     * <p>结果按箱子缓存；落脚点不可站了会重算；四周确实没有可站格时记进
-     * {@link #chestNoSpot}，本次会话不再尝试这个箱子。
-     *
-     * @return 落脚点；四周 3 格内没有可站格时返回 null
-     */
-    private ChestApproach findChestApproach(BlockPos chest) {
-        if (mc.world == null || mc.player == null || chest == null) return null;
-        // 区块没加载 / 箱子已经没了：方块会长成空气，这时候算出来的「没落脚点」是假结论，
-        // 绝不能记进 chestNoSpot（否则远距离补珍珠时会把珍珠箱永久拉黑）。
-        var chestState = mc.world.getBlockState(chest);
-        if (!(chestState.getBlock() instanceof ChestBlock)
-            && !(chestState.getBlock() instanceof ShulkerBoxBlock)
-            && !(chestState.getBlock() instanceof EnderChestBlock)) {
-            return null;
-        }
-        if (chestNoSpot.contains(chest)) return null;
-        ChestApproach cached = chestApproachCache.get(chest);
-        if (cached != null && isStandable(cached.spot()) && !isSpotFailed(chest, cached.spot())) return cached;
-
-        BlockPos partner = chestPartner(chest);
-
-        // V6.7p33：候选 = 箱子周围 1~3 圈 + **玩家当前格的水平邻格**。
-        // 邻格解决「就差旁边挪一格」：站得稍远时，隔壁那格在箱子 3 圈之外，根本不在旧候选里。
-        List<int[]> cands = new ArrayList<>(StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ()));
-        BlockPos feet = mc.player.getBlockPos();
-        for (Direction h : HORIZONTAL_DIRS) {
-            BlockPos n = feet.offset(h);
-            cands.add(new int[]{n.getX(), n.getY(), n.getZ()});
-        }
-
-        // 两遍：第一遍跳过「最近失败过」的格；全被失败记录盖住就清掉重选（允许重新逐个再试一轮）
-        for (int pass = 0; pass < 2; pass++) {
-            ChestApproach best = null;
-            double bestScore = Double.MAX_VALUE;
-            for (int[] c : cands) {
-                BlockPos p = new BlockPos(c[0], c[1], c[2]);
-                if (pass == 0 && isSpotFailed(chest, p)) continue;
-                if (!isStandable(p)) continue;
-                // 站过去必须真的够得着（V6.7p28：按包围盒距离预筛，否则选到 2 格外的点会永远开不了）
-                if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
-                boolean los = hasLineOfSight(p, chest, partner);
-                double distSq = mc.player.getBlockPos().getSquaredDistance(p);
-                double score = StashChestSpotLogic.score(los, distSq, c[1] - chest.getY());
-                if (score < bestScore) {
-                    bestScore = score;
-                    best = new ChestApproach(p, los);
-                }
-            }
-            if (best != null) {
-                chestApproachCache.put(chest, best);
-                // 只打相对距离，不打坐标（NoCoordinatesInLogsTest 守卫：日志语句里不得出现坐标表达式）
-                double dist = Math.hypot(mc.player.getX() - (best.spot().getX() + 0.5),
-                    mc.player.getZ() - (best.spot().getZ() + 0.5));
-                debugMsg("[接近] 落脚点" + (best.los() ? "有视线" : "无视线（发包开箱）")
-                    + "，水平距 " + String.format(Locale.ROOT, "%.1f", dist) + " 格");
-                return best;
-            }
-            if (pass == 0 && clearFailedSpots(chest)) {
-                debugMsg("[接近] 周围格子都试过一轮，重新逐个再试");
-                continue;
-            }
-            break;
-        }
-        chestNoSpot.add(chest);
-        chestApproachCache.remove(chest);
-        debugMsg("[接近] 箱子四周 3 格内没有可站的格子 → 跳过（绝不站到箱子正上方）");
-        return null;
-    }
-
-    /** 这个落脚点是不是「最近试过失败」（{@link #SPOT_RETRY_AFTER_TICKS} 后自动过期，顺带清过期记录）。 */
-    private boolean isSpotFailed(BlockPos chest, BlockPos spot) {
-        LinkedHashMap<BlockPos, Long> failed = chestFailedSpots.get(chest);
-        if (failed == null) return false;
-        failed.values().removeIf(t -> tick - t > SPOT_RETRY_AFTER_TICKS);
-        return failed.containsKey(spot);
-    }
-
-    /** 候选全被失败记录盖住时清空该箱子的失败记录，允许重新逐个再试一轮。@return 确实清过才 true */
-    private boolean clearFailedSpots(BlockPos chest) {
-        LinkedHashMap<BlockPos, Long> failed = chestFailedSpots.get(chest);
-        if (failed == null || failed.isEmpty()) return false;
-        failed.clear();
-        return true;
-    }
-
-    /** 把一个落脚点记为「失败」（V6.7p33 换格机制）：缓存作废，下次选择跳过它。 */
-    private void markSpotFailed(BlockPos chest, BlockPos spot, String reason) {
-        if (chest == null || spot == null) return;
-        chestFailedSpots.computeIfAbsent(chest, k -> new LinkedHashMap<>()).put(spot.toImmutable(), tick);
-        chestApproachCache.remove(chest);
-        debugMsg("[接近] 落脚点不行（" + reason + "）→ 换下一格");
-    }
-
-
-    /**
-     * 从某个落脚点能不能直视箱子（V6.7p25）。
-     *
-     * <p>用脚位置 + 1.62 模拟眼睛高度，往箱子中心打一条 {@code COLLIDER} 射线；
-     * 首个命中的方块是箱子（或双箱另一半）才算有视线。箱子夹在墙里、只露出半格时这里会判 false，
-     * 但那种情况依然可以用发包开，所以不是硬门槛。
-     */
-    private boolean hasLineOfSight(BlockPos spot, BlockPos chest, BlockPos partner) {
-        if (mc.world == null || mc.player == null) return false;
-        Vec3d from = new Vec3d(spot.getX() + 0.5, spot.getY() + 1.62, spot.getZ() + 0.5);
-        Vec3d to = Vec3d.ofCenter(chest);
-        BlockHitResult hit = mc.world.raycast(new RaycastContext(from, to,
-            RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player));
-        if (hit == null) return false;
-        BlockPos hp = hit.getBlockPos();
-        return hp.equals(chest) || (partner != null && hp.equals(partner));
-    }
-
-    /** 停掉「靠近箱子」这条寻路（避免一边走一边点箱子）。 */
-    private void stopApproachPath() {
-        if (PathManagers.get().isPathing()) PathManagers.get().stop();
-        releaseMovementKeys();
-        clearPathTarget();
-    }
-
-    private void resetApproachTimer() {
-        approachChest = null;
-        approachStartTick = 0;
-    }
-
-    /**
-     * 走近某个「可交互方块」并返回能不能点——只用于<b>活板门</b>这类非容器目标（V6.7p25）。
-     *
-     * <p>箱子不要用这个（箱子要走 {@link #approachChest}：找箱子旁落脚点，绝不站箱子上）；
-     * 活板门本来就要贴到它旁边/上面点，GoalNear(方块,1) 的语义正好合适。
+     * @return true = 已经在可点击范围内
      */
     private boolean approachForOpen(BlockPos pos) {
-        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return false;
-        if (canOpenFromHere(pos)) {
-            stopApproachPath();
+        if (pos == null || pos.equals(BlockPos.ORIGIN)) return false;
+        Vec3d center = Vec3d.ofCenter(pos);
+        Vec3d eye = mc.player.getEyePos();
+        if (eye.distanceTo(center) <= OPEN_REACH) {
+            pathTarget = null;
             return true;
         }
-        pathTo(pos, PathGoal.NEAR);
-        return false;
-    }
-
-    /**
-     * 靠近并打开箱子（V6.7p25）。
-     *
-     * <p>能开就开；要走路就走到能开为止；四周没有可站格时：
-     * 单箱模式已经在 {@link #approachChest} 里报警暂停，搜索/框选模式则把这个箱子拉黑换下一个。
-     *
-     * @return true = 本 tick 已经把开箱动作发出去
-     */
-    private boolean goOpenChest(BlockPos chest) {
-        return goOpenChest(chest, true);
-    }
-
-    /**
-     * 靠近并打开箱子 / 末影箱（V6.7p27 增加 critical）。
-     *
-     * @param critical true = 打不开就报警暂停（存储箱/珍珠箱/单箱目标）；
-     *                 false = 打不开只提示、由调用方降级（末影箱：跳过本趟中转）
-     */
-    private boolean goOpenChest(BlockPos chest, boolean critical) {
-        if (chest == null || chest.equals(BlockPos.ORIGIN)) return false;
-        Approach a = approachChest(chest);
-        if (a == Approach.IN_RANGE) {
-            openChestAt(chest);
+        // 已经站在方块正上方/正下方（XZ 基本重合）：GoalXZ 寻路不再有帮助，直接允许点击
+        // （否则会出现"XZ 距离=0、Baritone 认为已到达、却因为高度差永远判超距"的死循环）
+        if (Math.hypot(eye.x - center.x, eye.z - center.z) <= 1.2) {
+            pathTarget = null;
             return true;
         }
-        if (a == Approach.NO_SPOT) {
-            // 队列箱子（搜索/框选）：跳过换下一个；固定目标：按 critical 决定报警还是降级
-            if (chestQueue.contains(chest)) {
-                blacklistChest(chest);
-                openChest = null;
-                debugMsg("[接近] 已跳过这个箱子（四周没有落脚点）");
-            } else if (critical) {
-                enterStuck("箱子周围 3 格内没有可站的格子（不会站到箱子正上方），请检查结构");
-            } else {
-                warnThrottled("末影箱旁边没有可站的格子，本趟跳过末影箱中转");
-            }
-        }
+        pathTo(pos, true);
         return false;
-    }
-
-    /**
-     * 开箱前靠近（V6.7p25 重写）。
-     *
-     * <p>用户口径：
-     * <ol>
-     *   <li><b>当前位置能开就直接开</b> —— 不寻路、不做多余动作；</li>
-     *   <li>要寻路的话，<b>走到能开就停</b>（每 tick 先判距离，够了立刻停路 + 开箱）；</li>
-     *   <li><b>绝不走到箱子正上方</b> —— 目标是箱子旁边的空气格，不是箱子本身。</li>
-     * </ol>
-     *
-     * <p>旧实现（p22/p23）把箱子本身当寻路目标：GoalXZ 会为了凑 XZ 往下挖，
-     * GoalNear(箱子,1) 又把「站在箱子正上方」算成到达 —— 两条都不符合用户口径，这里一并去掉。
-     */
-    private Approach approachChest(BlockPos pos) {
-        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return Approach.NO_SPOT;
-
-        // 点了几次没开（V6.7p28 触发，V6.7p33 改动作）：不再「往最近的格挤」——那大概率还是同一格，
-        // Baritone 认为目标格已到达就会原地不动（实机死锁：站在缓存格里贴边，眼距差半格开不了）。
-        // 现在把当前落脚点记为失败 → 重新选格；候选里有「玩家邻格」，通常就是旁边挪一格。
-        // 40 tick 节流：一次失败只换一次格。
-        int tries = pos.equals(openChest) ? openAttempts : 0;
-        if (tries >= 2 && tick - lastSpotRotateTick > 40) {
-            ChestApproach cur = chestApproachCache.get(pos);
-            if (cur != null) {
-                lastSpotRotateTick = tick;
-                approachStartTick = tick;
-                markSpotFailed(pos, cur.spot(), "点了 " + tries + " 次没开");
-            }
-        }
-
-        // ① 已经在可点击距离内：停路 + 松键，直接开
-        if (canOpenFromHere(pos)) {
-            stopApproachPath();
-            return Approach.IN_RANGE;
-        }
-
-        // ② 箱子所在区块没加载 / 方块已经不在了：**不能判成「没有落脚点」**
-        //    （否则会把存储箱/珍珠箱永久拉黑），原地等它加载/等人工处理。
-        //    ⚠️ V6.7p29：这里必须把末影箱也算进来。p27 加末影箱时漏了这一处，
-        //    导致「末影箱在 2 格外（不在开箱距离内）」时直接返回 MOVING、根本不寻路，
-        //    人就站在原地等 15 秒超时 —— 实机表现就是「检测到了但不打开」。
-        var posState = mc.world.getBlockState(pos);
-        if (!(posState.getBlock() instanceof ChestBlock)
-            && !(posState.getBlock() instanceof ShulkerBoxBlock)
-            && !(posState.getBlock() instanceof EnderChestBlock)) {
-            return Approach.MOVING;
-        }
-
-        // ③ 找箱子旁边的落脚点（有视线优先）；找不到就报告，绝不往箱子正上方走
-        ChestApproach approach = findChestApproach(pos);
-        if (approach == null) {
-            resetApproachTimer();
-            return Approach.NO_SPOT;
-        }
-
-        if (!pos.equals(approachChest)) {
-            approachChest = pos;
-            approachStartTick = tick;
-        } else if (tick - approachStartTick > APPROACH_TIMEOUT) {
-            // 队列里的箱子（搜索/框选）走不到就换下一个；
-            // 固定目标（存储箱/珍珠箱/单箱）不再原地干等 —— 作废当前落脚点换一格重走（V6.7p33）
-            if (chestQueue.contains(pos)) {
-                warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），跳过这个箱子");
-                resetApproachTimer();
-                blacklistChest(pos);
-                return Approach.NO_SPOT;
-            }
-            warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），换一个落脚点重走");
-            ChestApproach original = approach;
-            markSpotFailed(pos, approach.spot(), "30 秒走不到");
-            resetApproachTimer();
-            approach = findChestApproach(pos);
-            if (approach == null) approach = original;   // 理论上到不了：原点至少可站
-        }
-
-        // ④ 目标永远是落脚空气格；远处用 NEAR 容错，近处用 PRECISE 站准
-        BlockPos spot = approach.spot();
-        double distSq = mc.player.getBlockPos().getSquaredDistance(spot);
-        pathTo(spot, distSq <= 64 ? PathGoal.PRECISE : PathGoal.NEAR);
-        return Approach.MOVING;
     }
 
     private void openChestAt(BlockPos pos) {
@@ -4885,7 +3728,7 @@ public class StashMover extends Module {
         }
         openChest = pos;
         // 保险：调用方已经判过距离，这里再兜一次，避免别处漏判后隔空点击
-        if (approachChest(pos) != Approach.IN_RANGE) return;
+        if (!approachForOpen(pos)) return;
         if (openAttempts >= 8) {
             enterStuck("连续 8 次都打不开箱子（检查是否被方块挡住或位置填错）");
             return;
@@ -4893,9 +3736,8 @@ public class StashMover extends Module {
         openAttempts++;
         Vec3d center = Vec3d.ofCenter(pos);
         debugMsg("[开箱] 点击第 " + openAttempts + " 次"
-            + "（眼→箱体 " + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(pos))
-            + " / 上限 " + String.format(Locale.ROOT, "%.1f", openReach.get())
-            + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
+            + "（眼睛距 " + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(center))
+            + " / 阈值 " + OPEN_REACH + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
         realClick(pos);
         cooldown = 15;
         progress();
@@ -4937,27 +3779,15 @@ public class StashMover extends Module {
             chestQueue.removeIf(this::isStoreSideChest);
             if (chestQueue.isEmpty()) return null;
         }
-        // 先跳掉前缀里的拉黑/临时跳过，保证后面的「看 4 个」不会越扫越长
-        while (queueIndex < chestQueue.size()
-            && (blacklist.contains(chestQueue.get(queueIndex)) || isSkipped(chestQueue.get(queueIndex)))) {
-            queueIndex++;
-        }
-        // 再在同一批候选里**优先挑有视线的**（V6.7p25）。
-        // 只看前 LOS_LOOKAHEAD 个：落脚点结果按箱子缓存，通常第一个就命中，不会每个 tick 重算。
-        BlockPos firstAny = null;
-        int looked = 0;
-        for (int i = queueIndex; i < chestQueue.size() && looked < LOS_LOOKAHEAD; i++) {
-            BlockPos p = chestQueue.get(i);
-            if (blacklist.contains(p) || isSkipped(p)) continue;
-            looked++;
-            if (firstAny == null) firstAny = p;
-            ChestApproach a = findChestApproach(p);
-            if (a != null && a.los()) {
-                queueIndex = i;      // 下次从这一个继续
-                return p;
+        while (queueIndex < chestQueue.size()) {
+            BlockPos p = chestQueue.get(queueIndex);
+            if (blacklist.contains(p) || isSkipped(p)) {
+                queueIndex++;
+                continue;
             }
+            return p;
         }
-        return firstAny;
+        return null;
     }
 
     /** 扫描长方体范围内的箱子（双箱只记一份；单箱按「忽略单个箱子」过滤）。 */
