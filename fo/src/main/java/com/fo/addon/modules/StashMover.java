@@ -846,6 +846,15 @@ public class StashMover extends Module {
     private final Map<BlockPos, ChestApproach> chestApproachCache = new HashMap<>();
     /** 四周 3 格内没有可站格的箱子（本次会话不再尝试，避免每 tick 重算 + 反复走箱子正上方）。 */
     private final Set<BlockPos> chestNoSpot = new HashSet<>();
+    /**
+     * 换格机制（V6.7p33）：每个箱子「试过失败的落脚点」→ 失败时刻。
+     * 选格时跳过它们；{@link #SPOT_RETRY_AFTER_TICKS} 之后自动过期（地形可能变了）。
+     */
+    private final Map<BlockPos, LinkedHashMap<BlockPos, Long>> chestFailedSpots = new HashMap<>();
+    /** 失败落脚点的重试间隔：60 秒。 */
+    private static final long SPOT_RETRY_AFTER_TICKS = 1200;
+    /** 上次换格的 tick（40 tick 节流：一次失败只换一次格）。 */
+    private long lastSpotRotateTick;
     /** 当前正在接近的箱子 + 开始时间（走不到就报警/跳过，别无限挂着）。 */
     private BlockPos approachChest;
     private long approachStartTick;
@@ -1034,6 +1043,7 @@ public class StashMover extends Module {
         blacklist.clear();
         chestApproachCache.clear();
         chestNoSpot.clear();
+        chestFailedSpots.clear();
         skippedUntil.clear();
         lastFilteredWarnTick = 0;
         chestQueue.clear();
@@ -1113,6 +1123,7 @@ public class StashMover extends Module {
         blacklist.clear();
         chestApproachCache.clear();
         chestNoSpot.clear();
+        chestFailedSpots.clear();
         chestQueue.clear();
         pullActive = false;
     }
@@ -1554,6 +1565,7 @@ public class StashMover extends Module {
         blacklist.clear();
         chestApproachCache.clear();
         chestNoSpot.clear();
+        chestFailedSpots.clear();
         skippedUntil.clear();
         chestQueue.clear();
         queueIndex = 0;
@@ -3284,6 +3296,7 @@ public class StashMover extends Module {
                 blacklist.clear();
         chestApproachCache.clear();
         chestNoSpot.clear();
+        chestFailedSpots.clear();
             skippedUntil.clear();
             chestQueue.clear();
             queueIndex = 0;
@@ -4329,8 +4342,6 @@ public class StashMover extends Module {
     }
 
     /** 开箱的有效距离（眼睛到方块中心，单位格）。超过就先寻路靠近，绝不隔空点。 */
-    /** 点不开时「再靠近一格」的目标距离：眼→包围盒 ≤ 这个值就不再往前挤。 */
-    private static final double CLOSER_STOP_DIST = 1.2;
 
     /**
      * 统一的“走过去”入口（V6.7p5）。
@@ -4477,51 +4488,82 @@ public class StashMover extends Module {
         }
         if (chestNoSpot.contains(chest)) return null;
         ChestApproach cached = chestApproachCache.get(chest);
-        if (cached != null && isStandable(cached.spot())) return cached;
+        if (cached != null && isStandable(cached.spot()) && !isSpotFailed(chest, cached.spot())) return cached;
 
         BlockPos partner = chestPartner(chest);
-        ChestApproach best = null;
-        double bestScore = Double.MAX_VALUE;
-        for (int[] c : StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ())) {
-            BlockPos p = new BlockPos(c[0], c[1], c[2]);
-            if (!isStandable(p)) continue;
-            // 站过去必须真的够得着（V6.7p28：按包围盒距离预筛，否则选到 2 格外的点会永远开不了）
-            if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
-            boolean los = hasLineOfSight(p, chest, partner);
-            double distSq = mc.player.getBlockPos().getSquaredDistance(p);
-            double score = StashChestSpotLogic.score(los, distSq, c[1] - chest.getY());
-            if (score < bestScore) {
-                bestScore = score;
-                best = new ChestApproach(p, los);
+
+        // V6.7p33：候选 = 箱子周围 1~3 圈 + **玩家当前格的水平邻格**。
+        // 邻格解决「就差旁边挪一格」：站得稍远时，隔壁那格在箱子 3 圈之外，根本不在旧候选里。
+        List<int[]> cands = new ArrayList<>(StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ()));
+        BlockPos feet = mc.player.getBlockPos();
+        for (Direction h : HORIZONTAL_DIRS) {
+            BlockPos n = feet.offset(h);
+            cands.add(new int[]{n.getX(), n.getY(), n.getZ()});
+        }
+
+        // 两遍：第一遍跳过「最近失败过」的格；全被失败记录盖住就清掉重选（允许重新逐个再试一轮）
+        for (int pass = 0; pass < 2; pass++) {
+            ChestApproach best = null;
+            double bestScore = Double.MAX_VALUE;
+            for (int[] c : cands) {
+                BlockPos p = new BlockPos(c[0], c[1], c[2]);
+                if (pass == 0 && isSpotFailed(chest, p)) continue;
+                if (!isStandable(p)) continue;
+                // 站过去必须真的够得着（V6.7p28：按包围盒距离预筛，否则选到 2 格外的点会永远开不了）
+                if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
+                boolean los = hasLineOfSight(p, chest, partner);
+                double distSq = mc.player.getBlockPos().getSquaredDistance(p);
+                double score = StashChestSpotLogic.score(los, distSq, c[1] - chest.getY());
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = new ChestApproach(p, los);
+                }
             }
+            if (best != null) {
+                chestApproachCache.put(chest, best);
+                // 只打相对距离，不打坐标（NoCoordinatesInLogsTest 守卫：日志语句里不得出现坐标表达式）
+                double dist = Math.hypot(mc.player.getX() - (best.spot().getX() + 0.5),
+                    mc.player.getZ() - (best.spot().getZ() + 0.5));
+                debugMsg("[接近] 落脚点" + (best.los() ? "有视线" : "无视线（发包开箱）")
+                    + "，水平距 " + String.format(Locale.ROOT, "%.1f", dist) + " 格");
+                return best;
+            }
+            if (pass == 0 && clearFailedSpots(chest)) {
+                debugMsg("[接近] 周围格子都试过一轮，重新逐个再试");
+                continue;
+            }
+            break;
         }
-        if (best == null) {
-            chestNoSpot.add(chest);
-            chestApproachCache.remove(chest);
-            debugMsg("[接近] 箱子四周 3 格内没有可站的格子 → 跳过（绝不站到箱子正上方）");
-            return null;
-        }
-        chestApproachCache.put(chest, best);
-        // 只打相对距离，不打坐标（无政府服防泄露）
-        double dist = Math.hypot(mc.player.getX() - (best.spot().getX() + 0.5),
-            mc.player.getZ() - (best.spot().getZ() + 0.5));
-        debugMsg("[接近] 落脚点" + (best.los() ? "有视线" : "无视线（发包开箱）")
-            + "，水平距 " + String.format(Locale.ROOT, "%.1f", dist) + " 格");
-        return best;
+        chestNoSpot.add(chest);
+        chestApproachCache.remove(chest);
+        debugMsg("[接近] 箱子四周 3 格内没有可站的格子 → 跳过（绝不站到箱子正上方）");
+        return null;
     }
 
-    /** 找「离箱子最近、且站过去够得着」的可站格 —— 点不开时往这里再挤一格（V6.7p28）。 */
-    private BlockPos findClosestChestSpot(BlockPos chest) {
-        List<int[]> cands = new ArrayList<>();
-        for (int[] c : StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ())) {
-            BlockPos p = new BlockPos(c[0], c[1], c[2]);
-            if (!isStandable(p)) continue;
-            if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
-            cands.add(c);
-        }
-        int[] best = StashChestSpotLogic.nearestToChest(chest.getX(), chest.getY(), chest.getZ(), cands);
-        return best == null ? null : new BlockPos(best[0], best[1], best[2]);
+    /** 这个落脚点是不是「最近试过失败」（{@link #SPOT_RETRY_AFTER_TICKS} 后自动过期，顺带清过期记录）。 */
+    private boolean isSpotFailed(BlockPos chest, BlockPos spot) {
+        LinkedHashMap<BlockPos, Long> failed = chestFailedSpots.get(chest);
+        if (failed == null) return false;
+        failed.values().removeIf(t -> tick - t > SPOT_RETRY_AFTER_TICKS);
+        return failed.containsKey(spot);
     }
+
+    /** 候选全被失败记录盖住时清空该箱子的失败记录，允许重新逐个再试一轮。@return 确实清过才 true */
+    private boolean clearFailedSpots(BlockPos chest) {
+        LinkedHashMap<BlockPos, Long> failed = chestFailedSpots.get(chest);
+        if (failed == null || failed.isEmpty()) return false;
+        failed.clear();
+        return true;
+    }
+
+    /** 把一个落脚点记为「失败」（V6.7p33 换格机制）：缓存作废，下次选择跳过它。 */
+    private void markSpotFailed(BlockPos chest, BlockPos spot, String reason) {
+        if (chest == null || spot == null) return;
+        chestFailedSpots.computeIfAbsent(chest, k -> new LinkedHashMap<>()).put(spot.toImmutable(), tick);
+        chestApproachCache.remove(chest);
+        debugMsg("[接近] 落脚点不行（" + reason + "）→ 换下一格");
+    }
+
 
     /**
      * 从某个落脚点能不能直视箱子（V6.7p25）。
@@ -4625,15 +4667,17 @@ public class StashMover extends Module {
     private Approach approachChest(BlockPos pos) {
         if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return Approach.NO_SPOT;
 
-        // 已经点了几次没开（V6.7p28）：判定口径没问题的话，就是服务端嫌远 → 再靠近一格
+        // 点了几次没开（V6.7p28 触发，V6.7p33 改动作）：不再「往最近的格挤」——那大概率还是同一格，
+        // Baritone 认为目标格已到达就会原地不动（实机死锁：站在缓存格里贴边，眼距差半格开不了）。
+        // 现在把当前落脚点记为失败 → 重新选格；候选里有「玩家邻格」，通常就是旁边挪一格。
+        // 40 tick 节流：一次失败只换一次格。
         int tries = pos.equals(openChest) ? openAttempts : 0;
-        if (tries >= 2 && eyeBoxDistance(pos) > CLOSER_STOP_DIST) {
-            BlockPos closer = findClosestChestSpot(pos);
-            if (closer != null && eyeBoxDistanceAt(closer, pos) < eyeBoxDistance(pos)) {
-                debugMsg("[开箱] 点了 " + tries + " 次没开 → 再靠近一格（眼→箱体 "
-                    + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(pos)) + "）");
-                pathTo(closer, PathGoal.PRECISE);
-                return Approach.MOVING;
+        if (tries >= 2 && tick - lastSpotRotateTick > 40) {
+            ChestApproach cur = chestApproachCache.get(pos);
+            if (cur != null) {
+                lastSpotRotateTick = tick;
+                approachStartTick = tick;
+                markSpotFailed(pos, cur.spot(), "点了 " + tries + " 次没开");
             }
         }
 
@@ -4666,15 +4710,20 @@ public class StashMover extends Module {
             approachChest = pos;
             approachStartTick = tick;
         } else if (tick - approachStartTick > APPROACH_TIMEOUT) {
-            // 队列里的箱子（搜索/框选）走不到就换下一个；固定目标（存储箱/珍珠箱/单箱）继续试
-            boolean queued = chestQueue.contains(pos);
-            warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），"
-                + (queued ? "跳过这个箱子" : "该箱子是固定目标，继续尝试"));
-            resetApproachTimer();
-            if (queued) {
+            // 队列里的箱子（搜索/框选）走不到就换下一个；
+            // 固定目标（存储箱/珍珠箱/单箱）不再原地干等 —— 作废当前落脚点换一格重走（V6.7p33）
+            if (chestQueue.contains(pos)) {
+                warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），跳过这个箱子");
+                resetApproachTimer();
                 blacklistChest(pos);
                 return Approach.NO_SPOT;
             }
+            warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），换一个落脚点重走");
+            ChestApproach original = approach;
+            markSpotFailed(pos, approach.spot(), "30 秒走不到");
+            resetApproachTimer();
+            approach = findChestApproach(pos);
+            if (approach == null) approach = original;   // 理论上到不了：原点至少可站
         }
 
         // ④ 目标永远是落脚空气格；远处用 NEAR 容错，近处用 PRECISE 站准
