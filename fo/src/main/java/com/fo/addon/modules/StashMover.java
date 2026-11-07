@@ -756,6 +756,19 @@ public class StashMover extends Module {
     private int openAttempts;
     /** 当前寻路目标（寻路守卫：同一目标不重复下发，避免每 tick 重置 Baritone 路径）。 */
     private BlockPos pathTarget;
+    /**
+     * 当前寻路目标的类型（V6.7p23）。
+     *
+     * <p>同一个坐标在不同层之间切换时，目标类型也要跟着变，否则「同目标不重复下发」的守卫
+     * 会把新目标吞掉。
+     */
+    private PathGoal pathGoal;
+    /** 跨层接近（箱子不在同一层）开始计时的 tick；0 = 当前没有跨层接近。 */
+    private long crossLevelStartTick;
+    /** 正在跨层接近的目标箱（换箱要重新计时/重新提醒）。 */
+    private BlockPos crossLevelTarget;
+    /** 跨层接近只提醒一次，别每 tick 刷屏。 */
+    private boolean crossLevelWarned;
     private long pathStartTick;
     /** 同一个精确走位目标开始的时间（用于 20 秒超时判定，不随每次重发归零）。 */
     private long pathToSince;
@@ -916,7 +929,7 @@ public class StashMover extends Module {
         queueIndex = 0;
         openChest = null;
         openAttempts = 0;
-        pathTarget = null;
+        clearPathTarget();
         pathStartTick = 0;
         pathRetries = 0;
         finalTrip = false;
@@ -1023,7 +1036,7 @@ public class StashMover extends Module {
         antiStuckCount++;
         releaseMovementKeys();
         PathManagers.get().stop();
-        pathTarget = null;
+        clearPathTarget();
         warning("检测到频繁传送（5 秒内 " + teleportFlood.count(System.currentTimeMillis())
             + " 次），判定卡脚，开始脱困");
         info("我卡住了！请手动检查站位");
@@ -1359,7 +1372,7 @@ public class StashMover extends Module {
     private void startTeleportWait() {
         releaseMovementKeys();
         PathManagers.get().stop();
-        pathTarget = null;
+        clearPathTarget();
         closeScreen();
         dualTeleportWaitStart = tick;
         dualTeleportResends = 0;
@@ -1401,7 +1414,7 @@ public class StashMover extends Module {
         closeScreen();
         releaseMovementKeys();
         PathManagers.get().stop();
-        pathTarget = null;
+        clearPathTarget();
         blacklist.clear();
         skippedUntil.clear();
         chestQueue.clear();
@@ -1784,7 +1797,7 @@ public class StashMover extends Module {
             pearlConfirmStreak = 0;
             pearlConfirmRetries = 0;
             lastPearlThrowTick = 0;
-            pathTarget = null;
+            clearPathTarget();
             moverState = MoverState.LOOT;
             cooldown = 40;
             debugMsg("[双号][重生] 已重生，等区块加载后继续取货");
@@ -2042,8 +2055,9 @@ public class StashMover extends Module {
                 return;
             }
             if (distSq > 400) {
-                // 用 pathTo 而不是裸 moveTo：带「同目标不重复下发 + 240 tick 重设」的保护
-                pathTo(chestPos, true);
+                // 用 pathToContainer 而不是裸 moveTo：带「同目标不重复下发 + 240 tick 重设」的保护，
+                // 并且按「珍珠箱在不在同一层」自动选 GoalXZ / GoalNear（V6.7p23，防止跨层时往下挖）
+                pathToContainer(chestPos);
                 if (debug.get() && tick % 40 == 0) {
                     info("[补珍珠] 珍珠箱在 " + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外，走过去");
                 }
@@ -3672,6 +3686,9 @@ public class StashMover extends Module {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
         if (!pos.equals(pathTarget)) {
             pathTarget = pos;
+            // 这条路径不走 pathTo，目标类型标记清零：之后同坐标若要改用 pathTo 的两种目标，
+            // 必须能重新下发一次（否则会被「同目标不重复下发」挡住）。
+            pathGoal = null;
             pathStartTick = tick;
             pathToSince = tick;
             pathRetries = 0;
@@ -3690,14 +3707,48 @@ public class StashMover extends Module {
         }
     }
 
-    private void pathTo(BlockPos pos, boolean ignoreY) {
+    /** 清掉「当前寻路目标」（连同它的目标类型一起清，避免下一次同坐标沿用旧类型）。 */
+    private void clearPathTarget() {
+        pathTarget = null;
+        pathGoal = null;
+        crossLevelStartTick = 0;
+        crossLevelWarned = false;
+    }
+
+    /**
+     * 寻路目标的两种口径（V6.7p23）。
+     *
+     * <ul>
+     *   <li>{@link #XZ}：Baritone 的 GoalXZ，判定只有 {@code x == goal.x && z == goal.z}，
+     *       <b>Y 完全不参与</b>。只允许在「目标和我同一层」时使用。</li>
+     *   <li>{@link #NEAR}：GoalNear(pos, 1)，3D 距离 ≤1 格才算到达。必须真的上/下到
+     *       目标那一层，站在下面两层不算。跨层时使用。</li>
+     * </ul>
+     */
+    private enum PathGoal { XZ, NEAR }
+
+    private void applyGoal(BlockPos pos, PathGoal goal) {
+        if (goal == PathGoal.XZ) {
+            PathManagers.get().moveTo(pos, true);
+        } else {
+            // ⚠️ 不能用 GoalGetToBlock：它的判定是 |dx|+|dy|+|dz| ≤ 1，而且对负 dy 会做
+            // 「dy+1」补偿 —— 站在箱子下方 **2 格**、XZ 对齐时也算「到达」，
+            // 于是「挖到箱子正下方」依然能满足目标。GoalNear(pos,1) 是纯 3D 球，不会。
+            PathManagers.get().moveToNear(pos, 1);
+        }
+    }
+
+    private void pathTo(BlockPos pos, PathGoal goal) {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
-        if (!pos.equals(pathTarget)) {
+        // 目标坐标或「目标类型」任一变化都要重新下发：否则同坐标从 XZ 目标切成 3D 目标时，
+        // 会被下面这条「同目标不重复下发」的守卫直接吞掉。
+        if (!pos.equals(pathTarget) || pathGoal != goal) {
             pathTarget = pos;
+            pathGoal = goal;
             pathStartTick = tick;
             pathRetries = 0;
             if (PathManagers.get().isPathing()) PathManagers.get().stop();
-            PathManagers.get().moveTo(pos, ignoreY);
+            applyGoal(pos, goal);
             return;
         }
         if (PathManagers.get().isPathing()) {
@@ -3706,7 +3757,7 @@ public class StashMover extends Module {
                 pathRetries++;
                 pathStartTick = tick;
                 PathManagers.get().stop();
-                PathManagers.get().moveTo(pos, ignoreY);
+                applyGoal(pos, goal);
                 debugMsg("寻路超时，重设目标（第 " + pathRetries + " 次）");
             }
             return;
@@ -3714,8 +3765,46 @@ public class StashMover extends Module {
         // Baritone 自己停下了 → 隔 20 tick 再试一次，避免每 tick 重算
         if (tick - pathStartTick > 20) {
             pathStartTick = tick;
-            PathManagers.get().moveTo(pos, ignoreY);
+            applyGoal(pos, goal);
         }
+    }
+
+    /**
+     * 走向一个容器（箱子），按「人和箱子在不在同一层」选寻路目标（V6.7p23）。
+     *
+     * <p>这是本次「往下挖」的根因修复：以前这里一律 {@code pathTo(pos, true)}，
+     * 也就是 Baritone 的 GoalXZ —— 它只判 XZ、**Y 完全不参与**。
+     * 当待搬运箱在人物上方 2 格（拉珍珠返回的落点常比箱子低一层）时，
+     * 「到那个 XZ」在任意一层都算达成，A* 于是挑了最便宜的一条：
+     * 在脚下/墙里往下挖一条路过去，而不是找台阶/游上去到箱子那一层。
+     *
+     * <p>现在跨层（|ΔY| ≥ 2）改用 3D 目标 GoalNear(pos, 1)：必须真的到箱子所在层
+     * （或紧邻/正上方 1 格内）才算到达，Baritone 不会再拿「挖下去」当进展；
+     * 走不过去就停下来报警，绝不用侧面/下层凑合。
+     */
+    private void pathToContainer(BlockPos pos) {
+        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return;
+        int feetY = mc.player.getBlockPos().getY();
+        boolean sameFloor = StashMoveLogic.sameFloorForPath(feetY, pos.getY());
+        if (!sameFloor) {
+            int dy = pos.getY() - feetY;
+            if (crossLevelStartTick == 0 || !pos.equals(crossLevelTarget)) {
+                crossLevelTarget = pos;
+                crossLevelStartTick = tick;
+                crossLevelWarned = false;
+                debugMsg("[接近] 目标箱在" + (dy > 0 ? "上" : "下") + "方 " + Math.abs(dy)
+                    + " 格（同一层才用只看 XZ 的目标）→ 改为 3D 目标走近，不会为了凑 XZ 往下挖");
+            } else if (!crossLevelWarned && tick - crossLevelStartTick > 300) {
+                crossLevelWarned = true;
+                warning("目标箱在" + (dy > 0 ? "上" : "下") + "方 " + Math.abs(dy)
+                    + " 格，3D 寻路 15 秒还没走到；请确认有台阶/梯子能到那一层（不会为了凑坐标向下挖）");
+            }
+        } else {
+            crossLevelStartTick = 0;
+            crossLevelTarget = null;
+            crossLevelWarned = false;
+        }
+        pathTo(pos, sameFloor ? PathGoal.XZ : PathGoal.NEAR);
     }
 
     /**
@@ -3731,16 +3820,14 @@ public class StashMover extends Module {
         Vec3d center = Vec3d.ofCenter(pos);
         Vec3d eye = mc.player.getEyePos();
         if (eye.distanceTo(center) <= OPEN_REACH) {
-            pathTarget = null;
+            clearPathTarget();
             return true;
         }
-        // 已经站在方块正上方/正下方（XZ 基本重合）：GoalXZ 寻路不再有帮助，直接允许点击
-        // （否则会出现"XZ 距离=0、Baritone 认为已到达、却因为高度差永远判超距"的死循环）
-        if (Math.hypot(eye.x - center.x, eye.z - center.z) <= 1.2) {
-            pathTarget = null;
-            return true;
-        }
-        pathTo(pos, true);
+        // V6.7p23：这里原来还有一条「XZ 距离 ≤1.2 就直接允许点击」的短路。
+        // 它能通过的场景只有一种：人和箱子 XZ 重合、但垂直差 >3.3 格（隔着楼板/地板），
+        // 恰好就是「不在同一 Y 却硬点」的那一类。现在跨层一律走 3D 目标，不再需要它，
+        // 同层时距离判定本来就已经放行（不会死循环），所以整条删掉。
+        pathToContainer(pos);
         return false;
     }
 
