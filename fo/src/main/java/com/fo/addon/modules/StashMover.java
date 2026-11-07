@@ -1822,9 +1822,7 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
-                // 本趟存过末影箱就先取出来再卸一轮（V6.7p27）
-                if (tryEnterEnderTake(() -> moverState = MoverState.ENDER_TAKE)) return;
-                onUnloadDone();
+                finishDualUnload();
                 return;
             }
             // V6.7p25：和取货/珍珠箱统一走 goOpenChest（走到箱子旁落脚点就停，不上箱子）。
@@ -1846,7 +1844,11 @@ public class StashMover extends Module {
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
-            onUnloadDone();
+            // ⚠️ V6.7p31 修复：这是双号卸货的主出口（最后一格 QUICK_MOVE 后界面还开着，
+            // 下一 tick 就会走到这里）。p27 只给「界面没开」的出口接了末影箱取货，
+            // 这个出口直接 onUnloadDone() → 跳过取货 → 直接进投珍珠，还打出
+            // 「附近没找到末影箱？」的误导报警。现在统一走 finishDualUnload()。
+            finishDualUnload();
             return;
         }
         unloadedSomething = true;
@@ -1855,11 +1857,22 @@ public class StashMover extends Module {
         progress();
     }
 
+    /**
+     * 双号卸货收尾（V6.7p31）：dualUnload 的**所有**「卸完了」出口都走这里。
+     *
+     * <p>顺序固定：先问末影箱要不要取货（本趟存过且还没取）→ 取完回 UNLOAD 再卸一轮 →
+     * 全部落袋才真正收尾进投珍珠。收尾只有一个实现，杜绝「改一处漏一处」。
+     */
+    private void finishDualUnload() {
+        if (tryEnterEnderTake(() -> moverState = MoverState.ENDER_TAKE)) return;
+        onUnloadDone();
+    }
+
     private void onUnloadDone() {
         if (unloadedSomething) StashStats.get().addTrip();
         unloadedSomething = false;
         if (enderPutDone && !enderTakeDone) {
-            warning("本趟末影箱里的货没取出来（附近没找到末影箱？），会留到下一趟");
+            warning("本趟末影箱里的货没取出来（存储区附近没找到末影箱？可填「存储区末影箱位置」坐标指定），会留到下一趟");
         }
         resetEnderTrip();
         invalidateEnderCache();
@@ -2140,7 +2153,6 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
-                if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
                 finishTrioUnload();
                 return;
             }
@@ -2159,7 +2171,6 @@ public class StashMover extends Module {
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
-            if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
             finishTrioUnload();
             return;
         }
@@ -2186,12 +2197,19 @@ public class StashMover extends Module {
     }
 
     /** 三号：卸货真正结束（卸空 + 末影箱也取完）→ 计趟数、清标记、回发信。 */
+    /**
+     * 三号卸货收尾（V6.7p31 改成统一入口）：trioUnload 的**所有**「卸完了」出口都走这里。
+     *
+     * <p>顺序与 {@link #finishDualUnload()} 同构：先问末影箱要不要取货 →
+     * 取完回 UNLOAD 再卸一轮 → 全部落袋才真正收尾回发信。
+     */
     private void finishTrioUnload() {
+        if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
         if (unloadedSomething) StashStats.get().addTrip();
         unloadedSomething = false;
         info("本趟卸货完成：本次共 " + StashStats.get().displayText());
         if (enderPutDone && !enderTakeDone) {
-            warning("本趟末影箱里的货没取出来（附近没找到末影箱？），会留到下一趟");
+            warning("本趟末影箱里的货没取出来（存储区附近没找到末影箱？可填「存储箱区末影箱位置」坐标指定），会留到下一趟");
         }
         resetEnderTrip();
         invalidateEnderCache();
