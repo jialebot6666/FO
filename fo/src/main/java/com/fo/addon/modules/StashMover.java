@@ -36,6 +36,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.AbstractSignBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.EnderChestBlock;
 import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.entity.SignBlockEntity;
@@ -47,6 +48,7 @@ import net.minecraft.item.Items;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.inventory.EnderChestInventory;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.ShulkerBoxScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -174,8 +176,8 @@ public class StashMover extends Module {
      */
     private enum MoverState {
         ZONE_CHECK,
-        LOOT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
-        UNLOAD, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
+        LOOT, ENDER_PUT, SEND, WAIT_ACK, WAIT_TELEPORT, ARRIVE_WAIT, SETTLE,
+        UNLOAD, ENDER_TAKE, TAKE_PEARL, THROW, PUT_BACK, CONFIRM_PEARL,
         SUICIDE_PREP, SUICIDE_LAVA, DEAD_WAIT, REFILL, STUCK
     }
 
@@ -186,7 +188,7 @@ public class StashMover extends Module {
      * （用户实机反馈：以前一落地就立刻开活板门/脱离，地形还没同步，判断全乱）。
      */
     private enum TrioState {
-        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, UNLOAD, SEND, WAIT_TELEPORT, STUCK
+        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, ENDER_PUT, UNLOAD, ENDER_TAKE, SEND, WAIT_TELEPORT, STUCK
     }
 
     // ==================== 设置 ====================
@@ -195,6 +197,7 @@ public class StashMover extends Module {
     private final SettingGroup sgMover = settings.createGroup("搬运（双号）");
     private final SettingGroup sgPearl = settings.createGroup("拉珍珠");
     private final SettingGroup sgTrio = settings.createGroup("三号模式");
+    private final SettingGroup sgEnder = settings.createGroup("末影箱");
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
         .name("模式")
@@ -229,6 +232,24 @@ public class StashMover extends Module {
     private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
         .name("本次搬运")
         .description("只统计本次在线：趟数 + 潜影盒数。关模块不清零，断线/退服清零；右侧按钮可手动重置。")
+        .build());
+
+    // ---------- 末影箱（V6.7p27，双号 + 三号共用） ----------
+
+    private final Setting<Boolean> enderEnabled = sgEnder.add(new BoolSetting.Builder()
+        .name("启用末影箱中转")
+        .description("背包装满后先把货存进附近的末影箱，到存储区再取出来 —— 单趟多搬 27 个潜影盒。"
+            + "末影箱需预先放在待取货箱区和存储区附近（会自动找最近的）。默认开。")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> enderSearchRadius = sgEnder.add(new IntSetting.Builder()
+        .name("末影箱搜索半径")
+        .description("在玩家周围多少格内找末影箱（水平/垂直同一半径）。超出这个范围当作没放。")
+        .defaultValue(6)
+        .min(2)
+        .sliderMax(12)
+        .visible(enderEnabled::get)
         .build());
 
     // ---------- 搬运端（双号） ----------
@@ -790,6 +811,23 @@ public class StashMover extends Module {
     private static final int APPROACH_TIMEOUT = 600;
     /** 选箱子时最多向后看几个，挑「落脚点有视线」的那个（V6.7p25）。 */
     private static final int LOS_LOOKAHEAD = 4;
+
+    // ===== V6.7p27：末影箱中转 =====
+    /** 本趟是否已经往末影箱存过货（一趟只存一次，避免来回倒腾）。 */
+    private boolean enderPutDone;
+    /** 本趟是否已经从末影箱取过货（一趟只取一次）。 */
+    private boolean enderTakeDone;
+    /** 本次要打开的那台末影箱（进状态时扫出来的）。 */
+    private BlockPos enderTarget;
+    /** 末影箱扫描缓存（附近没有时也缓存一小会儿，别每 tick 全立方体扫一遍）。 */
+    private BlockPos enderChestCache;
+    private long enderChestCacheTick;
+    /** 进入末影箱状态的 tick（用于「打不开就放弃本趟」的超时）。 */
+    private long enderStateStart;
+    /** 单次末影箱操作（存/取）的等待上限：15 秒。 */
+    private static final int ENDER_STATE_TIMEOUT = 300;
+    /** 「附近没有末影箱」的负缓存时长（tick）。 */
+    private static final int ENDER_SCAN_TTL = 20;
     private long pathStartTick;
     /** 同一个精确走位目标开始的时间（用于 20 秒超时判定，不随每次重发归零）。 */
     private long pathToSince;
@@ -971,6 +1009,8 @@ public class StashMover extends Module {
         pullActive = false;
         unloadedSomething = false;
         lastProgressTick = 0;
+        resetEnderTrip();
+        invalidateEnderCache();
 
         // V6.7p14：双号新增的几个阶段状态
         dualTeleportWaitStart = 0;
@@ -1211,6 +1251,8 @@ public class StashMover extends Module {
         switch (moverState) {
             case ZONE_CHECK -> dualZoneCheck();
             case LOOT -> dualLoot();
+            case ENDER_PUT -> dualEnderPut();
+            case ENDER_TAKE -> dualEnderTake();
             case SEND -> dualSend();
             case WAIT_ACK -> dualWaitAck();
             case WAIT_TELEPORT -> dualWaitTeleport();
@@ -1324,8 +1366,9 @@ public class StashMover extends Module {
     }
 
     private void dualLoot() {
-        // 背包满优先：关掉容器直接去发请求（否则容器里点击 QUICK_MOVE 一发都放不进去，会死循环）
+        // 背包满优先：先试着塞进附近末影箱（V6.7p27），塞不了再去发请求
         if (inventoryFull()) {
+            if (tryEnterEnderPut(() -> moverState = MoverState.ENDER_PUT)) return;
             closeScreen();
             moverState = MoverState.SEND;
             return;
@@ -1357,6 +1400,7 @@ public class StashMover extends Module {
         }
 
         if (inventoryFull()) {
+            if (tryEnterEnderPut(() -> moverState = MoverState.ENDER_PUT)) return;
             moverState = MoverState.SEND;
             return;
         }
@@ -1371,6 +1415,24 @@ public class StashMover extends Module {
             return;
         }
         if (!goOpenChest(chest)) return;
+    }
+
+    /** 双号：把货存进附近末影箱（V6.7p27）。 */
+    private void dualEnderPut() {
+        if (!enderPutTick()) {
+            moverState = MoverState.LOOT;
+            cooldown = PACE_STEP;
+            debugMsg("[末影箱] 存货结束，回取货");
+        }
+    }
+
+    /** 双号：到存储区后把末影箱里的货取出来（V6.7p27）。 */
+    private void dualEnderTake() {
+        if (!enderTakeTick()) {
+            moverState = MoverState.UNLOAD;
+            cooldown = PACE_STEP;
+            debugMsg("[末影箱] 取货结束，回卸货");
+        }
     }
 
     private void dualSend() {
@@ -1712,6 +1774,8 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
+                // 本趟存过末影箱就先取出来再卸一轮（V6.7p27）
+                if (tryEnterEnderTake(() -> moverState = MoverState.ENDER_TAKE)) return;
                 onUnloadDone();
                 return;
             }
@@ -1746,6 +1810,11 @@ public class StashMover extends Module {
     private void onUnloadDone() {
         if (unloadedSomething) StashStats.get().addTrip();
         unloadedSomething = false;
+        if (enderPutDone && !enderTakeDone) {
+            warning("本趟末影箱里的货没取出来（附近没找到末影箱？），会留到下一趟");
+        }
+        resetEnderTrip();
+        invalidateEnderCache();
         if (finalTrip) {
             info("最后一趟运输完成（" + StashStats.get().displayText() + "），关闭模块");
             toggle();
@@ -1943,7 +2012,9 @@ public class StashMover extends Module {
             case RESTOCK -> trioRestock();
             case THROW -> trioThrow();
             case LOOT -> trioLoot();
+            case ENDER_PUT -> trioEnderPut();
             case UNLOAD -> trioUnload();
+            case ENDER_TAKE -> trioEnderTake();
             case SEND -> trioSend();
             case WAIT_TELEPORT -> trioWaitTeleport();
             case STUCK -> tickStuck();
@@ -1971,6 +2042,7 @@ public class StashMover extends Module {
 
     private void trioLoot() {
         if (inventoryFull()) {
+            if (tryEnterEnderPut(() -> setTrioState(TrioState.ENDER_PUT, "背包满，先存末影箱"))) return;
             closeScreen();
             debugMsg("[取货] 背包已满，结束取货");
             setTrioState(TrioState.SEND, "背包已满，取货结束");
@@ -2020,11 +2092,8 @@ public class StashMover extends Module {
         }
         if (!containerOpen()) {
             if (!hasItemsToUnload()) {
-                if (unloadedSomething) StashStats.get().addTrip();
-                unloadedSomething = false;
-                debugMsg("[存货] 没有可卸物品，结束存货");
-                info("本趟卸货完成：本次共 " + StashStats.get().displayText());
-                setTrioState(TrioState.SEND, "存货完成");
+                if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
+                finishTrioUnload();
                 return;
             }
             if (!(mc.world.getBlockState(store).getBlock() instanceof ChestBlock)) {
@@ -2042,17 +2111,43 @@ public class StashMover extends Module {
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
-            if (unloadedSomething) StashStats.get().addTrip();
-            unloadedSomething = false;
-            debugMsg("[存货] 背包里没有可卸的物品了");
-            info("本趟卸货完成：本次共 " + StashStats.get().displayText());
-            setTrioState(TrioState.SEND, "存货完成");
+            if (tryEnterEnderTake(() -> setTrioState(TrioState.ENDER_TAKE, "存货完成，去末影箱取货"))) return;
+            finishTrioUnload();
             return;
         }
         unloadedSomething = true;
         clickSlot(slot, SlotActionType.QUICK_MOVE);
         cooldown = Math.max(1, clickDelay.get());
         progress();
+    }
+
+    /** 三号：把货存进附近末影箱（V6.7p27）。 */
+    private void trioEnderPut() {
+        if (!enderPutTick()) {
+            setTrioState(TrioState.LOOT, "末影箱存货完成，继续取货");
+            cooldown = PACE_STEP;
+        }
+    }
+
+    /** 三号：到存储区后把末影箱里的货取出来（V6.7p27）。 */
+    private void trioEnderTake() {
+        if (!enderTakeTick()) {
+            setTrioState(TrioState.UNLOAD, "末影箱取货完成，继续卸货");
+            cooldown = PACE_STEP;
+        }
+    }
+
+    /** 三号：卸货真正结束（卸空 + 末影箱也取完）→ 计趟数、清标记、回发信。 */
+    private void finishTrioUnload() {
+        if (unloadedSomething) StashStats.get().addTrip();
+        unloadedSomething = false;
+        info("本趟卸货完成：本次共 " + StashStats.get().displayText());
+        if (enderPutDone && !enderTakeDone) {
+            warning("本趟末影箱里的货没取出来（附近没找到末影箱？），会留到下一趟");
+        }
+        resetEnderTrip();
+        invalidateEnderCache();
+        setTrioState(TrioState.SEND, "存货完成");
     }
 
     private void trioRestock() {
@@ -3734,6 +3829,270 @@ public class StashMover extends Module {
         return -1;
     }
 
+    // ==================== 末影箱中转（V6.7p27，双号 + 三号共用） ====================
+
+    /**
+     * 末影箱功能当前是否可用：开关打开 + 本号是搬运端（拉珍珠端不参与）+ 世界/玩家就绪。
+     */
+    private boolean enderUsable() {
+        return enderEnabled.get() && isMoverRole() && mc.player != null && mc.world != null;
+    }
+
+    /**
+     * 当前打开的是不是**末影箱**界面（V6.7p27）。
+     *
+     * <p>普通箱子（27 格）和末影箱（27 格）的槽位数完全一样，只看 `containerOpen()` 分不出来；
+     * 这里靠底层背包类型判断：末影箱界面用的是 {@link EnderChestInventory}。
+     * 防的是「上一个容器还没关干净就去存/取」把货倒进普通箱子。
+     */
+    private boolean enderChestOpen() {
+        ScreenHandler handler = containerHandler();
+        return handler instanceof GenericContainerScreenHandler generic
+            && generic.getInventory() instanceof EnderChestInventory;
+    }
+
+    /**
+     * 在玩家周围找最近的末影箱（V6.7p27）。
+     *
+     * <p>检测方式：以玩家脚所在格为中心、{@code 末影箱搜索半径}（默认 6 格）为半边长扫一个立方体，
+     * 取欧氏距离最近的一台。用户场地是「预先放好、就在箱子旁边」，所以正常情况都在 1~2 格内。
+     *
+     * <p>结果带缓存：命中就复用（每 tick 校验方块还在）；**没命中也会缓存
+     * {@link #ENDER_SCAN_TTL} tick**，避免每 tick 扫 13³ 个方块。
+     */
+    private BlockPos findNearbyEnderChest() {
+        if (!enderUsable()) return null;
+        if (enderChestCache != null) {
+            if (mc.world.getBlockState(enderChestCache).getBlock() == Blocks.ENDER_CHEST) return enderChestCache;
+            enderChestCache = null;   // 被拆了/换地方了
+        }
+        if (tick - enderChestCacheTick < ENDER_SCAN_TTL) return null;
+
+        enderChestCacheTick = tick;
+        int r = Math.max(2, enderSearchRadius.get());
+        BlockPos base = mc.player.getBlockPos();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos p = base.add(dx, dy, dz);
+                    if (mc.world.getBlockState(p).getBlock() != Blocks.ENDER_CHEST) continue;
+                    double d = base.getSquaredDistance(p);
+                    if (d < bestD) {
+                        bestD = d;
+                        best = p;
+                    }
+                }
+            }
+        }
+        enderChestCache = best;
+        if (best != null) {
+            debugMsg("[末影箱] 附近找到一台，距 " + String.format(Locale.ROOT, "%.1f", Math.sqrt(bestD)) + " 格");
+        }
+        return best;
+    }
+
+    private void invalidateEnderCache() {
+        enderChestCache = null;
+        enderChestCacheTick = 0;
+    }
+
+    /** 背包里还有没有「该存进末影箱」的东西（珍珠永远不存）。 */
+    private boolean hasLootToDeposit() {
+        if (mc.player == null) return false;
+        var inv = mc.player.getInventory();
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) continue;
+            if (StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 背包满时：如果开着末影箱、附近有末影箱、本趟还没存过 → 切到「存末影箱」。
+     *
+     * @return true = 本 tick 已经切状态，调用方不要再往下走
+     */
+    private boolean tryEnterEnderPut(Runnable enterState) {
+        if (!enderUsable() || enderPutDone) return false;
+        if (!hasLootToDeposit()) return false;
+        BlockPos ender = findNearbyEnderChest();
+        if (ender == null) return false;
+        enderTarget = ender;
+        enderStateStart = tick;
+        closeScreen();
+        enterState.run();
+        debugMsg("[末影箱] 背包满 → 先把货存进附近末影箱");
+        return true;
+    }
+
+    /**
+     * 到存储区、背包已经卸空时：如果本趟存过末影箱、还没取过 → 切到「取末影箱」。
+     *
+     * <p>注意：末影箱内容只有服务端知道（客户端方块实体里没有），所以「取」必须打开一次才知道空不空，
+     * 空箱会多一次开箱动作，这是可接受的。
+     *
+     * @return true = 本 tick 已经切状态
+     */
+    private boolean tryEnterEnderTake(Runnable enterState) {
+        if (!enderUsable() || !enderPutDone || enderTakeDone) return false;
+        BlockPos ender = findNearbyEnderChest();
+        if (ender == null) return false;
+        enderTarget = ender;
+        enderStateStart = tick;
+        enterState.run();
+        debugMsg("[末影箱] 背包卸空 → 去把末影箱里的货取出来");
+        return true;
+    }
+
+    /** 存末影箱的一 tick：返回 false = 结束（调用方切回原状态）。 */
+    private boolean enderPutTick() {
+        if (enderTarget == null || mc.world.getBlockState(enderTarget).getBlock() != Blocks.ENDER_CHEST) {
+            enderPutDone = true;
+            return false;
+        }
+        if (tick - enderStateStart > ENDER_STATE_TIMEOUT) {
+            closeScreen();
+            enderPutDone = true;
+            warning("末影箱存货超时（" + (ENDER_STATE_TIMEOUT / 20) + " 秒），本趟不再存");
+            return false;
+        }
+        if (!enderChestOpen()) {
+            if (containerOpen()) {
+                closeScreen();
+                cooldown = 5;
+                return true;
+            }
+            if (!hasLootToDeposit()) {
+                enderPutDone = true;
+                return false;
+            }
+            goOpenChest(enderTarget, false);
+            // 末影箱打不开就降级（不能让它触发 openChestAt 的「连续 8 次」硬停）
+            if (openAttempts >= 5) {
+                closeScreen();
+                enderPutDone = true;
+                warning("末影箱打不开（已点 5 次），本趟跳过中转");
+                return false;
+            }
+            return true;
+        }
+        // 容量上限：27 格全满就停手，剩下的继续背着走（到存储区照常卸）
+        if (containerIsFull()) {
+            closeScreen();
+            enderPutDone = true;
+            warning("末影箱已满（27 格），剩下的货继续背着走");
+            return false;
+        }
+        int slot = findEnderDepositSlot();
+        if (slot < 0) {
+            closeScreen();
+            enderPutDone = true;
+            return false;
+        }
+        clickSlot(slot, SlotActionType.QUICK_MOVE);
+        cooldown = Math.max(1, clickDelay.get());
+        progress();
+        return true;
+    }
+
+    /** 取末影箱的一 tick：返回 false = 结束（调用方切回卸货）。 */
+    private boolean enderTakeTick() {
+        if (enderTarget == null || mc.world.getBlockState(enderTarget).getBlock() != Blocks.ENDER_CHEST) {
+            enderTakeDone = true;
+            return false;
+        }
+        if (tick - enderStateStart > ENDER_STATE_TIMEOUT) {
+            closeScreen();
+            enderTakeDone = true;
+            warning("末影箱取货超时（" + (ENDER_STATE_TIMEOUT / 20) + " 秒），剩余货物留在箱里");
+            return false;
+        }
+        if (!enderChestOpen()) {
+            if (containerOpen()) {
+                closeScreen();
+                cooldown = 5;
+                return true;
+            }
+            goOpenChest(enderTarget, false);
+            if (openAttempts >= 5) {
+                closeScreen();
+                enderTakeDone = true;
+                warning("末影箱打不开（已点 5 次），剩余货物留在箱里");
+                return false;
+            }
+            return true;
+        }
+        if (containerEmpty()) {
+            closeScreen();
+            enderTakeDone = true;
+            debugMsg("[末影箱] 是空的（本趟没存进去？），跳过");
+            return false;
+        }
+        // 背包放不下就先停（正常流程：卸空后才来取，36 格 ≥ 末影箱 27 格）
+        if (findEmptyPlayerSlotInHandler() < 0) {
+            closeScreen();
+            enderTakeDone = true;
+            warning("背包已满，取不了末影箱（请检查存储箱是否够空）");
+            return false;
+        }
+        int slot = findEnderWithdrawSlot();
+        if (slot < 0) {
+            closeScreen();
+            enderTakeDone = true;
+            return false;
+        }
+        clickSlot(slot, SlotActionType.QUICK_MOVE);
+        cooldown = Math.max(1, clickDelay.get());
+        progress();
+        return true;
+    }
+
+    /** 末影箱界面里，背包部分第一个「可存入」的槽位（珍珠除外）。 */
+    private int findEnderDepositSlot() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
+        int size = handler.slots.size();
+        for (int i = size - 36; i < size; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            if (StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) return i;
+        }
+        return -1;
+    }
+
+    /** 末影箱容器部分第一个非空槽位（逐格 QUICK_MOVE 到背包）。 */
+    private int findEnderWithdrawSlot() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
+        int size = handler.slots.size();
+        for (int i = 0; i < size - 36; i++) {
+            if (!handler.getSlot(i).getStack().isEmpty()) return i;
+        }
+        return -1;
+    }
+
+    /** 末影箱界面里还有没有空的背包槽位。 */
+    private int findEmptyPlayerSlotInHandler() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return -1;
+        int size = handler.slots.size();
+        for (int i = size - 36; i < size; i++) {
+            if (handler.getSlot(i).getStack().isEmpty()) return i;
+        }
+        return -1;
+    }
+
+    /** 本趟结束（卸货完成）时清掉末影箱标记，下一趟重新来。 */
+    private void resetEnderTrip() {
+        enderPutDone = false;
+        enderTakeDone = false;
+        enderTarget = null;
+        enderStateStart = 0;
+    }
+
     /** 背包里是否还有“可以存进存储箱”的东西（珍珠、只拿潜影盒时的非潜影盒都排除）。 */
     private boolean hasItemsToUnload() {
         var inv = mc.player.getInventory();
@@ -3936,7 +4295,8 @@ public class StashMover extends Module {
         // 绝不能记进 chestNoSpot（否则远距离补珍珠时会把珍珠箱永久拉黑）。
         var chestState = mc.world.getBlockState(chest);
         if (!(chestState.getBlock() instanceof ChestBlock)
-            && !(chestState.getBlock() instanceof ShulkerBoxBlock)) {
+            && !(chestState.getBlock() instanceof ShulkerBoxBlock)
+            && !(chestState.getBlock() instanceof EnderChestBlock)) {
             return null;
         }
         if (chestNoSpot.contains(chest)) return null;
@@ -4027,6 +4387,16 @@ public class StashMover extends Module {
      * @return true = 本 tick 已经把开箱动作发出去
      */
     private boolean goOpenChest(BlockPos chest) {
+        return goOpenChest(chest, true);
+    }
+
+    /**
+     * 靠近并打开箱子 / 末影箱（V6.7p27 增加 critical）。
+     *
+     * @param critical true = 打不开就报警暂停（存储箱/珍珠箱/单箱目标）；
+     *                 false = 打不开只提示、由调用方降级（末影箱：跳过本趟中转）
+     */
+    private boolean goOpenChest(BlockPos chest, boolean critical) {
         if (chest == null || chest.equals(BlockPos.ORIGIN)) return false;
         Approach a = approachChest(chest);
         if (a == Approach.IN_RANGE) {
@@ -4034,13 +4404,15 @@ public class StashMover extends Module {
             return true;
         }
         if (a == Approach.NO_SPOT) {
-            // 队列箱子（搜索/框选）：跳过换下一个；固定目标（存储箱/珍珠箱/单箱）：报警，不拉黑
+            // 队列箱子（搜索/框选）：跳过换下一个；固定目标：按 critical 决定报警还是降级
             if (chestQueue.contains(chest)) {
                 blacklistChest(chest);
                 openChest = null;
                 debugMsg("[接近] 已跳过这个箱子（四周没有落脚点）");
-            } else {
+            } else if (critical) {
                 enterStuck("箱子周围 3 格内没有可站的格子（不会站到箱子正上方），请检查结构");
+            } else {
+                warnThrottled("末影箱旁边没有可站的格子，本趟跳过末影箱中转");
             }
         }
         return false;

@@ -473,4 +473,20 @@ class StashMoveLogicTest {
         assertEquals(StashMoveLogic.BoxSide.SOUTH, StashMoveLogic.BoxSide.NORTH.opposite());
         assertEquals(StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.BoxSide.UNKNOWN.opposite());
     }
+
+    // ==================== V6.7p27：末影箱中转的存取口径 ====================
+
+    @Test
+    void 末影箱_珍珠绝不存入() {
+        // 珍珠是回程票，存进末影箱下一趟就拉不回来了
+        assertFalse(StashMoveLogic.shouldStoreInEnder("minecraft:ender_pearl"));
+    }
+
+    @Test
+    void 末影箱_普通战利品都能存() {
+        // 取货阶段已经按「只拿潜影盒」筛过，这里不再二次过滤
+        assertTrue(StashMoveLogic.shouldStoreInEnder("minecraft:shulker_box"));
+        assertTrue(StashMoveLogic.shouldStoreInEnder("minecraft:iron_ingot"));
+        assertFalse(StashMoveLogic.shouldStoreInEnder(null));
+    }
 }

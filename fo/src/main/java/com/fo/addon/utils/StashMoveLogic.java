@@ -144,6 +144,19 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 这件东西该不该存进末影箱（V6.7p27）。
+     *
+     * <p>末影箱是「本趟多背 27 格」的中转仓，取货阶段已经按「只拿潜影盒」筛过一轮了，
+     * 所以这里**不做二次过滤**，只排除唯一不能存的东西 —— 末影珍珠：
+     * 珍珠是回程票，存进去下一趟就拉不回来了。
+     *
+     * @param itemId 物品注册名（如 {@code minecraft:ender_pearl}）
+     */
+    public static boolean shouldStoreInEnder(String itemId) {
+        return itemId != null && !"minecraft:ender_pearl".equals(itemId);
+    }
+
+    /**
      * 双箱另一半的偏移（dx, dz）。
      *
      * @param left   是否是双箱的左半（ChestType.LEFT）
