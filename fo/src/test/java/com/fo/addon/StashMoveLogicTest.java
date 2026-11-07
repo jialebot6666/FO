@@ -500,4 +500,14 @@ class StashMoveLogicTest {
         assertFalse(StashMoveLogic.isEnderScreenShape(true, 27), "没算背包格的不算");
         assertFalse(StashMoveLogic.isEnderScreenShape(false, 0), "空处理器一律不算");
     }
+
+    // ==================== V6.7p30：末影箱分区坐标（坐标优先 + 扫描兜底） ====================
+
+    @Test
+    void 末影箱坐标_000视为未填写() {
+        assertFalse(StashMoveLogic.isCoordSet(0, 0, 0), "0,0,0 = 留空，走自动扫描");
+        assertTrue(StashMoveLogic.isCoordSet(100, 64, 200));
+        assertTrue(StashMoveLogic.isCoordSet(0, 64, 0), "只有 Y 也要算填了（不可能有 0 层的末影箱）");
+        assertTrue(StashMoveLogic.isCoordSet(-35, 64, 1200), "负坐标同样有效");
+    }
 }

@@ -247,18 +247,51 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> enderEnabled = sgEnder.add(new BoolSetting.Builder()
         .name("启用末影箱中转")
-        .description("背包装满后先把货存进附近的末影箱，到存储区再取出来 —— 单趟多搬 27 个潜影盒。"
-            + "末影箱需预先放在待取货箱区和存储区附近（会自动找最近的）。默认开。")
+        .description("背包装满后先把货存进末影箱，到存储区再取出来 —— 单趟多搬 27 个潜影盒。"
+            + "末影箱需预先放在待取货箱区和存储区旁边：分区坐标填了就用坐标那台（会校验方块），"
+            + "留空则自动找最近的。默认开。")
         .defaultValue(true)
         .build());
 
     private final Setting<Integer> enderSearchRadius = sgEnder.add(new IntSetting.Builder()
         .name("末影箱搜索半径")
-        .description("在玩家周围多少格内找末影箱（水平/垂直同一半径）。超出这个范围当作没放。")
+        .description("自动扫描时在玩家周围多少格内找末影箱（水平/垂直同一半径）。"
+            + "下面两条分区坐标填了就以坐标为准，这项不参与。")
         .defaultValue(6)
         .min(2)
         .sliderMax(12)
         .visible(enderEnabled::get)
+        .build());
+
+    // 末影箱分区坐标（V6.7p30，混合模式：坐标优先 + 校验 + 自动扫描兜底）
+    // ⚠️ 约定与存储箱/珍珠箱一致：0,0,0 = 未设置 = 自动扫描
+
+    private final Setting<BlockPos> enderLootChest = sgEnder.add(new BlockPosSetting.Builder()
+        .name("取货区末影箱位置")
+        .description("双号模式：待取货箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
+        .build());
+
+    private final Setting<BlockPos> enderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
+        .name("存储区末影箱位置")
+        .description("双号模式：存储区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
+        .build());
+
+    private final Setting<BlockPos> trioEnderLootChest = sgEnder.add(new BlockPosSetting.Builder()
+        .name("待搬运箱区末影箱位置")
+        .description("三号模式：待搬运箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
+        .build());
+
+    private final Setting<BlockPos> trioEnderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
+        .name("存储箱区末影箱位置")
+        .description("三号模式：存储箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .defaultValue(new BlockPos(0, 0, 0))
+        .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
         .build());
 
     // ---------- 搬运端（双号） ----------
@@ -3879,6 +3912,31 @@ public class StashMover extends Module {
     }
 
     /**
+     * 选出本次要用的末影箱（V6.7p30 混合模式：坐标优先 + 校验 + 自动扫描兜底）。
+     *
+     * <p>分区坐标填了就强制用那一台，但**必须校验那一格真的是末影箱**——
+     * 被挪走 / 填错坐标时绝不能把货倒进普通箱子，报警一次并回退自动扫描。
+     * 坐标留空（0,0,0）= 维持 p27 的自动扫描（就近找一台）。
+     *
+     * @param storageZone true = 存储区的末影箱（取货用）；false = 待取货箱区的（存货用）
+     */
+    private BlockPos resolveEnderTarget(boolean storageZone) {
+        BlockPos coord = storageZone
+            ? (mode.get() == Mode.TRIO ? trioEnderStoreChest.get() : enderStoreChest.get())
+            : (mode.get() == Mode.TRIO ? trioEnderLootChest.get() : enderLootChest.get());
+        boolean coordSet = coord != null && StashMoveLogic.isCoordSet(coord.getX(), coord.getY(), coord.getZ());
+        if (coordSet) {
+            boolean ok = mc.world != null && mc.world.getBlockState(coord).getBlock() == Blocks.ENDER_CHEST;
+            if (ok) {
+                debugMsg("[末影箱] 使用分区坐标指定的那台（" + (storageZone ? "存储区" : "取货区") + "）");
+                return coord;
+            }
+            warnThrottled("末影箱分区坐标处不是末影箱（被挪走或填错？），本趟改用自动扫描");
+        }
+        return findNearbyEnderChest();
+    }
+
+    /**
      * 在玩家周围找最近的末影箱（V6.7p27）。
      *
      * <p>检测方式：以玩家脚所在格为中心、{@code 末影箱搜索半径}（默认 6 格）为半边长扫一个立方体，
@@ -3947,7 +4005,7 @@ public class StashMover extends Module {
     private boolean tryEnterEnderPut(Runnable enterState) {
         if (!enderUsable() || enderPutDone) return false;
         if (!hasLootToDeposit()) return false;
-        BlockPos ender = findNearbyEnderChest();
+        BlockPos ender = resolveEnderTarget(false);
         if (ender == null) return false;
         enderTarget = ender;
         enderStateStart = tick;
@@ -3972,7 +4030,7 @@ public class StashMover extends Module {
      */
     private boolean tryEnterEnderTake(Runnable enterState) {
         if (!enderUsable() || !enderPutDone || enderTakeDone) return false;
-        BlockPos ender = findNearbyEnderChest();
+        BlockPos ender = resolveEnderTarget(true);
         if (ender == null) return false;
         enderTarget = ender;
         enderStateStart = tick;
