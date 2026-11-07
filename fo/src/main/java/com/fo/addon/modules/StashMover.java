@@ -49,7 +49,6 @@ import net.minecraft.item.Items;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
-import net.minecraft.inventory.EnderChestInventory;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.ShulkerBoxScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -834,8 +833,14 @@ public class StashMover extends Module {
     private long enderChestCacheTick;
     /** 进入末影箱状态的 tick（用于「打不开就放弃本趟」的超时）。 */
     private long enderStateStart;
-    /** 单次末影箱操作（存/取）的等待上限：15 秒。 */
-    private static final int ENDER_STATE_TIMEOUT = 300;
+    /** 单次末影箱操作（存/取）的等待上限：30 秒（含从 2~6 格外走过来的时间）。 */
+    private static final int ENDER_STATE_TIMEOUT = 600;
+    /** 末影箱状态里「关掉非末影箱界面」的容忍次数，超过就判定识别异常并降级（V6.7p29）。 */
+    private static final int ENDER_CLOSE_LIMIT = 3;
+    /** 本状态里已经关掉过几次「不是末影箱」的界面（防止打开/关闭死循环）。 */
+    private int enderCloseCount;
+    /** 是否已经打过「末影箱界面已就绪」的调试行（每趟只打一次）。 */
+    private boolean enderOpenLogged;
     /** 「附近没有末影箱」的负缓存时长（tick）。 */
     private static final int ENDER_SCAN_TTL = 20;
     private long pathStartTick;
@@ -3849,16 +3854,28 @@ public class StashMover extends Module {
     }
 
     /**
-     * 当前打开的是不是**末影箱**界面（V6.7p27）。
+     * 当前打开的是不是**我们要用的那台末影箱**（V6.7p27 引入，V6.7p29 修判定）。
      *
-     * <p>普通箱子（27 格）和末影箱（27 格）的槽位数完全一样，只看 `containerOpen()` 分不出来；
-     * 这里靠底层背包类型判断：末影箱界面用的是 {@link EnderChestInventory}。
-     * 防的是「上一个容器还没关干净就去存/取」把货倒进普通箱子。
+     * <p>⚠️ 不能再用 {@code getInventory() instanceof EnderChestInventory} 判断。客户端收到的
+     * 只有 {@code OpenScreenS2CPacket(GENERIC_9X3)}，{@code HandledScreens} 会用
+     * {@code GenericContainerScreenHandler.createGeneric9x3(syncId, inv)} 建界面，而那个工厂
+     * 内部是 {@code new SimpleInventory(9 * 3)} —— <b>客户端永远看不到 {@code EnderChestInventory}</b>
+     * （它只存在于服务端那一侧）。
+     *
+     * <p>旧判定因此恒为 false，实机表现为：打开末影箱 → 被判成「不是末影箱」→ 关掉 →
+     * 下一 tick 再打开 → 再关掉 …… 一直循环到 15 秒超时。
+     *
+     * <p>现在按「界面形态 + 点击位置 + 方块类型」三重认定：9x3 通用容器（63 槽）、
+     * 我们最后一次点击的就是 {@link #enderTarget}、而且那一格现在仍然是末影箱。
+     * 这样既不会把普通箱子误认成末影箱（位置对不上），也不会被客户端背包类型骗到。
      */
     private boolean enderChestOpen() {
+        if (enderTarget == null || !containerOpen()) return false;
         ScreenHandler handler = containerHandler();
-        return handler instanceof GenericContainerScreenHandler generic
-            && generic.getInventory() instanceof EnderChestInventory;
+        if (!StashMoveLogic.isEnderScreenShape(handler instanceof GenericContainerScreenHandler,
+            handler == null ? 0 : handler.slots.size())) return false;
+        if (!enderTarget.equals(openChest)) return false;  // 我们点的就是这一台
+        return mc.world != null && mc.world.getBlockState(enderTarget).getBlock() == Blocks.ENDER_CHEST;
     }
 
     /**
@@ -3898,7 +3915,9 @@ public class StashMover extends Module {
         }
         enderChestCache = best;
         if (best != null) {
-            debugMsg("[末影箱] 附近找到一台，距 " + String.format(Locale.ROOT, "%.1f", Math.sqrt(bestD)) + " 格");
+            debugMsg("[末影箱] 附近找到一台，格距 " + String.format(Locale.ROOT, "%.1f", Math.sqrt(bestD))
+                + "，眼→箱体 " + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(best))
+                + " 格（开箱距离 " + String.format(Locale.ROOT, "%.1f", openReach.get()) + "）");
         }
         return best;
     }
@@ -3932,9 +3951,14 @@ public class StashMover extends Module {
         if (ender == null) return false;
         enderTarget = ender;
         enderStateStart = tick;
+        enderCloseCount = 0;
+        enderOpenLogged = false;
         closeScreen();
         enterState.run();
-        debugMsg("[末影箱] 背包满 → 先把货存进附近末影箱");
+        debugMsg("[末影箱] 背包满 → 先把货存进附近末影箱（眼→箱体 "
+            + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(ender)) + " 格 / 开箱距离 "
+            + String.format(Locale.ROOT, "%.1f", openReach.get()) + "，"
+            + (eyeBoxDistance(ender) <= openReach.get() ? "够得着" : "需要走近") + "）");
         return true;
     }
 
@@ -3952,8 +3976,12 @@ public class StashMover extends Module {
         if (ender == null) return false;
         enderTarget = ender;
         enderStateStart = tick;
+        enderCloseCount = 0;
+        enderOpenLogged = false;
         enterState.run();
-        debugMsg("[末影箱] 背包卸空 → 去把末影箱里的货取出来");
+        debugMsg("[末影箱] 背包卸空 → 去把末影箱里的货取出来（眼→箱体 "
+            + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(ender)) + " 格 / 开箱距离 "
+            + String.format(Locale.ROOT, "%.1f", openReach.get()) + "）");
         return true;
     }
 
@@ -3971,6 +3999,15 @@ public class StashMover extends Module {
         }
         if (!enderChestOpen()) {
             if (containerOpen()) {
+                // 上一个容器还没关干净（或手动开了别的箱子）：关掉重开，但不允许无限循环
+                if (++enderCloseCount > ENDER_CLOSE_LIMIT) {
+                    closeScreen();
+                    enderPutDone = true;
+                    warning("末影箱界面识别异常（连续关掉 " + enderCloseCount
+                        + " 次非末影箱界面），本趟跳过中转；请确认末影箱位置没有被别的箱子挡住");
+                    return false;
+                }
+                debugMsg("[末影箱] 当前界面不是那台末影箱，先关掉（第 " + enderCloseCount + " 次）");
                 closeScreen();
                 cooldown = 5;
                 return true;
@@ -3980,6 +4017,14 @@ public class StashMover extends Module {
                 return false;
             }
             goOpenChest(enderTarget, false);
+            // 四周确实没有「站过去够得着」的格子：立即降级，不要干等超时
+            if (chestNoSpot.contains(enderTarget)) {
+                closeScreen();
+                enderPutDone = true;
+                warning("末影箱四周没有可站的格子（或都超出开箱距离 "
+                    + String.format(Locale.ROOT, "%.1f", openReach.get()) + " 格），本趟跳过中转");
+                return false;
+            }
             // 末影箱打不开就降级（不能让它触发 openChestAt 的「连续 8 次」硬停）
             if (openAttempts >= 5) {
                 closeScreen();
@@ -3988,6 +4033,11 @@ public class StashMover extends Module {
                 return false;
             }
             return true;
+        }
+        if (!enderOpenLogged) {
+            enderOpenLogged = true;
+            enderCloseCount = 0;
+            debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始存货");
         }
         // 容量上限：27 格全满就停手，剩下的继续背着走（到存储区照常卸）
         if (containerIsFull()) {
@@ -4022,11 +4072,26 @@ public class StashMover extends Module {
         }
         if (!enderChestOpen()) {
             if (containerOpen()) {
+                if (++enderCloseCount > ENDER_CLOSE_LIMIT) {
+                    closeScreen();
+                    enderTakeDone = true;
+                    warning("末影箱界面识别异常（连续关掉 " + enderCloseCount
+                        + " 次非末影箱界面），剩余货物留在箱里；请确认存储区末影箱位置");
+                    return false;
+                }
+                debugMsg("[末影箱] 当前界面不是那台末影箱，先关掉（第 " + enderCloseCount + " 次）");
                 closeScreen();
                 cooldown = 5;
                 return true;
             }
             goOpenChest(enderTarget, false);
+            if (chestNoSpot.contains(enderTarget)) {
+                closeScreen();
+                enderTakeDone = true;
+                warning("末影箱四周没有可站的格子（或都超出开箱距离 "
+                    + String.format(Locale.ROOT, "%.1f", openReach.get()) + " 格），剩余货物留在箱里");
+                return false;
+            }
             if (openAttempts >= 5) {
                 closeScreen();
                 enderTakeDone = true;
@@ -4034,6 +4099,11 @@ public class StashMover extends Module {
                 return false;
             }
             return true;
+        }
+        if (!enderOpenLogged) {
+            enderOpenLogged = true;
+            enderCloseCount = 0;
+            debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始取货");
         }
         if (containerEmpty()) {
             closeScreen();
@@ -4101,6 +4171,8 @@ public class StashMover extends Module {
         enderTakeDone = false;
         enderTarget = null;
         enderStateStart = 0;
+        enderCloseCount = 0;
+        enderOpenLogged = false;
     }
 
     /** 背包里是否还有“可以存进存储箱”的东西（珍珠、只拿潜影盒时的非潜影盒都排除）。 */
@@ -4497,9 +4569,13 @@ public class StashMover extends Module {
 
         // ② 箱子所在区块没加载 / 方块已经不在了：**不能判成「没有落脚点」**
         //    （否则会把存储箱/珍珠箱永久拉黑），原地等它加载/等人工处理。
+        //    ⚠️ V6.7p29：这里必须把末影箱也算进来。p27 加末影箱时漏了这一处，
+        //    导致「末影箱在 2 格外（不在开箱距离内）」时直接返回 MOVING、根本不寻路，
+        //    人就站在原地等 15 秒超时 —— 实机表现就是「检测到了但不打开」。
         var posState = mc.world.getBlockState(pos);
         if (!(posState.getBlock() instanceof ChestBlock)
-            && !(posState.getBlock() instanceof ShulkerBoxBlock)) {
+            && !(posState.getBlock() instanceof ShulkerBoxBlock)
+            && !(posState.getBlock() instanceof EnderChestBlock)) {
             return Approach.MOVING;
         }
 

@@ -157,6 +157,23 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 末影箱界面的「形态签名」（V6.7p29）。
+     *
+     * <p>客户端拿到的末影箱界面是 {@code GENERIC_9X3}：27 容器 + 36 背包 = 63 槽。
+     * 关键坑：客户端的底层背包是 {@code SimpleInventory(27)} 而不是
+     * {@code EnderChestInventory} —— 后者只在服务端存在，客户端
+     * {@code HandledScreens} 用 {@code GenericContainerScreenHandler.createGeneric9x3}
+     * 建界面时是 {@code new SimpleInventory(9 * 3)}。所以「instanceof EnderChestInventory」
+     * 在客户端恒为 false，只能按「通用容器 + 63 槽 + 坐标是末影箱」来认。
+     *
+     * @param genericHandler 界面处理器是否为 {@code GenericContainerScreenHandler}
+     * @param totalSlots     处理器总槽数（含玩家背包 36 格）
+     */
+    public static boolean isEnderScreenShape(boolean genericHandler, int totalSlots) {
+        return genericHandler && totalSlots == 63;
+    }
+
+    /**
      * 双箱另一半的偏移（dx, dz）。
      *
      * @param left   是否是双箱的左半（ChestType.LEFT）

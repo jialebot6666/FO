@@ -489,4 +489,15 @@ class StashMoveLogicTest {
         assertTrue(StashMoveLogic.shouldStoreInEnder("minecraft:iron_ingot"));
         assertFalse(StashMoveLogic.shouldStoreInEnder(null));
     }
+
+    // ==================== V6.7p29：末影箱界面识别（防开/关死循环回归） ====================
+
+    @Test
+    void 末影箱界面_只认9x3通用容器() {
+        assertTrue(StashMoveLogic.isEnderScreenShape(true, 63), "27 容器 + 36 背包");
+        assertFalse(StashMoveLogic.isEnderScreenShape(false, 63), "潜影盒界面同为 63 槽，但不是通用容器");
+        assertFalse(StashMoveLogic.isEnderScreenShape(true, 90), "大箱子 54+36 不是 9x3");
+        assertFalse(StashMoveLogic.isEnderScreenShape(true, 27), "没算背包格的不算");
+        assertFalse(StashMoveLogic.isEnderScreenShape(false, 0), "空处理器一律不算");
+    }
 }
