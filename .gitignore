@@ -1,3 +1,8 @@
+# 本地临时凭据：token 只许放这里，绝不入库（docs/windows-build.md 第 6 节的 .ghtoken）
+.ghtoken
+.ghtoken.*
+**/.ghtoken
+
 # 系统临时目录
 .tmp-tool-results/
 
