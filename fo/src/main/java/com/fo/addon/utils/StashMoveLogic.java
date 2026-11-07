@@ -174,6 +174,16 @@ public final class StashMoveLogic {
     }
 
     /**
+     * 分区坐标设置是否已填写（V6.7p30）：{@code 0,0,0} = 未设置。
+     *
+     * <p>沿用存储箱 / 珍珠箱坐标的既有约定：留空交给自动逻辑，
+     * 填了就强制用那一格（并做方块校验，不是末影箱就回退自动）。
+     */
+    public static boolean isCoordSet(int x, int y, int z) {
+        return x != 0 || y != 0 || z != 0;
+    }
+
+    /**
      * 双箱另一半的偏移（dx, dz）。
      *
      * @param left   是否是双箱的左半（ChestType.LEFT）
