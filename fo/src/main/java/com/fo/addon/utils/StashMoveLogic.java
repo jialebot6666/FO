@@ -315,7 +315,49 @@ public final class StashMoveLogic {
     // ==================== V6.7p22：投掷侧的几何判定 ====================
 
     /** 竖直薄板贴在方块的哪一侧（活板门开启时的门板）。 */
-    public enum BoxSide { EAST, WEST, SOUTH, NORTH, UNKNOWN }
+    public enum BoxSide {
+        EAST, WEST, SOUTH, NORTH, UNKNOWN;
+
+        /** 对侧（东↔西、南↔北）；UNKNOWN 仍返回 UNKNOWN。 */
+        public BoxSide opposite() {
+            return switch (this) {
+                case EAST -> WEST;
+                case WEST -> EAST;
+                case SOUTH -> NORTH;
+                case NORTH -> SOUTH;
+                default -> UNKNOWN;
+            };
+        }
+    }
+
+    /**
+     * 投掷该站哪一侧（V6.7p24）。
+     *
+     * <p>三个来源，优先级从高到低：
+     * <ol>
+     *   <li>{@code signSide}：活板门上方告示牌的**牌面朝向**（人站在牌的正对面，也就是牌面指的那一侧）；</li>
+     *   <li>{@code doorFacing}：活板门放置时的 FACING（原版门板恒在 FACING 的对侧，站 FACING 侧就是站门板对面）；</li>
+     *   <li>{@code panelSide}：开启后门板实际占的那一侧，取其对面。</li>
+     * </ol>
+     *
+     * <p>前两个在<b>门关着</b>时也能读到，这正是旧实现（只读开启后的碰撞箱）在门关着时
+     * 选不出站位、只能退回环形搜索的原因。
+     *
+     * <p><b>物理否决</b>：不管选到谁，都不能是门板所在侧 —— 人贴过去会被门板顶住，
+     * 珍珠也进不了柱。真遇到告示牌贴反的结构，就改成门板对侧。
+     *
+     * @return 该站的一侧；三个来源都读不出时返回 {@link BoxSide#UNKNOWN}
+     */
+    public static BoxSide pickThrowSide(BoxSide signSide, BoxSide doorFacing, BoxSide panelSide) {
+        BoxSide side = null;
+        if (signSide != null && signSide != BoxSide.UNKNOWN) side = signSide;
+        else if (doorFacing != null && doorFacing != BoxSide.UNKNOWN) side = doorFacing;
+
+        BoxSide panel = (panelSide == null || panelSide == BoxSide.UNKNOWN) ? null : panelSide;
+        if (side == null) side = panel == null ? null : panel.opposite();
+        if (side != null && panel != null && side == panel) side = panel.opposite();
+        return side == null ? BoxSide.UNKNOWN : side;
+    }
 
     /**
      * 从碰撞箱判断「竖着的薄板贴在哪一侧」（V6.7p22 修复）。
