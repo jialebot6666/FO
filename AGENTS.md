@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p35`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p35-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p36`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p36-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -819,6 +819,16 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     三号 enterStuck）——此时才是真「漏斗故障」。
   - 该等待与「1 tick 开关」无关，慢速模式同样受益（漏斗临时卡住不再误判）。
   - 测试：状态机/时间行为无可单测纯逻辑；全仓 **53 套件 474 测试全绿**。
+- ✅ 6.7p36 已实现：**三号单箱「等待箱子填充」**（P1-8，对齐双号 REFILL，用户确认后落地）。
+  - `TrioState` 加 `REFILL` + `trioRefill()`（镜像 `dualRefill`，目标 = `sourceTarget`）：
+    开箱验空 → 空则关界面等下一轮；「有物品了」→ 清拉黑回 LOOT；超时（`等待超时`，默认 30 秒）
+    → 背包空关模块 / 有货先送存储；等待期间每轮喂 progress 防看门狗。
+  - 触发点两处：单箱取空（不拉黑进 REFILL）；`nextLootChest()==null` 且无过滤箱（含此前被拉黑的场景，
+    进 REFILL 时清拉黑）。`waitForFill` / `waitTimeout` 设置可见性放宽到「三号 + 单箱」（名字不变，配置兼容）。
+  - 双号 REFILL 等待尾巴同步补 progress（等待超时可调大于 2 分钟时不被看门狗误杀）。
+  - ⚠️ Java 细节：设置 `visible()` lambda 引用声明在后面的字段要写 `this.sourceChestMode`
+    （简单名会报「非法前向引用」）。
+  - 测试：全仓 **53 套件 474 测试全绿**。
 - ✅ 6.7p30 已实现：**末影箱分区坐标（混合模式：坐标优先 + 校验 + 自动扫描兜底）**。
   - 末影箱组新增 4 条坐标设置（`0,0,0` = 留空 = 自动扫描，老配置零回归）：
     双号「取货区末影箱位置 / 存储区末影箱位置」，三号「待搬运箱区末影箱位置 / 存储箱区末影箱位置」，

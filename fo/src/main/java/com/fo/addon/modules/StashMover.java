@@ -188,7 +188,7 @@ public class StashMover extends Module {
      * （用户实机反馈：以前一落地就立刻开活板门/脱离，地形还没同步，判断全乱）。
      */
     private enum TrioState {
-        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, ENDER_PUT, UNLOAD, ENDER_TAKE, SEND, WAIT_TELEPORT, STUCK
+        ARRIVE_WAIT, SETTLE, RESTOCK, THROW, LOOT, ENDER_PUT, UNLOAD, ENDER_TAKE, SEND, WAIT_TELEPORT, STUCK, REFILL
     }
 
     // ==================== 设置 ====================
@@ -405,18 +405,21 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> waitForFill = sgMover.add(new BoolSetting.Builder()
         .name("等待箱子填充")
-        .description("「单箱子」模式：箱子拿空后原地等它重新填满。")
+        .description("「单箱子」模式：箱子拿空后原地等它重新填满（双号/三号通用）。")
         .defaultValue(true)
-        .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.SINGLE)
+        .visible(() -> (mode.get() == Mode.MOVER && chestMode.get() == ChestMode.SINGLE)
+            || (mode.get() == Mode.TRIO && isMoverRole() && this.sourceChestMode.get() == ChestMode.SINGLE))
         .build());
 
     private final Setting<Integer> waitTimeout = sgMover.add(new IntSetting.Builder()
         .name("等待超时")
-        .description("等箱子填充最多等多少秒。")
+        .description("等箱子填充最多等多少秒（双号/三号通用）。")
         .defaultValue(30)
         .min(1)
         .sliderMax(60)
-        .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.SINGLE && waitForFill.get())
+        .visible(() -> ((mode.get() == Mode.MOVER && chestMode.get() == ChestMode.SINGLE)
+            || (mode.get() == Mode.TRIO && isMoverRole() && this.sourceChestMode.get() == ChestMode.SINGLE))
+            && waitForFill.get())
         .build());
 
     private final Setting<Boolean> closeWhenFull = sgMover.add(new BoolSetting.Builder()
@@ -2044,6 +2047,7 @@ public class StashMover extends Module {
             }
             return;
         }
+        progress();   // 等刷新是有意义的动作，防 2 分钟看门狗（等待超时可调大于 120 秒）
         closeScreen();
         cooldown = 20;
     }
@@ -2122,6 +2126,7 @@ public class StashMover extends Module {
             case THROW -> trioThrow();
             case LOOT -> trioLoot();
             case ENDER_PUT -> trioEnderPut();
+            case REFILL -> trioRefill();
             case UNLOAD -> trioUnload();
             case ENDER_TAKE -> trioEnderTake();
             case SEND -> trioSend();
@@ -2171,6 +2176,17 @@ public class StashMover extends Module {
                 return;
             }
 
+            // V6.7p36：三号单箱 + 「等待箱子填充」→ 等刷新而不是拉黑搬空（对齐双号 REFILL）
+            if (mode.get() == Mode.TRIO && sourceChestMode.get() == ChestMode.SINGLE
+                && waitForFill.get() && openChest.equals(sourceTarget.get())) {
+                closeScreen();
+                refillStartTick = tick;
+                blacklist.remove(openChest);
+                openChest = null;
+                info("待搬运箱已空，等待刷新…");
+                setTrioState(TrioState.REFILL, "待搬运箱已空，等待刷新");
+                return;
+            }
             debugMsg("[取货] 这个箱子取完了，拉黑并找下一个");
             blacklistChest(openChest);
             openChest = null;
@@ -2185,6 +2201,15 @@ public class StashMover extends Module {
             if (filteredCount() > 0) {
                 warnFiltered();
                 progress();
+                return;
+            }
+            // V6.7p36：三号单箱 + 「等待箱子填充」→ 等刷新（含此前被拉黑过的场景）
+            if (mode.get() == Mode.TRIO && sourceChestMode.get() == ChestMode.SINGLE
+                && waitForFill.get() && !sourceTarget.get().equals(BlockPos.ORIGIN)) {
+                refillStartTick = tick;
+                blacklist.remove(sourceTarget.get());
+                info("待搬运箱已空，等待刷新…");
+                setTrioState(TrioState.REFILL, "待搬运箱已空，等待刷新");
                 return;
             }
             enterStuck("待搬运箱区已搬空（没有可搬的箱子了）");
@@ -2255,6 +2280,46 @@ public class StashMover extends Module {
             setTrioState(TrioState.UNLOAD, "末影箱取货完成，继续卸货");
             cooldown = PACE_STEP;
         }
+    }
+
+    /**
+     * 三号单箱「等待填充」（V6.7p36，对齐双号 dualRefill）：
+     * 待搬运箱拿空后原地等它重新填满（漏斗/箱子刷新），到点按背包情况收尾。
+     */
+    private void trioRefill() {
+        BlockPos chestPos = sourceTarget.get();
+        if (chestPos.equals(BlockPos.ORIGIN)) {
+            enterStuck("单箱子模式请先设置待搬运箱位置");
+            return;
+        }
+        if (!(mc.world.getBlockState(chestPos).getBlock() instanceof ChestBlock)) {
+            enterStuck("待搬运箱不存在");
+            return;
+        }
+        if (!containerOpen()) {
+            if (!goOpenChest(chestPos)) return;
+            return;
+        }
+        if (!containerEmpty()) {
+            closeScreen();
+            blacklist.remove(chestPos);
+            info("箱子有物品了，继续搬运");
+            setTrioState(TrioState.LOOT, "待搬运箱已刷新，继续取货");
+            return;
+        }
+        if ((tick - refillStartTick) / 20 >= waitTimeout.get()) {
+            closeScreen();
+            if (inventoryEmpty()) {
+                info("背包已空，关闭模块");
+                toggle();
+            } else {
+                setTrioState(TrioState.SEND, "等待超时，先送已有的货");
+            }
+            return;
+        }
+        progress();   // 等刷新是有意义的动作，防 2 分钟看门狗
+        closeScreen();
+        cooldown = 20;
     }
 
     /** 三号：卸货真正结束（卸空 + 末影箱也取完）→ 计趟数、清标记、回发信。 */
