@@ -65,9 +65,15 @@ import java.util.stream.Stream;
  * <b>目标列表为空 / 手上不是可接受武器 / 关闭模块</b>时结束会话并切回；暂停类守卫
  * （使用物品、仅点击、卡顿、水晶光环）直接 return，<b>不</b>结束会话（与官方一致）。
  *
- * <p>⚠️ 已知遗留（本轮刻意不动，避免扩大改动面，需要时另行确认）：
- * {@code 停止格挡} 设置声明后从未被读取（{@code shouldShieldBreak()} 恒返回 false，属死设置）；
- * {@code attack()} 在非「发包攻击」分支下会重复执行一次攻击与挥手。
+ * <p>V6.7p32 两项修复（用户确认后实施）：
+ * <ol>
+ *   <li><b>删除「停止格挡」死设置</b>：该设置声明后从未被读取（{@code shouldShieldBreak()}
+ *       恒返回 false），删设置 + 删方法 + 删 {@code itemInHand()} 里的死分支。</li>
+ *   <li><b>修复「每次攻击执行两次」</b>：旧 {@code attack()} 先打一次
+ *       {@code attackEntity}，分支里又打一次（默认=双 {@code attackEntity}；
+ *       发包模式=多一个攻击包，服务端同样收到两次攻击）。现在两种模式都只执行
+ *       <b>一次</b>攻击：默认走正规 {@code attackEntity}，发包模式只发攻击包。</li>
+ * </ol>
  */
 public class FOKillAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -119,13 +125,6 @@ public class FOKillAura extends Module {
     private final Setting<Boolean> stopSprint = sgGeneral.add(new BoolSetting.Builder()
         .name("停止疾跑")
         .description("攻击前停止疾跑以保持原版行为")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Boolean> stopShield = sgGeneral.add(new BoolSetting.Builder()
-        .name("停止格挡")
-        .description("攻击前自动处理盾牌格挡")
         .defaultValue(false)
         .build()
     );
@@ -434,10 +433,6 @@ public class FOKillAura extends Module {
         }
     }
 
-    private boolean shouldShieldBreak() {
-        return false;
-    }
-
     private boolean entityCheck(Entity entity) {
         if (entity.equals(mc.player)) return false;
         if ((entity instanceof LivingEntity livingEntity && livingEntity.isDead()) || !entity.isAlive()) return false;
@@ -514,19 +509,19 @@ public class FOKillAura extends Module {
         Rotation rotation = new Rotation(hitVec).setPriority(10);
         RotationManager.getInstance().register(rotation);
 
-        mc.interactionManager.attackEntity(mc.player, target);
-        mc.player.swingHand(Hand.MAIN_HAND);
-
+        // V6.7p32：修复「每次攻击执行两次」。旧实现上面先打一次 attackEntity，
+        // 这里分支里又打一次 —— 默认 = 双 attackEntity（服务端收到 2 个攻击包），
+        // 发包模式 = 正规攻击 + 额外攻击包（同样 2 个）。现在两种模式都只执行一次攻击：
+        // 默认走正规 attackEntity（带选中槽位同步 + 客户端攻击逻辑），
+        // 发包模式只发攻击包（不再夹带一次正规攻击）。
         if (packetAttack.get()) {
             mc.getNetworkHandler().sendPacket(PlayerInteractEntityC2SPacket.attack(target, mc.player.isSneaking()));
-            mc.player.swingHand(Hand.MAIN_HAND);
         } else {
             mc.interactionManager.attackEntity(mc.player, target);
-            mc.player.swingHand(Hand.MAIN_HAND);
         }
+        mc.player.swingHand(Hand.MAIN_HAND);
 
         hitTimer = 0;
-
         if (this.rotation.get() == RotationMode.OnHit) {
             RotationManager.getInstance().sync();
         }
@@ -534,7 +529,6 @@ public class FOKillAura extends Module {
 
     private boolean itemInHand() {
         Item item = mc.player.getMainHandStack().getItem();
-        if (shouldShieldBreak()) return item instanceof AxeItem;
 
         return switch (weapon.get()) {
             case Axe -> item instanceof AxeItem;
