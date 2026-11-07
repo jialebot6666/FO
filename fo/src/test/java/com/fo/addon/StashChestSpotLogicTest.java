@@ -71,4 +71,24 @@ public class StashChestSpotLogicTest {
         double oneUp = StashChestSpotLogic.score(true, 9.0, 1);
         assertTrue(sameLevel < oneUp, "能不往上爬就不往上爬");
     }
+
+    // ==================== V6.7p28：点不开时「再靠近一格」 ====================
+
+    @Test
+    void 最近候选_同层比上一层更近() {
+        List<int[]> cands = List.of(
+            new int[]{102, 64, 200},   // 水平 2，d² = 4
+            new int[]{101, 65, 200},   // 水平 1 + 上一层，d² = 2
+            new int[]{101, 64, 200}    // 水平 1，同层，d² = 1
+        );
+        int[] best = StashChestSpotLogic.nearestToChest(100, 64, 200, cands);
+        assertEquals(101, best[0]);
+        assertEquals(64, best[1]);
+        assertEquals(200, best[2]);
+    }
+
+    @Test
+    void 最近候选_空列表返回null() {
+        assertEquals(null, StashChestSpotLogic.nearestToChest(0, 64, 0, List.of()));
+    }
 }

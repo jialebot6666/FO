@@ -54,6 +54,29 @@ public final class StashChestSpotLogic {
      * @param distSq  该落脚点到玩家的平方距离
      * @param dy      该落脚点相对箱子的高度差（0 或 +1）
      */
+    /**
+     * 从候选里挑「离箱子中心最近」的一个（V6.7p28：点不开时再靠近一格用）。
+     *
+     * <p>按 3D 平方距离算，同层格优先于上一层（同水平距离时 {@code dy=0} 更近）。
+     *
+     * @return 最近的候选；候选为空时返回 null
+     */
+    public static int[] nearestToChest(int chestX, int chestY, int chestZ, List<int[]> cands) {
+        int[] best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int[] c : cands) {
+            double dx = (c[0] + 0.5) - (chestX + 0.5);
+            double dy = (c[1] + 0.5) - (chestY + 0.5);
+            double dz = (c[2] + 0.5) - (chestZ + 0.5);
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) {
+                bestD = d;
+                best = c;
+            }
+        }
+        return best;
+    }
+
     public static double score(boolean hasLos, double distSq, int dy) {
         double s = hasLos ? 0.0 : 1_000_000.0;   // 没视线的排到最后，但仍然可用（发包开箱）
         s += distSq;
