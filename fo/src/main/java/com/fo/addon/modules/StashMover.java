@@ -24,6 +24,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockPosSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -227,6 +228,15 @@ public class StashMover extends Module {
         .name("调试输出")
         .description("在聊天栏输出状态机调试信息。")
         .defaultValue(false)
+        .build());
+
+    private final Setting<Double> openReach = sgGeneral.add(new DoubleSetting.Builder()
+        .name("开箱距离")
+        .description("眼睛到方块**包围盒**的最大距离（与服务端 canInteractWithBlockAt 同一口径）。"
+            + "反作弊严格的服建议 2.0；调大只会在更远处点击，可能被服务端静默拒绝。")
+        .defaultValue(2.0)
+        .min(1.0)
+        .sliderMax(4.0)
         .build());
 
     private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
@@ -2378,7 +2388,7 @@ public class StashMover extends Module {
             // 射线打到搭档那半块时旧写法一律判“没对上”→ 每次点击都掉进手搓包兜底（无预测）；
             // 而两半块点开的是同一个箱子，认它没有副作用。
             BlockPos partner = chestPartner(pos);
-            if (mc.player.raycast(OPEN_REACH + 1.0, 1.0F, false) instanceof BlockHitResult hit
+            if (mc.player.raycast(openReach.get() + 1.5, 1.0F, false) instanceof BlockHitResult hit
                 && isSameChest(hit.getBlockPos(), pos, partner)) {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
                 return;
@@ -4171,7 +4181,8 @@ public class StashMover extends Module {
     }
 
     /** 开箱的有效距离（眼睛到方块中心，单位格）。超过就先寻路靠近，绝不隔空点。 */
-    private static final double OPEN_REACH = 3.5;
+    /** 点不开时「再靠近一格」的目标距离：眼→包围盒 ≤ 这个值就不再往前挤。 */
+    private static final double CLOSER_STOP_DIST = 1.2;
 
     /**
      * 统一的“走过去”入口（V6.7p5）。
@@ -4271,10 +4282,27 @@ public class StashMover extends Module {
         }
     }
 
-    /** 现在这一格够不够得着箱子（眼睛到方块中心 ≤ {@link #OPEN_REACH}）。 */
+    /**
+     * 眼睛到方块**包围盒**的距离（V6.7p28，与服务端同一口径）。
+     *
+     * <p>服务端 {@code PlayerEntity.canInteractWithBlockAt} 用的是
+     * {@code new Box(blockPos).squaredMagnitude(eyePos)}，不是「到方块中心」——
+     * 角落/斜向时两者能差 1 格以上，按中心算会误判成「够得着」。
+     */
+    private double eyeBoxDistance(BlockPos pos) {
+        if (mc.player == null || pos == null) return Double.MAX_VALUE;
+        return Math.sqrt(new Box(pos).squaredMagnitude(mc.player.getEyePos()));
+    }
+
+    /** 站在某个落脚点上时，眼睛到箱子包围盒的距离（选落脚点时预筛用）。 */
+    private double eyeBoxDistanceAt(BlockPos feet, BlockPos chest) {
+        Vec3d eye = new Vec3d(feet.getX() + 0.5, feet.getY() + 1.62, feet.getZ() + 0.5);
+        return Math.sqrt(new Box(chest).squaredMagnitude(eye));
+    }
+
+    /** 现在这一格够不够得着（眼睛到包围盒 ≤ 「开箱距离」设置）。 */
     private boolean canOpenFromHere(BlockPos pos) {
-        if (mc.player == null || pos == null) return false;
-        return mc.player.getEyePos().distanceTo(Vec3d.ofCenter(pos)) <= OPEN_REACH;
+        return eyeBoxDistance(pos) <= openReach.get();
     }
 
     /**
@@ -4309,6 +4337,8 @@ public class StashMover extends Module {
         for (int[] c : StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ())) {
             BlockPos p = new BlockPos(c[0], c[1], c[2]);
             if (!isStandable(p)) continue;
+            // 站过去必须真的够得着（V6.7p28：按包围盒距离预筛，否则选到 2 格外的点会永远开不了）
+            if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
             boolean los = hasLineOfSight(p, chest, partner);
             double distSq = mc.player.getBlockPos().getSquaredDistance(p);
             double score = StashChestSpotLogic.score(los, distSq, c[1] - chest.getY());
@@ -4330,6 +4360,19 @@ public class StashMover extends Module {
         debugMsg("[接近] 落脚点" + (best.los() ? "有视线" : "无视线（发包开箱）")
             + "，水平距 " + String.format(Locale.ROOT, "%.1f", dist) + " 格");
         return best;
+    }
+
+    /** 找「离箱子最近、且站过去够得着」的可站格 —— 点不开时往这里再挤一格（V6.7p28）。 */
+    private BlockPos findClosestChestSpot(BlockPos chest) {
+        List<int[]> cands = new ArrayList<>();
+        for (int[] c : StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ())) {
+            BlockPos p = new BlockPos(c[0], c[1], c[2]);
+            if (!isStandable(p)) continue;
+            if (eyeBoxDistanceAt(p, chest) > openReach.get()) continue;
+            cands.add(c);
+        }
+        int[] best = StashChestSpotLogic.nearestToChest(chest.getX(), chest.getY(), chest.getZ(), cands);
+        return best == null ? null : new BlockPos(best[0], best[1], best[2]);
     }
 
     /**
@@ -4434,6 +4477,18 @@ public class StashMover extends Module {
     private Approach approachChest(BlockPos pos) {
         if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return Approach.NO_SPOT;
 
+        // 已经点了几次没开（V6.7p28）：判定口径没问题的话，就是服务端嫌远 → 再靠近一格
+        int tries = pos.equals(openChest) ? openAttempts : 0;
+        if (tries >= 2 && eyeBoxDistance(pos) > CLOSER_STOP_DIST) {
+            BlockPos closer = findClosestChestSpot(pos);
+            if (closer != null && eyeBoxDistanceAt(closer, pos) < eyeBoxDistance(pos)) {
+                debugMsg("[开箱] 点了 " + tries + " 次没开 → 再靠近一格（眼→箱体 "
+                    + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(pos)) + "）");
+                pathTo(closer, PathGoal.PRECISE);
+                return Approach.MOVING;
+            }
+        }
+
         // ① 已经在可点击距离内：停路 + 松键，直接开
         if (canOpenFromHere(pos)) {
             stopApproachPath();
@@ -4499,8 +4554,9 @@ public class StashMover extends Module {
         openAttempts++;
         Vec3d center = Vec3d.ofCenter(pos);
         debugMsg("[开箱] 点击第 " + openAttempts + " 次"
-            + "（眼睛距 " + String.format(Locale.ROOT, "%.2f", mc.player.getEyePos().distanceTo(center))
-            + " / 阈值 " + OPEN_REACH + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
+            + "（眼→箱体 " + String.format(Locale.ROOT, "%.2f", eyeBoxDistance(pos))
+            + " / 上限 " + String.format(Locale.ROOT, "%.1f", openReach.get())
+            + "，界面=" + (mc.currentScreen == null ? "无" : mc.currentScreen.getClass().getSimpleName()) + "）");
         realClick(pos);
         cooldown = 15;
         progress();
