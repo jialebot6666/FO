@@ -365,4 +365,59 @@ class StashMoveLogicTest {
         assertFalse(StashMoveLogic.isProtectedChest(100, 65, 200, anchors), "y 不同不算同一个箱子");
         assertFalse(StashMoveLogic.isProtectedChest(0, 0, 0, null));
     }
+
+    // ==================== V6.7p22：门板朝向 / 珍珠是否真在柱内 ====================
+
+    @Test
+    void 门板朝向_南北向不能被误判成东() {
+        // 这是 V6.7p21 及以前的真实 bug：门板贴南/北时 X 占满，maxX=1 会被优先判成「东」，
+        // 正对面就算成了垂直的侧面（实机表现「往两旁投」）。
+        assertEquals(StashMoveLogic.BoxSide.SOUTH, StashMoveLogic.thinPanelSide(0.0, 0.8125, 1.0, 1.0));
+        assertEquals(StashMoveLogic.BoxSide.NORTH, StashMoveLogic.thinPanelSide(0.0, 0.0, 1.0, 0.1875));
+        // 东西向本来就是对的，别改坏
+        assertEquals(StashMoveLogic.BoxSide.EAST, StashMoveLogic.thinPanelSide(0.8125, 0.0, 1.0, 1.0));
+        assertEquals(StashMoveLogic.BoxSide.WEST, StashMoveLogic.thinPanelSide(0.0, 0.0, 0.1875, 1.0));
+    }
+
+    @Test
+    void 门板朝向_平放或异常形状一律未知() {
+        // 关着的活板门：平铺薄板，X/Z 都占满 → 不该猜任何一侧
+        assertEquals(StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.thinPanelSide(0.0, 0.0, 1.0, 1.0));
+        // 又厚又不满：不是竖板
+        assertEquals(StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.thinPanelSide(0.4, 0.4, 0.6, 0.6));
+    }
+
+    @Test
+    void 珍珠检测_只认柱内不认旁边方块() {
+        // 柱心 (0.5, 0.5)，容差 0.55
+        assertTrue(StashMoveLogic.pearlInColumn(0.5, 0.5, 0, 0, 0.55));
+        assertTrue(StashMoveLogic.pearlInColumn(1.05, 1.0, 0, 0, 0.55), "柱内贴边仍算");
+        // 旧容差 0.9 会把下面这个算成「在柱内」——旁边方块上的珍珠
+        assertFalse(StashMoveLogic.pearlInColumn(1.3, 0.5, 0, 0, 0.55));
+        assertFalse(StashMoveLogic.pearlInColumn(0.5, 1.4, 0, 0, 0.55));
+        assertTrue(StashMoveLogic.pearlInColumn(0.5, 0.5, 0, 0, 0.55), "柱心必须命中");
+    }
+
+    @Test
+    void 正前方判定_贴边过程中不会半途被退回() {
+        // 正前方 = 东（frontDx=1, frontDz=0），玩家从格心 (1.0, 0) 一路贴到 (0.1, 0)
+        assertTrue(StashMoveLogic.onFrontSide(1.0, 0.0, 1, 0, 0.45), "正前方格心");
+        assertTrue(StashMoveLogic.onFrontSide(0.5, 0.0, 1, 0, 0.45), "贴边到一半");
+        assertTrue(StashMoveLogic.onFrontSide(0.1, 0.0, 1, 0, 0.45), "贴到边缘");
+        // 跨过柱心 / 站在别的方向 / 偏离中线太多 / 离得太远，都不算
+        assertFalse(StashMoveLogic.onFrontSide(0.0, 0.0, 1, 0, 0.45), "已到柱心");
+        assertFalse(StashMoveLogic.onFrontSide(-0.5, 0.0, 1, 0, 0.45), "在门板那一侧");
+        assertFalse(StashMoveLogic.onFrontSide(0.0, 1.0, 1, 0, 0.45), "在垂直侧面");
+        assertFalse(StashMoveLogic.onFrontSide(1.0, 0.5, 1, 0, 0.45), "偏离中线");
+        assertFalse(StashMoveLogic.onFrontSide(1.3, 0.0, 1, 0, 0.45), "离得太远");
+    }
+
+    @Test
+    void 正前方判定_南北向同样成立() {
+        // 正前方 = 南（frontDx=0, frontDz=1）
+        assertTrue(StashMoveLogic.onFrontSide(0.0, 1.0, 0, 1, 0.45));
+        assertTrue(StashMoveLogic.onFrontSide(0.0, 0.2, 0, 1, 0.45));
+        assertFalse(StashMoveLogic.onFrontSide(1.0, 0.0, 0, 1, 0.45), "东西侧不算正前方");
+        assertFalse(StashMoveLogic.onFrontSide(0.0, -1.0, 0, 1, 0.45), "背后不算");
+    }
 }
