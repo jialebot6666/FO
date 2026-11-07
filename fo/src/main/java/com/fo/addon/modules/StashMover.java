@@ -7,6 +7,7 @@ import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.PeerMessageLogic;
 import com.fo.addon.utils.StashMoveLogic;
 import com.fo.addon.utils.StashMoveLogic.BoxSide;
+import com.fo.addon.utils.StashChestSpotLogic;
 import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
@@ -35,6 +36,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.AbstractSignBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.entity.SignBlockEntity;
 import net.minecraft.block.enums.ChestType;
@@ -55,12 +57,15 @@ import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -771,12 +776,20 @@ public class StashMover extends Module {
      * 会把新目标吞掉。
      */
     private PathGoal pathGoal;
-    /** 跨层接近（箱子不在同一层）开始计时的 tick；0 = 当前没有跨层接近。 */
-    private long crossLevelStartTick;
-    /** 正在跨层接近的目标箱（换箱要重新计时/重新提醒）。 */
-    private BlockPos crossLevelTarget;
-    /** 跨层接近只提醒一次，别每 tick 刷屏。 */
-    private boolean crossLevelWarned;
+    /**
+     * 每个箱子算好的落脚点（V6.7p25）：spot = 该站的空气格，los = 从那里能不能直视箱子。
+     * 箱子换层/被拆/不再可站时重算；{@link #chestNoSpot} 记「算过，周围确实没有可站格」。
+     */
+    private final Map<BlockPos, ChestApproach> chestApproachCache = new HashMap<>();
+    /** 四周 3 格内没有可站格的箱子（本次会话不再尝试，避免每 tick 重算 + 反复走箱子正上方）。 */
+    private final Set<BlockPos> chestNoSpot = new HashSet<>();
+    /** 当前正在接近的箱子 + 开始时间（走不到就报警/跳过，别无限挂着）。 */
+    private BlockPos approachChest;
+    private long approachStartTick;
+    /** 单个箱子「走到落脚点」的等待上限（30 秒）；超时按模式决定跳过还是继续。 */
+    private static final int APPROACH_TIMEOUT = 600;
+    /** 选箱子时最多向后看几个，挑「落脚点有视线」的那个（V6.7p25）。 */
+    private static final int LOS_LOOKAHEAD = 4;
     private long pathStartTick;
     /** 同一个精确走位目标开始的时间（用于 20 秒超时判定，不随每次重发归零）。 */
     private long pathToSince;
@@ -933,6 +946,8 @@ public class StashMover extends Module {
         tick = 0;
         cooldown = 0;
         blacklist.clear();
+        chestApproachCache.clear();
+        chestNoSpot.clear();
         skippedUntil.clear();
         lastFilteredWarnTick = 0;
         chestQueue.clear();
@@ -1008,6 +1023,8 @@ public class StashMover extends Module {
         PathManagers.get().stop();
         PathManagers.get().setAllowBreak(true);
         blacklist.clear();
+        chestApproachCache.clear();
+        chestNoSpot.clear();
         chestQueue.clear();
         pullActive = false;
     }
@@ -1353,8 +1370,7 @@ public class StashMover extends Module {
             }
             return;
         }
-        if (!approachForOpen(chest)) return;
-        openChestAt(chest);
+        if (!goOpenChest(chest)) return;
     }
 
     private void dualSend() {
@@ -1426,6 +1442,8 @@ public class StashMover extends Module {
         PathManagers.get().stop();
         clearPathTarget();
         blacklist.clear();
+        chestApproachCache.clear();
+        chestNoSpot.clear();
         skippedUntil.clear();
         chestQueue.clear();
         queueIndex = 0;
@@ -1560,8 +1578,7 @@ public class StashMover extends Module {
             cooldown = Math.max(1, clickDelay.get());
             return;
         }
-        if (!approachForOpen(chestPos)) return;
-        openChestAt(chestPos);
+        if (!goOpenChest(chestPos)) return;
     }
 
     private void dualThrow() {
@@ -1610,8 +1627,7 @@ public class StashMover extends Module {
             enterStuck("请先设置珍珠箱位置");
             return;
         }
-        if (!approachForOpen(chestPos)) return;
-        openChestAt(chestPos);
+        if (!goOpenChest(chestPos)) return;
     }
 
     /**
@@ -1728,10 +1744,12 @@ public class StashMover extends Module {
         if (unloadedSomething) StashStats.get().addTrip();
         unloadedSomething = false;
         if (finalTrip) {
-            info("最后一趟运输完成，关闭模块");
+            info("最后一趟运输完成（" + StashStats.get().displayText() + "），关闭模块");
             toggle();
             return;
         }
+        // V6.7p25：每趟卸完都把「趟数 + 盒数」报一次，方便实机核对统计
+        info("本趟卸货完成：本次共 " + StashStats.get().displayText());
         // V6.7p14：卸完货才去投「回程票」——货先落袋，投掷链路再出问题也不会把货背死。
         pearlConfirmedTick = 0;
         pearlConfirmStreak = 0;
@@ -1825,8 +1843,7 @@ public class StashMover extends Module {
             return;
         }
         if (!containerOpen()) {
-            if (!approachForOpen(chestPos)) return;
-            openChestAt(chestPos);
+            if (!goOpenChest(chestPos)) return;
             return;
         }
         if (!containerEmpty()) {
@@ -1989,8 +2006,7 @@ public class StashMover extends Module {
             enterStuck("待搬运箱区已搬空（没有可搬的箱子了）");
             return;
         }
-        if (!approachForOpen(chest)) return;
-        openChestAt(chest);
+        if (!goOpenChest(chest)) return;
     }
 
     private void trioUnload() {
@@ -2004,6 +2020,7 @@ public class StashMover extends Module {
                 if (unloadedSomething) StashStats.get().addTrip();
                 unloadedSomething = false;
                 debugMsg("[存货] 没有可卸物品，结束存货");
+                info("本趟卸货完成：本次共 " + StashStats.get().displayText());
                 setTrioState(TrioState.SEND, "存货完成");
                 return;
             }
@@ -2011,8 +2028,7 @@ public class StashMover extends Module {
                 enterStuck("存储箱不存在");
                 return;
             }
-            if (!approachForOpen(store)) return;
-            openChestAt(store);
+            if (!goOpenChest(store)) return;
             return;
         }
         if (containerIsFull()) {
@@ -2026,6 +2042,7 @@ public class StashMover extends Module {
             if (unloadedSomething) StashStats.get().addTrip();
             unloadedSomething = false;
             debugMsg("[存货] 背包里没有可卸的物品了");
+            info("本趟卸货完成：本次共 " + StashStats.get().displayText());
             setTrioState(TrioState.SEND, "存货完成");
             return;
         }
@@ -2064,16 +2081,13 @@ public class StashMover extends Module {
                 cooldown = 5;
                 return;
             }
-            if (distSq > 400) {
-                // 用 pathToContainer 而不是裸 moveTo：带「同目标不重复下发 + 240 tick 重设」的保护，
-                // 并且按「珍珠箱在不在同一层」自动选 GoalXZ / GoalNear（V6.7p23，防止跨层时往下挖）
-                pathToContainer(chestPos);
+            // V6.7p25：和取货同一套靠近逻辑（能开就开、要走走到能开、目标是箱子旁落脚点）
+            if (!goOpenChest(chestPos)) {
                 if (debug.get() && tick % 40 == 0) {
-                    info("[补珍珠] 珍珠箱在 " + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外，走过去");
+                    info("[补珍珠] 走近珍珠箱（" + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外）");
                 }
                 return;
             }
-            openChestAt(chestPos);
             return;
         }
 
@@ -2812,6 +2826,13 @@ public class StashMover extends Module {
      */
     private enum SettlePurpose { ESCAPE, THROW }
 
+    /** 箱子旁算好的落脚点（V6.7p25）：spot 是空气格，los = 从那里能不能直视箱子。 */
+    private record ChestApproach(BlockPos spot, boolean los) {
+    }
+
+    /** 靠近箱子的三种结果（V6.7p25）：已经能开 / 正在走 / 周围没有可站格。 */
+    private enum Approach { IN_RANGE, MOVING, NO_SPOT }
+
     /** 三人模式 1 号的投掷入口（具体步骤在 {@link #tickThrowSequence}）。 */
     private void trioThrow() {
         BlockPos stand = trioTrapdoor();
@@ -3097,6 +3118,8 @@ public class StashMover extends Module {
         if (lastPos != null && StashMoveLogic.teleportJumped(lastPos.x, lastPos.z, now.x, now.z, 32)) {
             trioZone = trioZone == StashMoveLogic.Zone.SOURCE ? StashMoveLogic.Zone.STORE : StashMoveLogic.Zone.SOURCE;
                 blacklist.clear();
+        chestApproachCache.clear();
+        chestNoSpot.clear();
             skippedUntil.clear();
             chestQueue.clear();
             queueIndex = 0;
@@ -3831,36 +3854,33 @@ public class StashMover extends Module {
     private void clearPathTarget() {
         pathTarget = null;
         pathGoal = null;
-        crossLevelStartTick = 0;
-        crossLevelWarned = false;
+        resetApproachTimer();
     }
 
     /**
-     * 寻路目标的两种口径（V6.7p23）。
+     * 寻路目标的两种口径（V6.7p25）。
      *
      * <ul>
-     *   <li>{@link #XZ}：Baritone 的 GoalXZ，判定只有 {@code x == goal.x && z == goal.z}，
-     *       <b>Y 完全不参与</b>。只允许在「目标和我同一层」时使用。</li>
-     *   <li>{@link #NEAR}：GoalNear(pos, 1)，3D 距离 ≤1 格才算到达。必须真的上/下到
-     *       目标那一层，站在下面两层不算。跨层时使用。</li>
+     *   <li>{@link #PRECISE}：GoalNear(pos, 0)，脚必须落在目标格（近处用，站得准）；</li>
+     *   <li>{@link #NEAR}：GoalNear(pos, 1)，3D 距离 1 格内（远处用，容错高）。</li>
      * </ul>
+     *
+     * <p>⚠️ 两个都必须让 Y 参与，并且目标永远是**箱子旁边的空气格**，不是箱子本身 ——
+     * 这是「不会走到箱子正上方」的根本保证。
      */
-    private enum PathGoal { XZ, NEAR }
+    private enum PathGoal { PRECISE, NEAR }
 
     private void applyGoal(BlockPos pos, PathGoal goal) {
-        if (goal == PathGoal.XZ) {
-            PathManagers.get().moveTo(pos, true);
+        if (goal == PathGoal.PRECISE) {
+            PathManagers.get().moveToPrecise(pos);
         } else {
-            // ⚠️ 不能用 GoalGetToBlock：它的判定是 |dx|+|dy|+|dz| ≤ 1，而且对负 dy 会做
-            // 「dy+1」补偿 —— 站在箱子下方 **2 格**、XZ 对齐时也算「到达」，
-            // 于是「挖到箱子正下方」依然能满足目标。GoalNear(pos,1) 是纯 3D 球，不会。
             PathManagers.get().moveToNear(pos, 1);
         }
     }
 
     private void pathTo(BlockPos pos, PathGoal goal) {
         if (pos == null || pos.equals(BlockPos.ORIGIN)) return;
-        // 目标坐标或「目标类型」任一变化都要重新下发：否则同坐标从 XZ 目标切成 3D 目标时，
+        // 目标坐标或「目标类型」任一变化都要重新下发：否则同坐标换目标类型时，
         // 会被下面这条「同目标不重复下发」的守卫直接吞掉。
         if (!pos.equals(pathTarget) || pathGoal != goal) {
             pathTarget = pos;
@@ -3889,66 +3909,199 @@ public class StashMover extends Module {
         }
     }
 
-    /**
-     * 走向一个容器（箱子），按「人和箱子在不在同一层」选寻路目标（V6.7p23）。
-     *
-     * <p>这是本次「往下挖」的根因修复：以前这里一律 {@code pathTo(pos, true)}，
-     * 也就是 Baritone 的 GoalXZ —— 它只判 XZ、**Y 完全不参与**。
-     * 当待搬运箱在人物上方 2 格（拉珍珠返回的落点常比箱子低一层）时，
-     * 「到那个 XZ」在任意一层都算达成，A* 于是挑了最便宜的一条：
-     * 在脚下/墙里往下挖一条路过去，而不是找台阶/游上去到箱子那一层。
-     *
-     * <p>现在跨层（|ΔY| ≥ 2）改用 3D 目标 GoalNear(pos, 1)：必须真的到箱子所在层
-     * （或紧邻/正上方 1 格内）才算到达，Baritone 不会再拿「挖下去」当进展；
-     * 走不过去就停下来报警，绝不用侧面/下层凑合。
-     */
-    private void pathToContainer(BlockPos pos) {
-        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return;
-        int feetY = mc.player.getBlockPos().getY();
-        boolean sameFloor = StashMoveLogic.sameFloorForPath(feetY, pos.getY());
-        if (!sameFloor) {
-            int dy = pos.getY() - feetY;
-            if (crossLevelStartTick == 0 || !pos.equals(crossLevelTarget)) {
-                crossLevelTarget = pos;
-                crossLevelStartTick = tick;
-                crossLevelWarned = false;
-                debugMsg("[接近] 目标箱在" + (dy > 0 ? "上" : "下") + "方 " + Math.abs(dy)
-                    + " 格（同一层才用只看 XZ 的目标）→ 改为 3D 目标走近，不会为了凑 XZ 往下挖");
-            } else if (!crossLevelWarned && tick - crossLevelStartTick > 300) {
-                crossLevelWarned = true;
-                warning("目标箱在" + (dy > 0 ? "上" : "下") + "方 " + Math.abs(dy)
-                    + " 格，3D 寻路 15 秒还没走到；请确认有台阶/梯子能到那一层（不会为了凑坐标向下挖）");
-            }
-        } else {
-            crossLevelStartTick = 0;
-            crossLevelTarget = null;
-            crossLevelWarned = false;
-        }
-        pathTo(pos, sameFloor ? PathGoal.XZ : PathGoal.NEAR);
+    /** 现在这一格够不够得着箱子（眼睛到方块中心 ≤ {@link #OPEN_REACH}）。 */
+    private boolean canOpenFromHere(BlockPos pos) {
+        if (mc.player == null || pos == null) return false;
+        return mc.player.getEyePos().distanceTo(Vec3d.ofCenter(pos)) <= OPEN_REACH;
     }
 
     /**
-     * 开箱前先靠近：眼睛到方块中心 ≤ {@link #OPEN_REACH} 格才允许点击。
+     * 在箱子周围找「站过去就能开」的落脚点（V6.7p25）。
      *
-     * <p>服务端对交互有距离校验，隔空点击会被静默丢弃（表现为“点了没反应”）；
-     * 这里统一把“够不够近”前置判断，不够就先走。
+     * <p>候选由 {@link StashChestSpotLogic} 生成（搬运专用，不复用挖沙那套）：
+     * 水平 1~3 圈 × {chestY, chestY+1}，**排除箱子自身那一列**，所以永远不会出现「站箱子上」。
+     * 排序：有视线 &gt; 离得近 &gt; 同层。
      *
-     * @return true = 已经在可点击范围内
+     * <p>结果按箱子缓存；落脚点不可站了会重算；四周确实没有可站格时记进
+     * {@link #chestNoSpot}，本次会话不再尝试这个箱子。
+     *
+     * @return 落脚点；四周 3 格内没有可站格时返回 null
+     */
+    private ChestApproach findChestApproach(BlockPos chest) {
+        if (mc.world == null || mc.player == null || chest == null) return null;
+        // 区块没加载 / 箱子已经没了：方块会长成空气，这时候算出来的「没落脚点」是假结论，
+        // 绝不能记进 chestNoSpot（否则远距离补珍珠时会把珍珠箱永久拉黑）。
+        var chestState = mc.world.getBlockState(chest);
+        if (!(chestState.getBlock() instanceof ChestBlock)
+            && !(chestState.getBlock() instanceof ShulkerBoxBlock)) {
+            return null;
+        }
+        if (chestNoSpot.contains(chest)) return null;
+        ChestApproach cached = chestApproachCache.get(chest);
+        if (cached != null && isStandable(cached.spot())) return cached;
+
+        BlockPos partner = chestPartner(chest);
+        ChestApproach best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (int[] c : StashChestSpotLogic.candidates(chest.getX(), chest.getY(), chest.getZ())) {
+            BlockPos p = new BlockPos(c[0], c[1], c[2]);
+            if (!isStandable(p)) continue;
+            boolean los = hasLineOfSight(p, chest, partner);
+            double distSq = mc.player.getBlockPos().getSquaredDistance(p);
+            double score = StashChestSpotLogic.score(los, distSq, c[1] - chest.getY());
+            if (score < bestScore) {
+                bestScore = score;
+                best = new ChestApproach(p, los);
+            }
+        }
+        if (best == null) {
+            chestNoSpot.add(chest);
+            chestApproachCache.remove(chest);
+            debugMsg("[接近] 箱子四周 3 格内没有可站的格子 → 跳过（绝不站到箱子正上方）");
+            return null;
+        }
+        chestApproachCache.put(chest, best);
+        // 只打相对距离，不打坐标（无政府服防泄露）
+        double dist = Math.hypot(mc.player.getX() - (best.spot().getX() + 0.5),
+            mc.player.getZ() - (best.spot().getZ() + 0.5));
+        debugMsg("[接近] 落脚点" + (best.los() ? "有视线" : "无视线（发包开箱）")
+            + "，水平距 " + String.format(Locale.ROOT, "%.1f", dist) + " 格");
+        return best;
+    }
+
+    /**
+     * 从某个落脚点能不能直视箱子（V6.7p25）。
+     *
+     * <p>用脚位置 + 1.62 模拟眼睛高度，往箱子中心打一条 {@code COLLIDER} 射线；
+     * 首个命中的方块是箱子（或双箱另一半）才算有视线。箱子夹在墙里、只露出半格时这里会判 false，
+     * 但那种情况依然可以用发包开，所以不是硬门槛。
+     */
+    private boolean hasLineOfSight(BlockPos spot, BlockPos chest, BlockPos partner) {
+        if (mc.world == null || mc.player == null) return false;
+        Vec3d from = new Vec3d(spot.getX() + 0.5, spot.getY() + 1.62, spot.getZ() + 0.5);
+        Vec3d to = Vec3d.ofCenter(chest);
+        BlockHitResult hit = mc.world.raycast(new RaycastContext(from, to,
+            RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player));
+        if (hit == null) return false;
+        BlockPos hp = hit.getBlockPos();
+        return hp.equals(chest) || (partner != null && hp.equals(partner));
+    }
+
+    /** 停掉「靠近箱子」这条寻路（避免一边走一边点箱子）。 */
+    private void stopApproachPath() {
+        if (PathManagers.get().isPathing()) PathManagers.get().stop();
+        releaseMovementKeys();
+        clearPathTarget();
+    }
+
+    private void resetApproachTimer() {
+        approachChest = null;
+        approachStartTick = 0;
+    }
+
+    /**
+     * 走近某个「可交互方块」并返回能不能点——只用于<b>活板门</b>这类非容器目标（V6.7p25）。
+     *
+     * <p>箱子不要用这个（箱子要走 {@link #approachChest}：找箱子旁落脚点，绝不站箱子上）；
+     * 活板门本来就要贴到它旁边/上面点，GoalNear(方块,1) 的语义正好合适。
      */
     private boolean approachForOpen(BlockPos pos) {
-        if (pos == null || pos.equals(BlockPos.ORIGIN)) return false;
-        Vec3d center = Vec3d.ofCenter(pos);
-        Vec3d eye = mc.player.getEyePos();
-        if (eye.distanceTo(center) <= OPEN_REACH) {
-            clearPathTarget();
+        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return false;
+        if (canOpenFromHere(pos)) {
+            stopApproachPath();
             return true;
         }
-        // V6.7p23：这里原来还有一条「XZ 距离 ≤1.2 就直接允许点击」的短路。
-        // 它能通过的场景只有一种：人和箱子 XZ 重合、但垂直差 >3.3 格（隔着楼板/地板），
-        // 恰好就是「不在同一 Y 却硬点」的那一类。现在跨层一律走 3D 目标，不再需要它，
-        // 同层时距离判定本来就已经放行（不会死循环），所以整条删掉。
-        pathToContainer(pos);
+        pathTo(pos, PathGoal.NEAR);
         return false;
+    }
+
+    /**
+     * 靠近并打开箱子（V6.7p25）。
+     *
+     * <p>能开就开；要走路就走到能开为止；四周没有可站格时：
+     * 单箱模式已经在 {@link #approachChest} 里报警暂停，搜索/框选模式则把这个箱子拉黑换下一个。
+     *
+     * @return true = 本 tick 已经把开箱动作发出去
+     */
+    private boolean goOpenChest(BlockPos chest) {
+        if (chest == null || chest.equals(BlockPos.ORIGIN)) return false;
+        Approach a = approachChest(chest);
+        if (a == Approach.IN_RANGE) {
+            openChestAt(chest);
+            return true;
+        }
+        if (a == Approach.NO_SPOT) {
+            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
+            if (m != ChestMode.SINGLE) {
+                blacklistChest(chest);
+                openChest = null;
+                debugMsg("[接近] 已跳过这个箱子（四周没有落脚点）");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 开箱前靠近（V6.7p25 重写）。
+     *
+     * <p>用户口径：
+     * <ol>
+     *   <li><b>当前位置能开就直接开</b> —— 不寻路、不做多余动作；</li>
+     *   <li>要寻路的话，<b>走到能开就停</b>（每 tick 先判距离，够了立刻停路 + 开箱）；</li>
+     *   <li><b>绝不走到箱子正上方</b> —— 目标是箱子旁边的空气格，不是箱子本身。</li>
+     * </ol>
+     *
+     * <p>旧实现（p22/p23）把箱子本身当寻路目标：GoalXZ 会为了凑 XZ 往下挖，
+     * GoalNear(箱子,1) 又把「站在箱子正上方」算成到达 —— 两条都不符合用户口径，这里一并去掉。
+     */
+    private Approach approachChest(BlockPos pos) {
+        if (pos == null || pos.equals(BlockPos.ORIGIN) || mc.player == null) return Approach.NO_SPOT;
+
+        // ① 已经在可点击距离内：停路 + 松键，直接开
+        if (canOpenFromHere(pos)) {
+            stopApproachPath();
+            return Approach.IN_RANGE;
+        }
+
+        // ② 箱子所在区块没加载 / 方块已经不在了：**不能判成「没有落脚点」**
+        //    （否则会把存储箱/珍珠箱永久拉黑），原地等它加载/等人工处理。
+        var posState = mc.world.getBlockState(pos);
+        if (!(posState.getBlock() instanceof ChestBlock)
+            && !(posState.getBlock() instanceof ShulkerBoxBlock)) {
+            return Approach.MOVING;
+        }
+
+        // ③ 找箱子旁边的落脚点（有视线优先）；找不到就报告，绝不往箱子正上方走
+        ChestApproach approach = findChestApproach(pos);
+        if (approach == null) {
+            resetApproachTimer();
+            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
+            if (m == ChestMode.SINGLE) {
+                enterStuck("目标箱子周围 3 格内没有可站的格子（不会站到箱子正上方），请检查结构");
+            }
+            return Approach.NO_SPOT;
+        }
+
+        if (!pos.equals(approachChest)) {
+            approachChest = pos;
+            approachStartTick = tick;
+        } else if (tick - approachStartTick > APPROACH_TIMEOUT) {
+            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
+            boolean single = m == ChestMode.SINGLE;
+            warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），"
+                + (single ? "单箱模式不跳过目标，继续走" : "跳过这个箱子"));
+            resetApproachTimer();
+            if (!single) {
+                blacklistChest(pos);
+                return Approach.NO_SPOT;
+            }
+        }
+
+        // ④ 目标永远是落脚空气格；远处用 NEAR 容错，近处用 PRECISE 站准
+        BlockPos spot = approach.spot();
+        double distSq = mc.player.getBlockPos().getSquaredDistance(spot);
+        pathTo(spot, distSq <= 64 ? PathGoal.PRECISE : PathGoal.NEAR);
+        return Approach.MOVING;
     }
 
     private void openChestAt(BlockPos pos) {
@@ -3965,7 +4118,7 @@ public class StashMover extends Module {
         }
         openChest = pos;
         // 保险：调用方已经判过距离，这里再兜一次，避免别处漏判后隔空点击
-        if (!approachForOpen(pos)) return;
+        if (approachChest(pos) != Approach.IN_RANGE) return;
         if (openAttempts >= 8) {
             enterStuck("连续 8 次都打不开箱子（检查是否被方块挡住或位置填错）");
             return;
@@ -4016,15 +4169,27 @@ public class StashMover extends Module {
             chestQueue.removeIf(this::isStoreSideChest);
             if (chestQueue.isEmpty()) return null;
         }
-        while (queueIndex < chestQueue.size()) {
-            BlockPos p = chestQueue.get(queueIndex);
-            if (blacklist.contains(p) || isSkipped(p)) {
-                queueIndex++;
-                continue;
-            }
-            return p;
+        // 先跳掉前缀里的拉黑/临时跳过，保证后面的「看 4 个」不会越扫越长
+        while (queueIndex < chestQueue.size()
+            && (blacklist.contains(chestQueue.get(queueIndex)) || isSkipped(chestQueue.get(queueIndex)))) {
+            queueIndex++;
         }
-        return null;
+        // 再在同一批候选里**优先挑有视线的**（V6.7p25）。
+        // 只看前 LOS_LOOKAHEAD 个：落脚点结果按箱子缓存，通常第一个就命中，不会每个 tick 重算。
+        BlockPos firstAny = null;
+        int looked = 0;
+        for (int i = queueIndex; i < chestQueue.size() && looked < LOS_LOOKAHEAD; i++) {
+            BlockPos p = chestQueue.get(i);
+            if (blacklist.contains(p) || isSkipped(p)) continue;
+            looked++;
+            if (firstAny == null) firstAny = p;
+            ChestApproach a = findChestApproach(p);
+            if (a != null && a.los()) {
+                queueIndex = i;      // 下次从这一个继续
+                return p;
+            }
+        }
+        return firstAny;
     }
 
     /** 扫描长方体范围内的箱子（双箱只记一份；单箱按「忽略单个箱子」过滤）。 */

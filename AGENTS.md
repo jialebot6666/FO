@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p24`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p24-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p25`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p25-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -711,6 +711,22 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     调试输出新增一行 `[朝向] 告示牌=X 门FACING=Y 门板=Z → 站 W 侧`（只在结论变化时打印）。
   - 测试：新增 6 条（三来源一致 / 门关着靠告示牌 / 退回 FACING / 门板物理否决 / 只剩门板 / 对侧换算），
     全仓 **52 套件 466 测试全绿**。
+- ✅ 6.7p25 已修复：**寻路会走到箱子正上方**（用户实机：p23 之后人爬到箱子上/走下去）。
+  - 用户口径：① **当前位置能开就直接开**；② 要寻路就**走到能开就停**；③ **绝不走到箱子正上方**。
+  - 根因：p22 `GoalXZ` 只认 XZ（往下挖）；p23 虽换 3D，但目标是**箱子方块本身**，
+    `GoalNear(箱子,1)` 把「站在箱子正上方」（dy=1）也算到达 —— 两条都不符合口径。
+    p23 的 `sameFloorForPath` / `PathGoal.XZ` / `pathToContainer` 已被本版取代并删除。
+  - 修法：新增**搬运专用**的 `utils/StashChestSpotLogic`（**刻意不复用挖沙的 StandSpotLogic**）：
+    水平 1→2→3 圈 × {chestY, chestY+1}，**排除箱子自身那一列**；排序 = 有视线 > 离得近 > 同层。
+    模块侧 `findChestApproach` 用 `isStandable` 过滤 + 从落脚点眼睛位置 raycast（COLLIDER）判视线，
+    结果按箱子缓存；区块没加载/箱子已消失时不写「无落脚点」缓存（防止把珍珠箱永久拉黑）。
+  - `approachChest` 三态 `IN_RANGE / MOVING / NO_SPOT`：能开 → `stopApproachPath()`（停路+松键）再开；
+    不能开 → 走向**落脚空气格**（近处 PRECISE、>8 格 NEAR）；四周没有落脚点 → 单箱模式报警暂停，
+    搜索/框选模式拉黑换下一个。30 秒走不到同样跳过（单箱继续试）。
+  - 选箱子优先有视线：`nextFromQueue` 向后看 4 个，挑「落脚点能直视箱子」的那个，没有才退第一个。
+  - 统计：每趟卸货完成（双号 `onUnloadDone` / 三号 `trioUnload`）额外输出 `本次共 X 趟 · Y 个潜影盒`。
+  - 测试：新增 `StashChestSpotLogicTest` 6 条（候选不含箱子列 / 圈数与总数 / 无重复 / 视线优先 /
+    近的优先 / 同层优先），删除已被取代的 2 条 `sameFloorForPath`，全仓 **53 套件 470 测试全绿**。
 - ⚠️ 6.7p15 是**未入库**的中间版本（另一窗口产出，只交付了 jar）：内容已全部并入 6.7p16，**不要单独发 p15**。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、

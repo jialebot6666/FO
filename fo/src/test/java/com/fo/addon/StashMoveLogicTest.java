@@ -421,24 +421,6 @@ class StashMoveLogicTest {
         assertFalse(StashMoveLogic.onFrontSide(0.0, -1.0, 0, 1, 0.45), "背后不算");
     }
 
-    // ==================== V6.7p23：跨层接近不能再用「只看 XZ」的目标 ====================
-
-    @Test
-    void 同层判定_台阶差一格以内仍算同层() {
-        assertTrue(StashMoveLogic.sameFloorForPath(64, 64));
-        assertTrue(StashMoveLogic.sameFloorForPath(64, 65), "向上 1 格台阶");
-        assertTrue(StashMoveLogic.sameFloorForPath(64, 63), "向下 1 格台阶");
-    }
-
-    @Test
-    void 同层判定_目标高或低两格就必须让Y参与() {
-        // 这就是实机场景：待搬运箱在搬运端上方 2 格。
-        // 继续用 GoalXZ（Y 不参与）时 Baritone 会挑最便宜的路 —— 在脚下挖下去。
-        assertFalse(StashMoveLogic.sameFloorForPath(62, 64), "箱子在上方 2 格");
-        assertFalse(StashMoveLogic.sameFloorForPath(64, 62), "箱子在下方 2 格");
-        assertFalse(StashMoveLogic.sameFloorForPath(64, 70));
-    }
-
     // ==================== V6.7p24：告示牌 / 朝向 / 门板 → 投掷侧 ====================
 
     @Test
