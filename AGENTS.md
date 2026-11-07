@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p28`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p28-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p29`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p29-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -766,6 +766,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
     （`StashChestSpotLogic.nearestToChest`），到位后继续点；已到 1.2 格内不再往前挤（`CLOSER_STOP_DIST`）。
   - 调试行改成 `眼→箱体 X / 上限 Y`，与服务端同口径；射线距离改用设置值 +1.5。
   - 测试：新增 2 条 `nearestToChest`，全仓 **53 套件 474 测试全绿**。
+- ✅ 6.7p29 已修复：**末影箱「检测到不打开」与「打开/关闭死循环」**。
+  - 根因一（不打开）：`approachChest` 的「区块没加载/方块不在 → 原地等」白名单漏了
+    `EnderChestBlock`，末影箱在开箱距离外时直接返回 MOVING、**根本不寻路**，干等 15 秒超时。
+    现已补上，末影箱超出开箱距离会像普通箱子一样走到旁边的落脚点再开。
+  - 根因二（死循环）：`enderChestOpen` 用 `getInventory() instanceof EnderChestInventory` 认界面，
+    但客户端界面由 `OpenScreenS2CPacket(GENERIC_9X3)` 经 `createGeneric9x3(syncId, inv)` 创建，
+    底层是 `SimpleInventory(27)` —— 客户端**永远看不到** `EnderChestInventory`，判定恒 false →
+    打开→关掉→再打开循环到超时。改为「通用容器 + 63 槽（`StashMoveLogic.isEnderScreenShape`）
+    + 我们点的就是 enderTarget + 那格仍是末影箱」三重认定。
+  - 加固：`ENDER_STATE_TIMEOUT` 15→30 秒（含走过去的时间）；新增「连续关掉 3 次非末影箱界面」
+    熔断（`ENDER_CLOSE_LIMIT`）；四周无可站格立即降级不再干等；入状态时打印「眼→箱体/开箱距离」。
+  - 测试：新增 1 条 `isEnderScreenShape`，全仓 **53 套件 475 测试全绿**。
 - ⚠️ 6.7p15 是**未入库**的中间版本（另一窗口产出，只交付了 jar）：内容已全部并入 6.7p16，**不要单独发 p15**。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
