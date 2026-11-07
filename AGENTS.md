@@ -696,8 +696,62 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律使用中文，不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。
 4. **务实说话**：没从代码里实际看到的、没验证过的，不说。不根据猜测推断功能，不编结论。不确定就说"不知道"或"需要看代码确认"。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策，必须先给出方案由用户拍板，未经确认不得直接改代码（与 `.github/skills/fo-development/SKILL.md` 铁律 5 一致）。
-6. **每次发版在 GitHub 建正式 Release（jar 唯一分发渠道）**：每个版本（`x.y`）交付时，构建产物 `FO-x.y-<MC版本>.jar` **不再提交到 releases/ 目录**（`.gitignore` 已用 `releases/*.jar` 拦截）：① commit（信息含模块名+摘要）→ ② 打 tag `x.y`（**不带 V 前缀**，指向该版本 commit）→ ③ 在 GitHub（jialebot6666/FO）创建正式 Release（标题 `FO x.y-<MC版本>`、说明写入该版本更新介绍、jar 作为附件，附件名 = 构建产物名）→ ④ 在 `releases/README.md` 版本清单加一行（版本 | commit | 说明）。历史 jar 仍完整保留在 git 历史中，可随时 `git show <commit>:releases/FO-Vx.y.jar` 取回（旧归档名带 V，属历史遗留，不必回改）。
+6. **每次发版在 GitHub 建正式 Release（jar 唯一分发渠道，且仓库里只保留最新版一个 jar）**：
+   每个版本（`x.y`）交付时，构建产物 `FO-x.y-<MC版本>.jar` **不再提交到 releases/ 目录**
+   （`.gitignore` 已用 `releases/*.jar` 拦截），流程固定为五步：
+   ① commit（信息含模块名+摘要）→
+   ② 打 tag `x.y`（**不带 V 前缀**，指向该版本 commit）→
+   ③ 在 GitHub（jialebot6666/FO）创建正式 Release：标题 `FO x.y-<MC版本>`、说明写该版本更新介绍、
+      **附件就是构建产物本身，附件名必须与产物同名**（`FO-<mod版本>-<MC版本>.jar`）。
+      ⚠️ **禁止**改名、加 `V`、加短哈希/日期后缀 —— 名字对不上就会被当成另一个文件，新旧两版并存；
+   ④ **删除此前所有 Release 里的 `.jar` 附件**（做法见下方「Release 附件清理」），
+      保证仓库里有且只有一个 jar，就是本次这个 →
+   ⑤ 在 `releases/README.md` 版本清单加一行（版本 | commit | 说明）。
+   - ⚠️ 这条**只约束发版**：纯文档 / 纯代码推送但没有新 jar 时，**不要**为了「清 jar」去动已有 Release 附件
+     （会把唯一的下载入口删掉，仓库里就没有 jar 了）。
+   - ⚠️ 用户口径：旧版 jar 不再提供下载；Release 的历史说明与 tag 保留，**只删 jar 附件**，
+     不要为了清 jar 去删整个 Release 或 tag。
+   - ⚠️ 历史 jar 仍可在 git 历史里回溯（`releases/FO-Vx.y.jar` 及更早，用 `git show <commit>:<path>`）；
+     但「停止把 jar 归档进 releases/」之后的版本没有 git 内副本，删了附件就真的没有了。
+
 7. **仓库拉取一律浅克隆**：新设备/新环境拉取 FO 仓库用 `git clone --depth=1 https://gh-proxy.com/https://github.com/jialebot6666/FO.git`（只拉最新代码，秒级完成；github.com 直连慢且常超时，历史里还保留着 100+ 个 jar 二进制，全量 clone 要很久）。日常开发增量 `git pull` 即可；确需完整历史时才 `git fetch --unshallow`。不要全量 clone。
+
+### Release 附件清理（每次发版必做，硬性规范 6 第 ④ 步）
+
+用 GitHub REST API（token 需要 **Contents: Read and write**）。顺序不能反：**先建好新 Release 并传完附件，再删旧的**。
+
+```bash
+# 1) 列出全部 Release（默认只返回 30 条，必须带 per_page=100；超过 100 个再翻页）
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/jialebot6666/FO/releases?per_page=100"
+
+# 2) 对每个 tag_name != 本次版本 的 Release，列出它的附件
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/jialebot6666/FO/releases/{release_id}/assets"
+
+# 3) 逐个删除 .jar 附件（只删 .jar；其它附件如 .sha1 / 说明文件不要动）
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/jialebot6666/FO/releases/assets/{asset_id}"
+```
+
+**删完必须校验**（目标输出只有一行，且 tag 是本次版本）：
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/jialebot6666/FO/releases?per_page=100" \
+  | python -c "import sys,json; [print(r['tag_name'],a['name']) for r in json.load(sys.stdin) for a in r['assets'] if a['name'].endswith('.jar')]"
+```
+
+判定标准：① 只有一行；② 文件名 = 本次构建产物名；③ tag = 本次版本。三条都满足才算发版完成。
+
+Windows / PowerShell 等价写法（没有 `python` / `jq` 时用）：
+
+```powershell
+$H = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "fo-release" }
+$rels = Invoke-RestMethod -Headers $H "https://api.github.com/repos/jialebot6666/FO/releases?per_page=100"
+$rels | ForEach-Object { $t = $_.tag_name; $_.assets | Where-Object { $_.name -like '*.jar' } |
+    ForEach-Object { "$t`t$($_.name)" } }
+```
 
 ## 构建与测试
 
