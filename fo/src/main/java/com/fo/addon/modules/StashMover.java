@@ -699,6 +699,10 @@ public class StashMover extends Module {
     // ===== V6.7p11：照 PearlDrop 校准的一套判定阈值与超时 =====
     /** 判定「已居中」的最大水平距离（格）。超过说明还没到边缘。 */
     private static final double TRIO_CENTER_DIST = 1.2;
+    /** 判定「人在门板正对面那一格」的水平容差（格）：格子半宽 0.5，留 0.05 余量。 */
+    private static final double FRONT_CELL_TOLERANCE = 0.45;
+    /** 判定珍珠「在 1×1 柱内」的水平容差（格）：半宽 0.5，留 0.05 余量（V6.7p22 收紧，原 0.9）。 */
+    private static final double PEARL_IN_COLUMN_XZ = 0.55;
     /** 判定「已居中」需要连续满足的 tick 数（PearlDrop centerStallTicks）。 */
     private static final int TRIO_CENTER_STALL_TICKS = 6;
     /** 单次投掷确认超时（tick）。PearlDrop throwTimeoutTicks。 */
@@ -831,10 +835,6 @@ public class StashMover extends Module {
     private static final double STEP_ARRIVE_EPS = 0.35;
     /** 挂起的交互动作：等本 tick 的移动包（带新朝向）发完再执行。 */
     private Runnable afterMoveAction;
-    /** 四个水平方向（站位候选 / 活板门朝向判断用）。 */
-    private static final Direction[] HORIZONTALS = {
-        Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
-    };
 
     /** 每个区第一次找到的安全站位（缓存后复用，避免每次传送过来都重新搜一遍）。 */
     private final java.util.Map<StashMoveLogic.Zone, BlockPos> zoneSafeSpot = new java.util.HashMap<>();
@@ -2373,22 +2373,14 @@ public class StashMover extends Module {
     // ==================== 站位（V6.7p10：短按键，1 格级不再调寻路） ====================
 
     /**
-     * 柱子旁边「该站哪一格」（V6.7p10，用户口径：只有一侧贴住走不过去，其余能站）。
+     * 开着的活板门「门板占哪一侧」（V6.7p12，V6.7p22 修判定）。
      *
-     * <p>不把方向写死：四个邻格逐个用碰撞箱判（{@link #isStandable}），站得了的才算候选；
-     * 活板门朝向（`FACING`）只用来把那一侧的**优先级压低**（贴住/门轴那侧通常站不了）。
-     * 四邻格都不行时，退回半径 1~4 的 {@link #pearlStandSpot}。
+     * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，在薄的轴上只占 0.1875，
+     * 另一条水平轴占满 0~1。**必须先找薄轴再判方向**——旧实现按 maxX 优先，
+     * 门板贴南/北时也会命中「东」，正对面就被算成了垂直的侧面（实机「往两旁投」的根因）。
+     * 关着的时候是平铺的薄板（X/Z 占满），返回 null。
      *
-     * <p>结果按区缓存：结构没变就一直用同一格，避免每趟重算。
-     */
-    /**
-     * 开着的活板门「门板占哪一侧」（V6.7p12）。
-     *
-     * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，贴在自己那一格的某一侧，
-     * 包围盒能看出来（maxX≈1 → 东侧，minX≈0 → 西侧……）。
-     * 关着的时候是平铺的薄板（X/Z 占满），那种情况返回 null——哪边都不挡。
-     *
-     * @return 门板贴着的那一侧；关着/不是活板门/看不出时返回 null
+     * @return 门板贴着的那一侧；关着 / 不是活板门 / 形状不可判时返回 null
      */
     private Direction openLidSide(BlockPos trapdoor) {
         var st = mc.world.getBlockState(trapdoor);
@@ -2397,72 +2389,63 @@ public class StashMover extends Module {
         VoxelShape shape = st.getCollisionShape(mc.world, trapdoor);
         if (shape.isEmpty()) return null;
         Box b = shape.getBoundingBox();
-        if (b.maxX >= 0.99) return Direction.EAST;
-        if (b.minX <= 0.01) return Direction.WEST;
-        if (b.maxZ >= 0.99) return Direction.SOUTH;
-        if (b.minZ <= 0.01) return Direction.NORTH;
-        return null;
+        return switch (StashMoveLogic.thinPanelSide(b.minX, b.minZ, b.maxX, b.maxZ)) {
+            case EAST -> Direction.EAST;
+            case WEST -> Direction.WEST;
+            case SOUTH -> Direction.SOUTH;
+            case NORTH -> Direction.NORTH;
+            default -> null;
+        };
     }
 
     /**
-     * 柱子旁边「该站哪一格」（V6.7p18 重写）。
+     * 柱子旁边「该站哪一格」（V6.7p18 重写，V6.7p22 收紧为「只认正对面」）。
      *
      * <p>为什么必须正对面：门板立在自己那一格的某一侧，站对面贴到边缘也碰不到它；
      * 站侧面或门板那一侧，按住 Shift 往前贴的时候人物碰撞箱（0.6 宽）会顶到门板，
-     * 走不到位 → 珍珠投不进腔室。这正是实机反馈的「走不到合适位置」。
+     * 走不到位 → 珍珠投不进腔室。
      *
-     * <p>⚠️ 旧实现（p12~p17）有两个连着的坑，也是「每次都在旁边投」的真正原因：
+     * <p>⚠️ V6.7p22 修掉的两个「向两旁扩展」来源：
      * <ol>
-     *   <li>站位发生在开门**之前**，此时 {@link #openLidSide} 返回 null（平铺的薄板看不出占哪侧），
-     *       于是只按「离得近」挑一格，根本没有正前方概念；</li>
-     *   <li>挑出来的格子还会写进缓存并**永久短路**，门开了也不会重算。</li>
+     *   <li>{@link #openLidSide} 原来按 maxX 优先判方向，南北朝向的门板会被误判成东侧 →
+     *       「正对面」算成垂直侧面；</li>
+     *   <li>正前方站不了时会打挑一个侧面（+100 分）甚至退回 {@link #pearlStandSpot} 的环形搜索。
+     *       现在投掷阶段（{@link SettlePurpose#THROW}）**只返回正前方那一格**，站不了就返回 null，
+     *       由调用方报警，不再侧站。</li>
      * </ol>
-     * 现在：门关着只给一个「够得着」的临时落脚点（{@link #pearlStandSpot}），
-     * 门开之后才按门板侧算正对面，而且**不缓存**（每次现算，就几次方块查询）。
      */
-    private BlockPos throwStandSpot(BlockPos trapdoor) {
+    private BlockPos throwStandSpot(BlockPos trapdoor, SettlePurpose purpose) {
         if (mc.world == null || mc.player == null) return null;
         BlockPos water = trapdoor.down(1);
         Direction lid = openLidSide(trapdoor);
         if (lid == null) {
-            // 门还关着：读不出门板占哪侧，先给个能站人的临时点。
-            // 开门后 tickThrowSequence 会再调一次 settlePosition，那时才算正前方。
-            return pearlStandSpot(trapdoor);
+            // 门还关着 / 读不出门板：脱困可以随便找一格；投掷绝不允许（宁可报警也不乱投）
+            return purpose == SettlePurpose.THROW ? null : pearlStandSpot(trapdoor);
         }
 
         Direction front = lid.getOpposite();
+        BlockPos frontSpot = frontStandSpot(trapdoor, water, front);
+        if (frontSpot != null) {
+            if (debug.get() && tick % 100 == 0) {
+                debugMsg("[站位] 门板占" + lid.asString() + "侧 → 站正对面 " + front.asString());
+            }
+            return frontSpot;
+        }
+
+        // V6.7p22：正前方站不了时**不再退回侧面**。投掷阶段直接失败；脱困阶段才允许就近站一格。
+        if (purpose == SettlePurpose.THROW) return null;
+        return pearlStandSpot(trapdoor);
+    }
+
+    /** 正前方那一格（脚与门同层或上一层）；两格都站不了返回 null。 */
+    private BlockPos frontStandSpot(BlockPos trapdoor, BlockPos water, Direction front) {
         for (int level = 0; level <= 1; level++) {
             BlockPos p = new BlockPos(trapdoor.getX() + front.getOffsetX(),
                 trapdoor.getY() + level, trapdoor.getZ() + front.getOffsetZ());
-            if (p.equals(water) || !isStandable(p)) continue;
-            if (debug.get() && tick % 100 == 0) {
-                debugMsg("[站位] 门板占" + lid.asString() + "侧 → 站正对面");
-            }
-            return p;
+            if (p.equals(water)) continue;
+            if (isStandable(p)) return p;
         }
-
-        // 正前方站不了（用户口径：正常结构永远可站，这里只是兜底，避免直接卡死）
-        BlockPos best = null;
-        for (int level = 0; level <= 1 && best == null; level++) {
-            int feetY = trapdoor.getY() + level;
-            double bestScore = Double.MAX_VALUE;
-            for (Direction d : HORIZONTALS) {
-                BlockPos p = new BlockPos(trapdoor.getX() + d.getOffsetX(), feetY, trapdoor.getZ() + d.getOffsetZ());
-                if (p.equals(water) || !isStandable(p)) continue;
-                double score = p.getSquaredDistance(mc.player.getBlockPos());
-                if (d == lid) score += 1000;                       // 门板那一侧：贴过去必撞
-                else if (d != front) score += 100;                 // 垂直两侧次之
-                if (score < bestScore) {
-                    bestScore = score;
-                    best = p;
-                }
-            }
-        }
-        if (best != null) {
-            warnThrottled("活板门正前方那一格站不了，退回侧面站位（建议检查结构）");
-            return best;
-        }
-        return pearlStandSpot(trapdoor);
+        return null;
     }
 
     /**
@@ -2552,11 +2535,21 @@ public class StashMover extends Module {
      * @return true = 已站好（并记下“原位”，投完退回这里）
      */
     private boolean settlePosition(BlockPos trapdoorPos) {
+        return settlePosition(trapdoorPos, SettlePurpose.ESCAPE);
+    }
+
+    private boolean settlePosition(BlockPos trapdoorPos, SettlePurpose purpose) {
         if (mc.player == null) return false;
-        BlockPos spot = throwStandSpot(trapdoorPos);
+        BlockPos spot = throwStandSpot(trapdoorPos, purpose);
         if (spot == null) {
             dumpStandSpotFailure(trapdoorPos);
-            enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
+            if (purpose == SettlePurpose.THROW) {
+                // 交给 tickThrowSequence 的「重走」计时器处理（门可能刚开、方块状态还没同步完），
+                // 但无论如何都不会退到侧面投掷。
+                debugMsg("[站位] 正前方站不了或读不出门板朝向，拒绝侧站投掷");
+            } else {
+                enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
+            }
             return false;
         }
 
@@ -2608,9 +2601,25 @@ public class StashMover extends Module {
      * <p>只用在「已经站在柱子旁那一格中心」之后，位移最多 1 格，蹲着不会掉进柱子里；
      * 走不动就说明到边缘了，可以直接低头投。
      *
-     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退
+     * <p>V6.7p22：进门先确认「人就在门板正对面那一格」——不在就返回 3 让调用方重站，
+     * 保证任何情况下都不会从侧面/门板侧起投。
+     *
+     * @return 0=还在走 1=已到边缘可投 2=踩进水里要退 3=不在活板门正对面（需重站）
      */
-    private int sneakStepToEdge(BlockPos water, int maxTicks) {
+    private int sneakStepToEdge(BlockPos trapdoor, int maxTicks) {
+        BlockPos water = trapdoor.down(1);
+        Direction lid = openLidSide(trapdoor);
+        if (lid == null) return 3;
+        Direction front = lid.getOpposite();
+        // 用「沿正前方轴的投影」判定，而不是到格心的距离：贴边时人会朝柱心移动，
+        // 到格心的距离会变大，用距离会在半途把人退回。
+        double dx = mc.player.getX() - (trapdoor.getX() + 0.5);
+        double dz = mc.player.getZ() - (trapdoor.getZ() + 0.5);
+        if (!StashMoveLogic.onFrontSide(dx, dz, front.getOffsetX(), front.getOffsetZ(),
+                FRONT_CELL_TOLERANCE)) {
+            return 3;
+        }
+
         sneakForThrow();
         Vec3d aim = columnAimPoint(water);
         float yaw = (float) (Math.toDegrees(Math.atan2(aim.z - mc.player.getZ(), aim.x - mc.player.getX())) - 90.0);
@@ -2661,6 +2670,17 @@ public class StashMover extends Module {
 
     /** 「投一颗珍珠进柱子」共享子流程的结果（V6.7p13 起，三人 1号 与 双号搬运端共用）。 */
     private enum ThrowSeq { RUNNING, DONE, NO_PEARL, FAILED }
+
+    /**
+     * 站位目的（V6.7p22）。
+     *
+     * <ul>
+     *   <li>{@link #ESCAPE}：先从气泡柱里出来，允许站到附近任意能站的格；</li>
+     *   <li>{@link #THROW}：投掷前的站位，**只允许活板门门板的正对面**，正前方被挡就拒绝投掷，
+     *       绝不退到侧面（旧实现会打分挑侧面，实机就是「往两旁投」）。</li>
+     * </ul>
+     */
+    private enum SettlePurpose { ESCAPE, THROW }
 
     /** 三人模式 1 号的投掷入口（具体步骤在 {@link #tickThrowSequence}）。 */
     private void trioThrow() {
@@ -2719,8 +2739,8 @@ public class StashMover extends Module {
                     trapdoorClickAttempts = 0;
                     trapdoorRetreats = 0;
                     // V6.7p18：门开着才读得出门板占哪侧 —— 到这里才把站位纠到「正前方」。
-                    // 旧实现在开门前就选好站位还写了缓存，门开了也不重算，于是每次都站旁边。
-                    if (!settlePosition(stand)) {
+                    // V6.7p22：这里必须用 THROW 口径（只认正对面），且站不了时不再退侧面。
+                    if (!settlePosition(stand, SettlePurpose.THROW)) {
                         if (frontWalkStart == 0) {
                             frontWalkStart = tick;
                         } else if (tick - frontWalkStart > FRONT_ALIGN_TIMEOUT) {
@@ -2728,8 +2748,12 @@ public class StashMover extends Module {
                             frontWalkStart = tick;
                             PathManagers.get().stop();
                             if (frontAlignTries > FRONT_ALIGN_MAX_TRIES) {
-                                enterStuck("活板门已开，但走不到正前方（已重走 " + FRONT_ALIGN_MAX_TRIES
-                                    + " 次），请检查正前方那一格是否被占");
+                                Direction lidNow = openLidSide(stand);
+                                enterStuck(lidNow == null
+                                    ? "活板门已开，但读不出门板朝向（形状异常/不是活板门），拒绝投掷"
+                                    : "活板门正前方（" + lidNow.getOpposite().asString()
+                                        + " 侧）那一格站不了，已重走 " + FRONT_ALIGN_MAX_TRIES
+                                        + " 次；本模块只在正对面投掷，不会退到侧面");
                                 return ThrowSeq.FAILED;
                             }
                             warnThrottled("还没站到活板门正前方，重走（第 " + frontAlignTries + " 次）");
@@ -2784,13 +2808,18 @@ public class StashMover extends Module {
             case 3 -> {
                 // V6.7p10：站位已经由 settlePosition 站到「柱子旁那一格中心」，
                 // 这里只做最后 1 格的潜行贴边（蹲着不会掉进柱子里），走不动就说明到边缘了。
-                int r = sneakStepToEdge(water, TRIO_APPROACH_TIMEOUT);
+                int r = sneakStepToEdge(stand, TRIO_APPROACH_TIMEOUT);
                 if (r == 1) {
                     setThrowSub(4, "已到柱子边缘，低头投掷");
                     cooldown = PACE_STEP;
                 } else if (r == 2) {
                     debugMsg("[贴边] 踩进气泡柱了，先退开重来");
                     setThrowSub(5, "贴边时踩进水里");
+                    cooldown = PACE_STEP;
+                } else if (r == 3) {
+                    // V6.7p22：人不在门板正对面 → 回去重新站位，绝不从侧面投
+                    debugMsg("[贴边] 人不在活板门正前方，退回重新站位");
+                    setThrowSub(2, "不在正前方，重新站位");
                     cooldown = PACE_STEP;
                 }
             }
@@ -3349,10 +3378,13 @@ public class StashMover extends Module {
         if (!debug.get() || mc.world == null || mc.player == null) return;
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
+        Direction lid = openLidSide(trapdoorPos);
         debugMsg("[脱困] 找不到可站格｜自身=" + blockName(feet)
             + " 脚下=" + blockName(feet.down())
             + " 水中=" + mc.player.isTouchingWater()
             + "｜活板门打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
+            + " 门板=" + (lid == null ? "不可判" : lid.asString())
+            + " 正对面=" + (lid == null ? "不可判" : lid.getOpposite().asString())
             + " 水格=" + blockName(water));
     }
 
@@ -3361,12 +3393,6 @@ public class StashMover extends Module {
         return net.minecraft.registry.Registries.BLOCK.getId(mc.world.getBlockState(p).getBlock()).getPath();
     }
 
-    /**
-     * 投掷前的站位与活板门准备：
-     * ① 走到活板门旁边的实心格（绝不踩气泡柱）；② 活板门关着就点开。
-     *
-     * @return true = 已就位且活板门开着，可以投
-     */
     /** 投掷时按住潜行键（防止走位滑进气泡柱）。 */
     private void sneakForThrow() {
         if (mc.options == null) return;
@@ -3382,21 +3408,25 @@ public class StashMover extends Module {
     }
 
     /**
-     * 气泡柱里是否已经有<b>自己的</b>珍珠（严格判定：XZ 误差 ≤0.9 格、Y 在水柱内）。
+     * 气泡柱里是否已经有<b>自己的</b>珍珠（严格判定：XZ 必须真在 1×1 柱内、Y 在水柱内）。
      *
      * <p>用途有两个：① 投掷前先查——已经有珍珠就不必再投（用户口径）；
-     * ② 投掷后校验——必须真的落在柱内才算成功（原来 Y±8 的宽松范围会把落在活板门上的也算成功）。
+     * ② 投掷后校验——必须真的落在柱内才算成功。
+     *
+     * <p>V6.7p22：XZ 容差从 0.9 收紧到 {@link #PEARL_IN_COLUMN_XZ}（0.55）。原来的 0.9
+     * 会把落在**旁边方块**上的珍珠也算成「柱内」（用户说的「检测向两旁扩展」），
+     * 结果是回程票没投进去、模块却以为成功，下一趟拉不回来。
      */
     private boolean ownPearlInColumn(BlockPos water) {
-        if (mc.world == null) return false;
+        if (mc.world == null || mc.player == null) return false;
         for (Entity e : mc.world.getEntities()) {
             if (!(e instanceof EnderPearlEntity pearl)) continue;
             Entity owner = pearl.getOwner();
             boolean mine = owner == mc.player
                 || (owner != null && owner.getUuid().equals(mc.player.getUuid()));
             if (!mine) continue;
-            if (Math.abs(pearl.getX() - (water.getX() + 0.5)) <= 0.9
-                && Math.abs(pearl.getZ() - (water.getZ() + 0.5)) <= 0.9
+            if (StashMoveLogic.pearlInColumn(pearl.getX(), pearl.getZ(),
+                    water.getX(), water.getZ(), PEARL_IN_COLUMN_XZ)
                 && pearl.getY() >= water.getY() - 8.0
                 && pearl.getY() <= water.getY() + 1.6) {
                 return true;

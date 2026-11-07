@@ -311,4 +311,76 @@ public final class StashMoveLogic {
         }
         return false;
     }
+
+    // ==================== V6.7p22：投掷侧的几何判定 ====================
+
+    /** 竖直薄板贴在方块的哪一侧（活板门开启时的门板）。 */
+    public enum BoxSide { EAST, WEST, SOUTH, NORTH, UNKNOWN }
+
+    /**
+     * 从碰撞箱判断「竖着的薄板贴在哪一侧」（V6.7p22 修复）。
+     *
+     * <p>活板门打开后是一张 3/16 厚的竖板：**在薄的轴上只占 0.1875，在另一条水平轴上占满 0~1**。
+     * 旧实现按 {@code maxX→东 / minX→西 / maxZ→南 / minZ→北} 的顺序判，
+     * 门板贴南/北时 {@code maxX} 同样是 1.0（因为它横跨整个 X），于是南北朝向被误判成「东」，
+     * 正对面变成垂直的侧面 —— 实机表现就是「往两旁投」。
+     *
+     * <p>必须先找出**薄的那条轴**，再在该轴上判东/西或南/北；不是「一薄一满」的竖板一律返回
+     * {@link BoxSide#UNKNOWN}（宁可停下来报警，也不猜一个侧面）。
+     *
+     * @param minX 碰撞箱最小 X（0~1）
+     * @param minZ 碰撞箱最小 Z（0~1）
+     * @param maxX 碰撞箱最大 X（0~1）
+     * @param maxZ 碰撞箱最大 Z（0~1）
+     */
+    public static BoxSide thinPanelSide(double minX, double minZ, double maxX, double maxZ) {
+        double sx = maxX - minX;
+        double sz = maxZ - minZ;
+        boolean thinX = sx <= 0.25 && sz >= 0.99;
+        boolean thinZ = sz <= 0.25 && sx >= 0.99;
+        if (thinX) {
+            if (maxX >= 0.99) return BoxSide.EAST;
+            if (minX <= 0.01) return BoxSide.WEST;
+            return BoxSide.UNKNOWN;
+        }
+        if (thinZ) {
+            if (maxZ >= 0.99) return BoxSide.SOUTH;
+            if (minZ <= 0.01) return BoxSide.NORTH;
+            return BoxSide.UNKNOWN;
+        }
+        return BoxSide.UNKNOWN;
+    }
+
+    /**
+     * 珍珠是否真的落在 1×1 气泡柱内（V6.7p22 收紧）。
+     *
+     * <p>旧判定用 ±0.9 格：珍珠落在**旁边的方块**上（离柱心 0.75~1.0）也会被算作「柱内」，
+     * 即用户说的「检测向两旁扩展」—— 回程票其实没进柱，模块却以为成功了。
+     * 1×1 方块的半宽是 0.5，取 0.55 既有余量又不会跨格。
+     */
+    public static boolean pearlInColumn(double pearlX, double pearlZ,
+                                        int waterX, int waterZ, double tolerance) {
+        double dx = Math.abs(pearlX - (waterX + 0.5));
+        double dz = Math.abs(pearlZ - (waterZ + 0.5));
+        return dx <= tolerance && dz <= tolerance;
+    }
+
+    /**
+     * 玩家是否还在「门板正对面」那一侧（V6.7p22）。
+     *
+     * <p>不能用「到正前方格心的距离」判：贴边时人会朝柱心移动，离格心越来越远，
+     * 半途就会被误判成「不在正前方」而退回。这里改成沿正前方轴投影：
+     * 沿轴分量在 {@code (0.05, 1.2]} 之间（还在门前、没跨过柱心），垂直分量 ≤ {@code maxPerp}。
+     *
+     * @param dx        玩家 X - 活板门中心 X
+     * @param dz        玩家 Z - 活板门中心 Z
+     * @param frontDx   正前方的 X 分量（-1/0/1）
+     * @param frontDz   正前方的 Z 分量（-1/0/1）
+     * @param maxPerp   垂直方向允许的偏移（格）
+     */
+    public static boolean onFrontSide(double dx, double dz, int frontDx, int frontDz, double maxPerp) {
+        double along = dx * frontDx + dz * frontDz;
+        double perp = Math.abs(dx * frontDz) + Math.abs(dz * frontDx);
+        return along > 0.05 && along <= 1.2 && perp <= maxPerp;
+    }
 }
