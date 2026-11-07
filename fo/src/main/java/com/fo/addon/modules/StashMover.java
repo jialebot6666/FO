@@ -863,6 +863,18 @@ public class StashMover extends Module {
     private static final long SPOT_RETRY_AFTER_TICKS = 1200;
     /** 上次换格的 tick（40 tick 节流：一次失败只换一次格）。 */
     private long lastSpotRotateTick;
+
+    // ===== 存储箱满仓等待（V6.7p35） =====
+    /** 存储箱满仓等待的起始 tick；0 = 未在等待。 */
+    private long storageFullWaitStart;
+    /** 等待的存储箱（换箱重新计时）。 */
+    private BlockPos storageFullWaitChest;
+    /**
+     * 存储箱满仓等待上限：3 分钟。
+     * 漏斗每 8 game tick 吸 1 个物品（2.5 个/秒），一组潜影盒（27 格不可叠）单漏斗约 11 秒吸完，
+     * 多个漏斗更快；3 分钟足够覆盖最慢的常见场地，超过即视为漏斗故障，按原语义关模块/卡死。
+     */
+    private static final long STORAGE_FULL_WAIT_LIMIT = 3600;
     /** 当前正在接近的箱子 + 开始时间（走不到就报警/跳过，别无限挂着）。 */
     private BlockPos approachChest;
     private long approachStartTick;
@@ -1052,6 +1064,7 @@ public class StashMover extends Module {
         chestApproachCache.clear();
         chestNoSpot.clear();
         chestFailedSpots.clear();
+        storageFullWaitStart = 0;
         skippedUntil.clear();
         lastFilteredWarnTick = 0;
         chestQueue.clear();
@@ -1132,6 +1145,7 @@ public class StashMover extends Module {
         chestApproachCache.clear();
         chestNoSpot.clear();
         chestFailedSpots.clear();
+        storageFullWaitStart = 0;
         chestQueue.clear();
         pullActive = false;
     }
@@ -1574,6 +1588,7 @@ public class StashMover extends Module {
         chestApproachCache.clear();
         chestNoSpot.clear();
         chestFailedSpots.clear();
+        storageFullWaitStart = 0;
         skippedUntil.clear();
         chestQueue.clear();
         queueIndex = 0;
@@ -1851,16 +1866,20 @@ public class StashMover extends Module {
             if (!goOpenChest(store)) return;
             return;
         }
+        // V6.7p35：1 tick 批量会把存储箱瞬间倒满，漏斗吸走需要时间 —— 等待而不是关模块/卡死
         if (containerIsFull()) {
+            if (waitStorageDrain(store)) return;
+            storageFullWaitStart = 0;
             closeScreen();
             if (closeWhenFull.get()) {
-                info("存储箱已满，自动关闭模块");
+                info("存储箱已满超过 " + (STORAGE_FULL_WAIT_LIMIT / 20) + " 秒，自动关闭模块");
                 toggle();
             } else {
-                warnThrottled("存储箱已满，等待清理…");
+                enterStuck("存储箱超过 " + (STORAGE_FULL_WAIT_LIMIT / 20) + " 秒仍满，请检查漏斗");
             }
             return;
         }
+        storageFullWaitStart = 0;   // 有空位了：清等待计时，下次满仓重新计
         // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
         if (oneTickTransfer.get()) {
             if (!unloadAllInOneTick()) {
@@ -2192,11 +2211,15 @@ public class StashMover extends Module {
             if (!goOpenChest(store)) return;
             return;
         }
+        // V6.7p35：同双号 —— 等漏斗吸走物品，不直接进 STUCK
         if (containerIsFull()) {
+            if (waitStorageDrain(store)) return;
+            storageFullWaitStart = 0;
             closeScreen();
-            enterStuck("存储箱已满，请清理");
+            enterStuck("存储箱超过 " + (STORAGE_FULL_WAIT_LIMIT / 20) + " 秒仍满，请检查漏斗");
             return;
         }
+        storageFullWaitStart = 0;
         // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
         if (oneTickTransfer.get()) {
             if (!unloadAllInOneTick()) {
@@ -3323,6 +3346,7 @@ public class StashMover extends Module {
         chestApproachCache.clear();
         chestNoSpot.clear();
         chestFailedSpots.clear();
+        storageFullWaitStart = 0;
             skippedUntil.clear();
             chestQueue.clear();
             queueIndex = 0;
@@ -4700,6 +4724,34 @@ public class StashMover extends Module {
         chestFailedSpots.computeIfAbsent(chest, k -> new LinkedHashMap<>()).put(spot.toImmutable(), tick);
         chestApproachCache.remove(chest);
         debugMsg("[接近] 落脚点不行（" + reason + "）→ 换下一格");
+    }
+
+    // ==================== 存储箱满仓等待（V6.7p35） ====================
+
+    /**
+     * 存储箱已满时的统一处理：**等漏斗吸走物品**，不关模块、不进 STUCK（V6.7p35）。
+     *
+     * <p>为什么以前没这个问题、1 tick 下必现：慢速卸货每 tick 只点一格，漏斗始终跟得上，
+     * 箱子从不会真正满仓；1 tick 批量把 27~36 格瞬间倒进去，箱子必然满 —— 而漏斗
+     * 每 8 game tick 才吸 1 个（一组潜影盒单漏斗约 11 秒），这段时间既不是「箱子坏了」
+     * 也不是「等人工清理」，就是正常等漏斗。
+     *
+     * <p>等待期间：保持界面打开（服务端会持续推送槽位更新，空位一出现立即可见）、
+     * 每 5 秒提示一次已等时长、每 tick 喂 {@code progress()} 防 2 分钟看门狗误杀。
+     *
+     * @param chest 存储箱坐标（用于区分「同一箱继续等」还是「换箱重新计时」）
+     * @return true = 继续等待（调用方本 tick 结束）；false = 超过 {@link #STORAGE_FULL_WAIT_LIMIT}，
+     *         调用方按原语义兜底（关模块 / 卡死）
+     */
+    private boolean waitStorageDrain(BlockPos chest) {
+        if (storageFullWaitStart == 0 || storageFullWaitChest == null || !chest.equals(storageFullWaitChest)) {
+            storageFullWaitStart = tick;
+            storageFullWaitChest = chest;
+        }
+        progress();   // 等漏斗是有意义的动作，喂看门狗
+        long waitedSec = (tick - storageFullWaitStart) / 20;
+        warnThrottled("存储箱已满，等漏斗吸走物品（已等 " + waitedSec + " 秒，超时 " + (STORAGE_FULL_WAIT_LIMIT / 20) + " 秒）…");
+        return waitedSec < STORAGE_FULL_WAIT_LIMIT / 20;
     }
 
 
