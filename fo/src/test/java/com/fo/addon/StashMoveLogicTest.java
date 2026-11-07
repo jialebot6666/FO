@@ -438,4 +438,57 @@ class StashMoveLogicTest {
         assertFalse(StashMoveLogic.sameFloorForPath(64, 62), "箱子在下方 2 格");
         assertFalse(StashMoveLogic.sameFloorForPath(64, 70));
     }
+
+    // ==================== V6.7p24：告示牌 / 朝向 / 门板 → 投掷侧 ====================
+
+    @Test
+    void 投掷侧_三来源一致时取告示牌侧() {
+        // 正常结构：告示牌牌面朝东、门 FACING 也是东、门板压在西侧 → 人站东
+        assertEquals(StashMoveLogic.BoxSide.EAST,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.EAST,
+                StashMoveLogic.BoxSide.EAST, StashMoveLogic.BoxSide.WEST));
+    }
+
+    @Test
+    void 投掷侧_门关着也能靠告示牌定侧() {
+        // 这是本次要修的场景：门关着时门板读不出（panel=UNKNOWN），以前直接判「没有站位」
+        assertEquals(StashMoveLogic.BoxSide.WEST,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.WEST,
+                StashMoveLogic.BoxSide.WEST, StashMoveLogic.BoxSide.UNKNOWN));
+    }
+
+    @Test
+    void 投掷侧_没有告示牌时退回门FACING() {
+        // 原版门板恒在 FACING 的对侧 → 站 FACING 侧就是站门板对面
+        assertEquals(StashMoveLogic.BoxSide.SOUTH,
+            StashMoveLogic.pickThrowSide(null, StashMoveLogic.BoxSide.SOUTH, null));
+        assertEquals(StashMoveLogic.BoxSide.NORTH,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.UNKNOWN,
+                StashMoveLogic.BoxSide.NORTH, StashMoveLogic.BoxSide.UNKNOWN));
+    }
+
+    @Test
+    void 投掷侧_告示牌贴反被门板物理否决() {
+        // 告示牌朝东但门板正好压在东侧：人贴不过去，必须改成西侧
+        assertEquals(StashMoveLogic.BoxSide.WEST,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.EAST,
+                StashMoveLogic.BoxSide.EAST, StashMoveLogic.BoxSide.EAST));
+    }
+
+    @Test
+    void 投掷侧_只剩门板时取其对侧() {
+        assertEquals(StashMoveLogic.BoxSide.NORTH,
+            StashMoveLogic.pickThrowSide(null, null, StashMoveLogic.BoxSide.SOUTH));
+        assertEquals(StashMoveLogic.BoxSide.UNKNOWN,
+            StashMoveLogic.pickThrowSide(null, null, null));
+    }
+
+    @Test
+    void 方位对侧换算() {
+        assertEquals(StashMoveLogic.BoxSide.WEST, StashMoveLogic.BoxSide.EAST.opposite());
+        assertEquals(StashMoveLogic.BoxSide.EAST, StashMoveLogic.BoxSide.WEST.opposite());
+        assertEquals(StashMoveLogic.BoxSide.NORTH, StashMoveLogic.BoxSide.SOUTH.opposite());
+        assertEquals(StashMoveLogic.BoxSide.SOUTH, StashMoveLogic.BoxSide.NORTH.opposite());
+        assertEquals(StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.BoxSide.UNKNOWN.opposite());
+    }
 }

@@ -6,6 +6,7 @@ import com.fo.addon.utils.BlockClicker;
 import com.fo.addon.utils.FacingLogic;
 import com.fo.addon.utils.PeerMessageLogic;
 import com.fo.addon.utils.StashMoveLogic;
+import com.fo.addon.utils.StashMoveLogic.BoxSide;
 import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
@@ -31,6 +32,7 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.AbstractSignBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.TrapdoorBlock;
@@ -701,6 +703,12 @@ public class StashMover extends Module {
     private static final double TRIO_CENTER_DIST = 1.2;
     /** 判定「人在门板正对面那一格」的水平容差（格）：格子半宽 0.5，留 0.05 余量。 */
     private static final double FRONT_CELL_TOLERANCE = 0.45;
+    /** 四个水平方向（告示牌扫描 / 方向换算用）。 */
+    private static final Direction[] HORIZONTAL_DIRS = {
+        Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
+    };
+    /** 告示牌扫描高度：活板门正上方 1~3 格（用户口径：这段内必定有告示牌）。 */
+    private static final int SIGN_SCAN_UP = 3;
     /** 判定珍珠「在 1×1 柱内」的水平容差（格）：半宽 0.5，留 0.05 余量（V6.7p22 收紧，原 0.9）。 */
     private static final double PEARL_IN_COLUMN_XZ = 0.55;
     /** 判定「已居中」需要连续满足的 tick 数（PearlDrop centerStallTicks）。 */
@@ -864,6 +872,8 @@ public class StashMover extends Module {
     private int trapdoorClickAttempts;
     /** 「退开重来」轮数（V6.7p12，连点 6 次没开就退开换角度，最多 2 轮）。 */
     private int trapdoorRetreats;
+    /** 上一次打印的「朝向三来源」摘要（只在结论变化时打印，避免每 tick 刷屏）。 */
+    private String lastSideDump = "";
     /** 调试心跳：上次打印摘要的 tick。 */
     private long lastHeartbeatTick;
     /** 心跳摘要真正打印出去的 tick（内容不变时用它控制「仍在…」的间隔）。 */
@@ -2387,6 +2397,114 @@ public class StashMover extends Module {
     // ==================== 站位（V6.7p10：短按键，1 格级不再调寻路） ====================
 
     /**
+     * 活板门上方 1~3 格内找告示牌，返回**牌面朝向**（= 人该站的那一侧，V6.7p24）。
+     *
+     * <p>用户场地铁律：活板门正上方 1~3 格内必定有告示牌，人站在告示牌正对面（也就是
+     * 牌面所指的那一侧）投掷。告示牌是**门关着时也能读**的锚点 —— 旧实现只看「开启后的
+     * 门板碰撞箱」，门一关就什么都读不出，只能退回环形搜索，于是站到南/北侧去投。
+     *
+     * <p>四种告示牌（立牌 / 墙牌 / 挂牌 / 墙挂牌）都由
+     * {@link AbstractSignBlock#getRotationDegrees} 给出「文字正面朝哪」的角度，
+     * 直接 {@link Direction#fromHorizontalDegrees} 即可，不用自己按 ROTATION 算。
+     *
+     * <p>扫描顺序：先把「正上方」1~3 格扫完（立牌/挂牌/水下的墙牌都可能正好在这一列），
+     * 再扫四个水平邻格（贴旁边墙上的墙牌会偏出 1 格）。
+     *
+     * @return 牌面朝向；1~3 格内没有告示牌时返回 null
+     */
+    private Direction signThrowSide(BlockPos trapdoor) {
+        if (mc.world == null) return null;
+        // 第一遍只扫「正上方」：立牌/挂牌/水下的墙牌都可能正好在这一列
+        for (int dy = 1; dy <= SIGN_SCAN_UP; dy++) {
+            Direction face = signFaceAt(trapdoor.up(dy));
+            if (face != null) return face;
+        }
+        // 第二遍才扫四个邻格：贴在旁边墙上的墙牌会偏出 1 格
+        for (int dy = 1; dy <= SIGN_SCAN_UP; dy++) {
+            BlockPos base = trapdoor.up(dy);
+            for (Direction h : HORIZONTAL_DIRS) {
+                Direction face = signFaceAt(base.offset(h));
+                if (face != null) return face;
+            }
+        }
+        return null;
+    }
+
+    /** 该格是告示牌就返回牌面朝向，否则 null。 */
+    private Direction signFaceAt(BlockPos p) {
+        var st = mc.world.getBlockState(p);
+        if (!(st.getBlock() instanceof AbstractSignBlock sign)) return null;
+        Direction face = Direction.fromHorizontalDegrees(sign.getRotationDegrees(st));
+        return face.getAxis().isHorizontal() ? face : null;
+    }
+
+    /**
+     * 投掷/贴边必须站的那一侧（V6.7p24）。
+     *
+     * <p>三个来源，优先级从高到低：
+     * <ol>
+     *   <li><b>告示牌牌面</b>：用户场地的固定标志，门关着也能读；</li>
+     *   <li><b>活板门 FACING</b>：放置朝向。原版门板恒在 FACING 的对侧（字节码里
+     *       {@code shapeByDirection} 的基准形状就贴在 FACING 的对边），所以站 FACING 侧
+     *       就是站门板对面；门关着也能读；</li>
+     *   <li><b>开启后的门板</b>：p22 的几何口径，取其对面。</li>
+     * </ol>
+     *
+     * <p>三者理论上指向同一侧；真出现告示牌贴反/结构异常时，
+     * {@link StashMoveLogic#pickThrowSide} 会用「门板侧不能站人」做物理否决。
+     *
+     * @return 该站的一侧；三个来源都读不出时返回 null（投掷阶段会拒绝侧站）
+     */
+    private Direction throwFrontSide(BlockPos trapdoor) {
+        if (mc.world == null || trapdoor == null) return null;
+        var st = mc.world.getBlockState(trapdoor);
+        if (!(st.getBlock() instanceof TrapdoorBlock)) return null;
+
+        BoxSide sign = boxSideOf(signThrowSide(trapdoor));
+        BoxSide facing = boxSideOf(st.get(TrapdoorBlock.FACING));
+        BoxSide panel = boxSideOf(openLidSide(trapdoor));
+        BoxSide picked = StashMoveLogic.pickThrowSide(sign, facing, panel);
+
+        String dump = "告示牌=" + boxSideName(sign) + " 门FACING=" + boxSideName(facing)
+            + " 门板=" + boxSideName(panel);
+        if (!dump.equals(lastSideDump)) {
+            lastSideDump = dump;
+            if (picked == BoxSide.UNKNOWN) {
+                debugMsg("[朝向] " + dump + " → 读不出投掷侧（门开后会重试）");
+            } else {
+                debugMsg("[朝向] " + dump + " → 站 " + boxSideName(picked) + " 侧");
+            }
+        }
+        return directionOf(picked);
+    }
+
+    private static BoxSide boxSideOf(Direction d) {
+        if (d == null) return BoxSide.UNKNOWN;
+        return switch (d) {
+            case EAST -> BoxSide.EAST;
+            case WEST -> BoxSide.WEST;
+            case SOUTH -> BoxSide.SOUTH;
+            case NORTH -> BoxSide.NORTH;
+            default -> BoxSide.UNKNOWN;
+        };
+    }
+
+    private static Direction directionOf(BoxSide s) {
+        if (s == null) return null;
+        return switch (s) {
+            case EAST -> Direction.EAST;
+            case WEST -> Direction.WEST;
+            case SOUTH -> Direction.SOUTH;
+            case NORTH -> Direction.NORTH;
+            default -> null;
+        };
+    }
+
+    private static String boxSideName(BoxSide s) {
+        return s == null ? "?" : s.name();
+    }
+
+    /**
      * 开着的活板门「门板占哪一侧」（V6.7p12，V6.7p22 修判定）。
      *
      * <p>直接读碰撞箱：开着的门板是一张 3/16 厚的竖板，在薄的轴上只占 0.1875，
@@ -2431,18 +2549,16 @@ public class StashMover extends Module {
     private BlockPos throwStandSpot(BlockPos trapdoor, SettlePurpose purpose) {
         if (mc.world == null || mc.player == null) return null;
         BlockPos water = trapdoor.down(1);
-        Direction lid = openLidSide(trapdoor);
-        if (lid == null) {
-            // 门还关着 / 读不出门板：脱困可以随便找一格；投掷绝不允许（宁可报警也不乱投）
+        // V6.7p24：不再只看「开启后的门板」——告示牌 / 活板门 FACING 在门关着时也能定侧。
+        Direction front = throwFrontSide(trapdoor);
+        if (front == null) {
+            // 三个来源全读不出（不是活板门 / 形状异常 / 上方没告示牌）：
+            // 脱困可以就近找一格；投掷绝不允许（宁可报警也不乱投）
             return purpose == SettlePurpose.THROW ? null : pearlStandSpot(trapdoor);
         }
 
-        Direction front = lid.getOpposite();
         BlockPos frontSpot = frontStandSpot(trapdoor, water, front);
         if (frontSpot != null) {
-            if (debug.get() && tick % 100 == 0) {
-                debugMsg("[站位] 门板占" + lid.asString() + "侧 → 站正对面 " + front.asString());
-            }
             return frontSpot;
         }
 
@@ -2622,9 +2738,9 @@ public class StashMover extends Module {
      */
     private int sneakStepToEdge(BlockPos trapdoor, int maxTicks) {
         BlockPos water = trapdoor.down(1);
-        Direction lid = openLidSide(trapdoor);
-        if (lid == null) return 3;
-        Direction front = lid.getOpposite();
+        // V6.7p24：和站位同源（告示牌 → FACING → 门板），不再只依赖开启后的碰撞箱
+        Direction front = throwFrontSide(trapdoor);
+        if (front == null) return 3;
         // 用「沿正前方轴的投影」判定，而不是到格心的距离：贴边时人会朝柱心移动，
         // 到格心的距离会变大，用距离会在半途把人退回。
         double dx = mc.player.getX() - (trapdoor.getX() + 0.5);
@@ -2762,10 +2878,11 @@ public class StashMover extends Module {
                             frontWalkStart = tick;
                             PathManagers.get().stop();
                             if (frontAlignTries > FRONT_ALIGN_MAX_TRIES) {
-                                Direction lidNow = openLidSide(stand);
-                                enterStuck(lidNow == null
-                                    ? "活板门已开，但读不出门板朝向（形状异常/不是活板门），拒绝投掷"
-                                    : "活板门正前方（" + lidNow.getOpposite().asString()
+                                // V6.7p24：三来源（告示牌/朝向/门板）任一能读出就给具体方向
+                                Direction frontNow = throwFrontSide(stand);
+                                enterStuck(frontNow == null
+                                    ? "活板门已开，但告示牌/朝向/门板三处都读不出投掷侧，拒绝投掷"
+                                    : "投掷侧（" + frontNow.asString()
                                         + " 侧）那一格站不了，已重走 " + FRONT_ALIGN_MAX_TRIES
                                         + " 次；本模块只在正对面投掷，不会退到侧面");
                                 return ThrowSeq.FAILED;
@@ -3393,12 +3510,15 @@ public class StashMover extends Module {
         BlockPos feet = mc.player.getBlockPos();
         BlockPos water = trapdoorPos.down(1);
         Direction lid = openLidSide(trapdoorPos);
+        Direction sign = signThrowSide(trapdoorPos);
+        Direction front = throwFrontSide(trapdoorPos);
         debugMsg("[脱困] 找不到可站格｜自身=" + blockName(feet)
             + " 脚下=" + blockName(feet.down())
             + " 水中=" + mc.player.isTouchingWater()
             + "｜活板门打开=" + trapdoorIsOpenOrAbsent(trapdoorPos)
             + " 门板=" + (lid == null ? "不可判" : lid.asString())
-            + " 正对面=" + (lid == null ? "不可判" : lid.getOpposite().asString())
+            + " 告示牌=" + (sign == null ? "1~3 格内没找到" : sign.asString())
+            + " 投掷侧=" + (front == null ? "不可判" : front.asString())
             + " 水格=" + blockName(water));
     }
 
