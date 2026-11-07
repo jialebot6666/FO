@@ -238,6 +238,14 @@ public class StashMover extends Module {
         .sliderMax(4.0)
         .build());
 
+    private final Setting<Boolean> oneTickTransfer = sgGeneral.add(new BoolSetting.Builder()
+        .name("1 tick 瞬时存取")
+        .description("测试功能（默认关）：开箱后把「全量取货 / 全量存货 / 末影箱存取」的全部窗口点击压缩到"
+            + " 1 tick 内完成，不再分 tick 慢速搬运。用于验证服务器反作弊是否放行 1 tick 存取"
+            + "（参考 zenithproxy 可 1 tick 存取不被踢）。双号/三号通用，关掉即恢复原有节奏。")
+        .defaultValue(false)
+        .build());
+
     private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
         .name("本次搬运")
         .description("只统计本次在线：趟数 + 潜影盒数。关模块不清零，断线/退服清零；右侧按钮可手动重置。")
@@ -1853,6 +1861,15 @@ public class StashMover extends Module {
             }
             return;
         }
+        // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
+        if (oneTickTransfer.get()) {
+            if (!unloadAllInOneTick()) {
+                closeScreen();
+                finishDualUnload();
+                return;
+            }
+            return;   // cooldown 已在批量里压到 2 tick，等服务端确认后再看下一步
+        }
         int slot = findInventorySlotToUnload();
         if (slot < 0) {
             closeScreen();
@@ -2178,6 +2195,15 @@ public class StashMover extends Module {
         if (containerIsFull()) {
             closeScreen();
             enterStuck("存储箱已满，请清理");
+            return;
+        }
+        // V6.7p34：1 tick 瞬时存取 —— 全部可卸物品一次点完；没点过就按「卸完了」收尾
+        if (oneTickTransfer.get()) {
+            if (!unloadAllInOneTick()) {
+                closeScreen();
+                finishTrioUnload();
+                return;
+            }
             return;
         }
         int slot = findInventorySlotToUnload();
@@ -3843,6 +3869,8 @@ public class StashMover extends Module {
     private StashMoveLogic.TakeOutcome takeFromContainer() {
         ScreenHandler handler = containerHandler();
         if (handler == null) return StashMoveLogic.TakeOutcome.EMPTY;
+        // V6.7p34：1 tick 瞬时存取 —— 容器里所有符合条件的物品一次点完
+        if (oneTickTransfer.get()) return takeAllInOneTick();
         int size = handler.slots.size();
         boolean anyItem = false;
         for (int i = 0; i < size - 36; i++) {
@@ -3895,6 +3923,93 @@ public class StashMover extends Module {
             if (!handler.getSlot(i).getStack().isEmpty()) return false;
         }
         return true;
+    }
+
+    // ==================== 1 tick 瞬时存取（V6.7p34，测试开关） ====================
+
+    /**
+     * 1 tick 全量取货：把容器里所有（符合「只拿潜影盒」过滤的）物品一次点完。
+     * 三态口径与 {@link #takeFromContainer} 一致。
+     *
+     * <p>按索引单遍、每格最多点一次：1.17+ 容器点击没有客户端预测，本 tick 内槽位内容不变，
+     * 不会「同一格点两次搬回去」；服务端确认晚到时最多多几个空点击（无副作用），所以批量后
+     * 冷却压到 2 tick 等确认，而不是沿用 clickDelay。
+     */
+    private StashMoveLogic.TakeOutcome takeAllInOneTick() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return StashMoveLogic.TakeOutcome.EMPTY;
+        int size = handler.slots.size();
+        boolean anyItem = false;
+        boolean clicked = false;
+        for (int i = 0; i < size - 36; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            anyItem = true;
+            String itemId = Registries.ITEM.getId(stack.getItem()).toString();
+            if (onlyShulker.get() && !StashPearlLogic.isShulkerBoxId(itemId)) continue;
+            if (StashPearlLogic.isShulkerBoxId(itemId)) {
+                StashStats.get().addShulkers(stack.getCount());
+            }
+            clickSlot(i, SlotActionType.QUICK_MOVE);
+            clicked = true;
+        }
+        if (clicked) {
+            cooldown = 2;
+            progress();
+        }
+        return StashMoveLogic.takeOutcome(anyItem, clicked);
+    }
+
+    /**
+     * 1 tick 全量存货：把背包里所有可卸物品（珍珠/只拿潜影盒的非潜影盒排除）一次点完。
+     * @return 是否点过（点了就视为本趟卸了东西，统计口径与单格版一致）
+     */
+    private boolean unloadAllInOneTick() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
+        int size = handler.slots.size();
+        boolean clicked = false;
+        for (int i = size - 36; i < size; i++) {
+            if (!isUnloadCandidate(handler.getSlot(i).getStack())) continue;
+            clickSlot(i, SlotActionType.QUICK_MOVE);
+            clicked = true;
+        }
+        if (clicked) {
+            unloadedSomething = true;
+            cooldown = 2;
+            progress();
+        }
+        return clicked;
+    }
+
+    /** 1 tick 全量存末影箱：背包里所有可存物品（珍珠除外）一次点完。@return 是否点过。 */
+    private boolean depositAllInOneTick() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
+        int size = handler.slots.size();
+        boolean clicked = false;
+        for (int i = size - 36; i < size; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            if (!StashMoveLogic.shouldStoreInEnder(Registries.ITEM.getId(stack.getItem()).toString())) continue;
+            clickSlot(i, SlotActionType.QUICK_MOVE);
+            clicked = true;
+        }
+        return clicked;
+    }
+
+    /** 1 tick 全量取末影箱：容器里所有非空槽位一次点完。@return 是否点过。 */
+    private boolean withdrawAllInOneTick() {
+        ScreenHandler handler = containerHandler();
+        if (handler == null) return false;
+        int size = handler.slots.size();
+        boolean clicked = false;
+        for (int i = 0; i < size - 36; i++) {
+            if (handler.getSlot(i).getStack().isEmpty()) continue;
+            clickSlot(i, SlotActionType.QUICK_MOVE);
+            clicked = true;
+        }
+        return clicked;
     }
 
     private int findInventorySlotToUnload() {
@@ -4128,6 +4243,17 @@ public class StashMover extends Module {
             enderCloseCount = 0;
             debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始存货");
         }
+        // V6.7p34：1 tick 瞬时存取 —— 全部可存物品一次点完，随即结束本状态；
+        // 末影箱中途装满时多出的点击会被服务端拒收（无副作用），剩余货物由正常卸货流程处理。
+        if (oneTickTransfer.get()) {
+            boolean full = containerIsFull();
+            if (!full) depositAllInOneTick();
+            closeScreen();
+            enderPutDone = true;
+            progress();
+            if (full) warning("末影箱已满（27 格），剩下的货继续背着走");
+            return false;
+        }
         // 容量上限：27 格全满就停手，剩下的继续背着走（到存储区照常卸）
         if (containerIsFull()) {
             closeScreen();
@@ -4193,6 +4319,18 @@ public class StashMover extends Module {
             enderOpenLogged = true;
             enderCloseCount = 0;
             debugMsg("[末影箱] 界面已就绪（9x3 / 63 槽），开始取货");
+        }
+        // V6.7p34：1 tick 瞬时存取 —— 全部非空槽位一次点完，随即结束本状态回卸货。
+        // 背包中途装满时多出的点击会被服务端拒收（无副作用），取剩的货留在末影箱下一趟继续。
+        if (oneTickTransfer.get()) {
+            boolean room = findEmptyPlayerSlotInHandler() >= 0;
+            boolean any = room && withdrawAllInOneTick();
+            closeScreen();
+            enderTakeDone = true;
+            progress();
+            if (!room) warning("背包已满，取不了末影箱（请检查存储箱是否够空）");
+            else if (!any) debugMsg("[末影箱] 是空的（本趟没存进去？），跳过");
+            return false;
         }
         if (containerEmpty()) {
             closeScreen();
