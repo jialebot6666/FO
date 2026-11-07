@@ -1715,7 +1715,10 @@ public class StashMover extends Module {
                 onUnloadDone();
                 return;
             }
-            openChestAt(store);
+            // V6.7p25：和取货/珍珠箱统一走 goOpenChest（走到箱子旁落脚点就停，不上箱子）。
+            // 之前这里直连 openChestAt —— 它只在「已经够得着」时点击，不会走过去，
+            // 被拉到存储区后只要离箱子 >3.5 格就会原地空转（双号专属漏洞）。
+            if (!goOpenChest(store)) return;
             return;
         }
         if (containerIsFull()) {
@@ -4031,11 +4034,13 @@ public class StashMover extends Module {
             return true;
         }
         if (a == Approach.NO_SPOT) {
-            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
-            if (m != ChestMode.SINGLE) {
+            // 队列箱子（搜索/框选）：跳过换下一个；固定目标（存储箱/珍珠箱/单箱）：报警，不拉黑
+            if (chestQueue.contains(chest)) {
                 blacklistChest(chest);
                 openChest = null;
                 debugMsg("[接近] 已跳过这个箱子（四周没有落脚点）");
+            } else {
+                enterStuck("箱子周围 3 格内没有可站的格子（不会站到箱子正上方），请检查结构");
             }
         }
         return false;
@@ -4075,10 +4080,6 @@ public class StashMover extends Module {
         ChestApproach approach = findChestApproach(pos);
         if (approach == null) {
             resetApproachTimer();
-            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
-            if (m == ChestMode.SINGLE) {
-                enterStuck("目标箱子周围 3 格内没有可站的格子（不会站到箱子正上方），请检查结构");
-            }
             return Approach.NO_SPOT;
         }
 
@@ -4086,12 +4087,12 @@ public class StashMover extends Module {
             approachChest = pos;
             approachStartTick = tick;
         } else if (tick - approachStartTick > APPROACH_TIMEOUT) {
-            ChestMode m = mode.get() == Mode.TRIO ? sourceChestMode.get() : chestMode.get();
-            boolean single = m == ChestMode.SINGLE;
+            // 队列里的箱子（搜索/框选）走不到就换下一个；固定目标（存储箱/珍珠箱/单箱）继续试
+            boolean queued = chestQueue.contains(pos);
             warning("走到箱子旁边超时（" + (APPROACH_TIMEOUT / 20) + " 秒），"
-                + (single ? "单箱模式不跳过目标，继续走" : "跳过这个箱子"));
+                + (queued ? "跳过这个箱子" : "该箱子是固定目标，继续尝试"));
             resetApproachTimer();
-            if (!single) {
+            if (queued) {
                 blacklistChest(pos);
                 return Approach.NO_SPOT;
             }

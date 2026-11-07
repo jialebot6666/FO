@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p25`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p25-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p26`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p26-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -727,6 +727,18 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - 统计：每趟卸货完成（双号 `onUnloadDone` / 三号 `trioUnload`）额外输出 `本次共 X 趟 · Y 个潜影盒`。
   - 测试：新增 `StashChestSpotLogicTest` 6 条（候选不含箱子列 / 圈数与总数 / 无重复 / 视线优先 /
     近的优先 / 同层优先），删除已被取代的 2 条 `sameFloorForPath`，全仓 **53 套件 470 测试全绿**。
+- ✅ 6.7p26：**双号模式同步性审计**（用户要求确认 p21~p25 是否只修了三号）。
+  - 结论：p21~p25 的修复都落在**双号与三号共用的方法**里（`takeFromContainer` / `isStoreSideChest` /
+    `tickThrowSequence` + `settlePosition` + `sneakStepToEdge` + `throwFrontSide` / `goOpenChest` /
+    `nextFromQueue`），双号已同步；古城偷取那条属于独立模块，与双号/三号无关。
+  - 审计中发现 **1 处双号专属漏洞已修**：`dualUnload` 原来直连 `openChestAt(store)`，
+    而 p25 起 `openChestAt` 只在「已经够得着」时点击（不再负责走过去）。被拉到存储区后
+    只要离存储箱 >3.5 格，双号就会原地空转（三号走 `goOpenChest` 没这个问题）。
+    现在改成 `goOpenChest(store)`，与取货/珍珠箱同一条路径。
+  - 顺带把 `approachChest` 的「没落脚点/超时」判定从「按箱子模式（单箱/搜索）」改成
+    「按是否队列箱子」：队列箱子跳过换下一个，固定目标（存储箱/珍珠箱/单箱）报警并继续，
+    避免把存储箱拉黑或误伤。
+  - 测试：无新增纯逻辑，全仓 **53 套件 470 测试全绿**。
 - ⚠️ 6.7p15 是**未入库**的中间版本（另一窗口产出，只交付了 jar）：内容已全部并入 6.7p16，**不要单独发 p15**。
 - ✅ 6.7p8 已修复：**启动位置随机导致的三趟冤枉路 + 跨区补珍珠死结**（用户指出「脱离→确认站位→补珍珠」这个固定顺序不对）。
   - **问题**：原状态机把「先站到柱子边」当成第一步，而 1 号启动时可能站在 2 号点、3 号点、
