@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p33`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p33-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7p34`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p34-1.21.11.jar`（详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -798,6 +798,16 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   - 删除被取代的「再靠近一格」机制（`findClosestChestSpot` / `StashChestSpotLogic.nearestToChest` +
     2 条测试 + `CLOSER_STOP_DIST`）。
   - 测试：状态机/世界查询行为无可单测纯逻辑；全仓 **53 套件 474 测试全绿**（-2 条被取代的）。
+- ✅ 6.7p34 新增：**「1 tick 瞬时存取」测试开关**（默认关，双号/三号通用）。
+  - 用途：验证服务器反作弊是否放行 1 tick 存取（参考 zenithproxy 可 1 tick 存取不被踢）。
+  - 开启后：开箱成功的那一 tick 内把**全部窗口点击**点完 —— 全量取货（`takeAllInOneTick`，仍遵守
+    「只拿潜影盒」过滤与盒数统计）、全量存货（`unloadAllInOneTick`，珍珠/非潜影盒照旧排除）、
+    末影箱存（`depositAllInOneTick`）/取（`withdrawAllInOneTick`）各一次批量，随即关闭界面结束状态；
+    取消了分 tick 的 clickDelay 慢速节奏（批量后冷却统一压到 2 tick 等服务端确认）。
+  - 实现要点：1.17+ 容器点击无客户端预测 → 按索引**单遍、每格最多点一次**（不会同格点两次搬回去）；
+    末影箱中途装满/背包中途装满时多余点击被服务端拒收（无副作用），剩余货物由正常流程兜底
+    （卸货处理 / 留在末影箱下趟取）。
+  - 默认关闭时所有流程与 p33 完全一致；本开关不改任何寻路/状态机逻辑，只改「点击的节奏」。
 - ✅ 6.7p30 已实现：**末影箱分区坐标（混合模式：坐标优先 + 校验 + 自动扫描兜底）**。
   - 末影箱组新增 4 条坐标设置（`0,0,0` = 留空 = 自动扫描，老配置零回归）：
     双号「取货区末影箱位置 / 存储区末影箱位置」，三号「待搬运箱区末影箱位置 / 存储箱区末影箱位置」，
