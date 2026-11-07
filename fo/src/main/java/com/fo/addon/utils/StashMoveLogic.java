@@ -383,4 +383,24 @@ public final class StashMoveLogic {
         double perp = Math.abs(dx * frontDz) + Math.abs(dz * frontDx);
         return along > 0.05 && along <= 1.2 && perp <= maxPerp;
     }
+
+    /**
+     * 走向容器时能不能继续用「只看 XZ」的寻路目标（V6.7p23）。
+     *
+     * <p>Baritone 的 GoalXZ 判定只有 {@code x == goal.x && z == goal.z}，**Y 完全不参与**：
+     * 站在任何一层，只要 XZ 对上就算「已到达」。把这种目标指向一个不在同一层的箱子时，
+     * A* 会在「找台阶上去」和「在脚下挖一条通往那个 XZ 的路」之间挑便宜的那条，
+     * 通常都是后者 —— 这就是实机看到的「一路向下挖、向下走，永远上不去箱子的那一层」。
+     *
+     * <p>所以只要能确认目标不在我这一层，就必须换成 Y 参与的 3D 目标（GoalGetToBlock）。
+     * 1 格以内（台阶、半砖）仍按同层处理：那种高度差点击本身也在可及范围内，
+     * 而且换成 3D 目标反而会因为「必须站到那一格」卡在箱子正上方。
+     *
+     * @param feetY   玩家脚所在格的 Y
+     * @param targetY 目标方块（箱子）的 Y
+     * @return true = 同一层，可以继续用只看 XZ 的目标；false = 必须让 Y 参与
+     */
+    public static boolean sameFloorForPath(int feetY, int targetY) {
+        return Math.abs(feetY - targetY) <= 1;
+    }
 }
