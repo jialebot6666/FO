@@ -13,6 +13,7 @@ import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOKillAura;
 import com.fo.addon.modules.StashMover;
 import com.fo.addon.utils.EnchantLevelMapSetting;
+import com.fo.addon.utils.FoSectionSetting;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StealStatsSetting;
@@ -24,6 +25,7 @@ import meteordevelopment.meteorclient.gui.utils.CharFilter;
 import meteordevelopment.meteorclient.gui.utils.SettingsWidgetFactory;
 import meteordevelopment.meteorclient.gui.widgets.WLabel;
 import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
+import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -89,9 +91,19 @@ public class AddonTemplate extends MeteorAddon {
         SettingsWidgetFactory.registerCustomFactory(StringMapSetting.class, theme -> (table, setting) ->
             StringMapSetting.fillTable(theme, table, (StringMapSetting) setting));
 
-        // V6.7：本次搬运统计（重做前端，不用古城那套只读框拼贴）——
-        //   一行「本次搬运：X 趟 · Y 个潜影盒」+ 右侧原生「重置」按钮（对齐普通功能重置键），
-        //   点击立即清零并就地刷新文字。
+        // V6.7p37 界面改版：组内小标题（只读，不占配置键）。
+        //   一个分组里设置项太多时，用一条横线在组内切出「坐标 / 参数 / 危险」三段，
+        //   比改设置名安全 —— Meteor 用组名+设置名当配置键，改名会让老配置静默回落默认值。
+        //   ⚠️ 这里**不删**框架已画好的左侧标题行：小标题就用它显示，右侧补一条横线即可
+        //     （p37 首版把标题塞进 horizontalSeparator(text)，该控件自身宽度只有 1px、
+        //      文字以 x=0 为中心绘制，结果只剩最后一个字可见）。
+        SettingsWidgetFactory.registerCustomFactory(FoSectionSetting.class, theme -> (table, setting) -> {
+            table.add(theme.horizontalSeparator()).expandX().centerY();
+        });
+
+        // V6.7p37 界面改版：本次搬运统计重画 —— 抬头「本次搬运」+ 重置按钮，下面两行「名称 | 只读框」。
+        //   ⚠️ 直接复用设置表自己的两列（左名称 / 右控件），不要另起 WTable：嵌套表格只能占第 1 列，
+        //     撑不满整行，p37 首版就是这么把「重置」挤到「本次搬运」旁边的。
         SettingsWidgetFactory.registerCustomFactory(StashStatsSetting.class, theme -> (table, setting) -> {
             StashStats stats = StashStats.get();
 
@@ -101,15 +113,25 @@ public class AddonTemplate extends MeteorAddon {
             //   删完必须补一次 row() 把游标移回来。
             table.row();
 
-            WTable grid = table.add(theme.table()).expandCellX().marginTop(6).widget();
-            WLabel value = grid.add(theme.label("本次搬运：" + stats.displayText())).expandCellX().widget();
-            value.tooltip = tooltip;
-            WButton reset = grid.add(theme.button("重置")).widget();
+            CharFilter readOnly = (text, c) -> false;
+
+            WLabel header = table.add(theme.label("本次搬运")).widget();
+            header.tooltip = tooltip;
+            WButton reset = table.add(theme.button("重置")).widget();
+            table.row();
+
+            table.add(theme.label("趟数"));
+            WTextBox tripsBox = table.add(theme.textBox(String.valueOf(stats.trips()), readOnly)).widget();
+            table.row();
+
+            table.add(theme.label("潜影盒"));
+            WTextBox shulkerBox = table.add(theme.textBox(String.valueOf(stats.shulkers()), readOnly)).widget();
+
             reset.action = () -> {
                 stats.reset();
-                value.set("本次搬运：" + stats.displayText());
+                tripsBox.set("0");
+                shulkerBox.set("0");
             };
-            grid.row();
         });
 
         // V6.27：累计统计要在模块启动前就能被设置页读到，所以加载期先读一次文件

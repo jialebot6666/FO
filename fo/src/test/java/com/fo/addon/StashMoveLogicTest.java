@@ -413,6 +413,19 @@ class StashMoveLogicTest {
     }
 
     @Test
+    void 到位但没站正时需要继续微调() {
+        // V6.7p38 死区：正前方格心在 along=1.0，站位只看「到格心距离 ≤ 0.35」，
+        // 于是 along 可能停在 1.35；而正前方判定只认 ≤ 1.2 —— 人会卡在子步骤 2↔3 横跳。
+        double eps = 0.35;
+        assertFalse(StashMoveLogic.onFrontSide(1.30, 0.0, 1, 0, 0.45), "1.30 超出正前方判定");
+        assertTrue(StashMoveLogic.needsForwardNudge(0.30, false, eps), "距离够近但没站正 → 继续顶");
+        assertFalse(StashMoveLogic.needsForwardNudge(0.30, true, eps), "已经站正 → 直接到位");
+        assertFalse(StashMoveLogic.needsForwardNudge(0.60, false, eps), "还没走近 → 正常走，不算微调");
+        assertTrue(StashMoveLogic.onFrontSide(1.10, 0.0, 1, 0, 0.45), "顶进 1.2 以内就通过");
+        assertFalse(StashMoveLogic.needsForwardNudge(0.10, true, eps));
+    }
+
+    @Test
     void 正前方判定_南北向同样成立() {
         // 正前方 = 南（frontDx=0, frontDz=1）
         assertTrue(StashMoveLogic.onFrontSide(0.0, 1.0, 0, 1, 0.45));
@@ -429,6 +442,18 @@ class StashMoveLogicTest {
         assertEquals(StashMoveLogic.BoxSide.EAST,
             StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.EAST,
                 StashMoveLogic.BoxSide.EAST, StashMoveLogic.BoxSide.WEST));
+    }
+
+    @Test
+    void 投掷侧_无活板门时只靠告示牌() {
+        // V6.7p39：活板门被挖掉 → FACING / 门板都读不到，只剩牌面朝向
+        assertEquals(StashMoveLogic.BoxSide.SOUTH,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.SOUTH,
+                StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.BoxSide.UNKNOWN));
+        // 连告示牌都没有 → 仍然拒绝（不乱站侧）
+        assertEquals(StashMoveLogic.BoxSide.UNKNOWN,
+            StashMoveLogic.pickThrowSide(StashMoveLogic.BoxSide.UNKNOWN,
+                StashMoveLogic.BoxSide.UNKNOWN, StashMoveLogic.BoxSide.UNKNOWN));
     }
 
     @Test

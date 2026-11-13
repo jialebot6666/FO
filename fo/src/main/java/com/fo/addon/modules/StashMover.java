@@ -10,6 +10,7 @@ import com.fo.addon.utils.StashMoveLogic.BoxSide;
 import com.fo.addon.utils.StashChestSpotLogic;
 import com.fo.addon.utils.StashPearlLogic;
 import com.fo.addon.utils.StashStats;
+import com.fo.addon.utils.FoSectionSetting;
 import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StringMapSetting;
 import com.fo.addon.utils.TeleportFloodDetector;
@@ -26,6 +27,7 @@ import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.IVisible;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringListSetting;
@@ -47,6 +49,7 @@ import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
+import net.minecraft.network.packet.s2c.play.PositionFlag;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
@@ -69,6 +72,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * FO 自动搬运（V6.7 新增）。
@@ -96,8 +100,8 @@ import java.util.Set;
 public class StashMover extends Module {
 
     public enum Mode {
-        MOVER("搬运端（双号）"),
-        PEARL("拉珍珠端（双号）"),
+        MOVER("搬运端 · 双号"),
+        PEARL("拉珍珠端 · 双号"),
         TRIO("三号模式");
 
         private final String label;
@@ -194,45 +198,69 @@ public class StashMover extends Module {
     // ==================== 设置 ====================
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    // ⚠️ 分组顺序 = 设置页里的显示顺序。组名**不能改**（Meteor 用组名匹配已存的配置），
+    //   只调整创建顺序：先按角色（双号 → 三号），共用件（末影箱、拉珍珠端）沉到最后。
     private final SettingGroup sgMover = settings.createGroup("搬运（双号）");
-    private final SettingGroup sgPearl = settings.createGroup("拉珍珠");
     private final SettingGroup sgTrio = settings.createGroup("三号模式");
     private final SettingGroup sgEnder = settings.createGroup("末影箱");
+    private final SettingGroup sgPearl = settings.createGroup("拉珍珠");
+
+    /**
+     * 组内小标题（V6.7p37 界面改版）。
+     *
+     * <p>长分组靠它切出「坐标 / 参数 / 危险」三段。**不承载配置**，加多少条都不影响老存档；
+     * 名字只用于显示（{@code Setting.title} 由名字推导，中文原样输出）。
+     */
+    private static Setting<Boolean> section(SettingGroup group, String name) {
+        return section(group, name, null);
+    }
+
+    private static Setting<Boolean> section(SettingGroup group, String name, IVisible visible) {
+        return group.add(new FoSectionSetting.Builder()
+            .name(name)
+            .description("")
+            .visible(visible)
+            .build());
+    }
+
+    // ---------- 基础 ----------
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
         .name("模式")
-        .description("搬运端（双号）/ 拉珍珠端（双号）/ 三号模式（1搬运+2拉珍珠，三个号各开一个角色）。")
+        .description("选本号角色：双号走搬运端或拉珍珠端，三号模式三个号各开一个。")
         .defaultValue(Mode.MOVER)
+        .build());
+
+    private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
+        .name("本次搬运")
+        .description("只统计本次在线：趟数与潜影盒数。关模块不清零，断线清零。")
         .build());
 
     private final Setting<ChatCommand> chatCommand = sgGeneral.add(new EnumSetting.Builder<ChatCommand>()
         .name("私聊指令")
-        .description("发私信用的服务器指令：/m 或 /tell。")
+        .description("发私信用的服务器指令，按服务器支持选 /m 或 /tell。")
         .defaultValue(ChatCommand.SLASH_M)
         .build());
 
     private final Setting<Boolean> waitAck = sgGeneral.add(new BoolSetting.Builder()
         .name("等待确认")
-        .description("发完「拉我N」等对方的「收到N」。对方是 ZenithProxy 机器人且不回复时关掉。")
+        .description("发完「拉我N」等对方回「收到N」。对方是不回复的机器人时关掉。")
         .defaultValue(true)
         .build());
 
     private final Setting<String> ackKeyword = sgGeneral.add(new StringSetting.Builder()
         .name("确认关键字")
-        .description("对方确认消息里的关键字（默认收到）。回复里带数字就校验对应 N，不带数字也放行（兼容机器人）。")
+        .description("回复里的确认词（默认「收到」）。带数字校验 N，不带也放行。")
         .defaultValue("收到")
         .build());
 
-    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
-        .name("调试输出")
-        .description("在聊天栏输出状态机调试信息。")
-        .defaultValue(false)
-        .build());
+    // ---------- 高级 / 排错（默认折叠需求走不通：组名不能改，只能沉底 + 小标题分隔） ----------
+
+    private final Setting<Boolean> secAdvanced = section(sgGeneral, "高级");
 
     private final Setting<Double> openReach = sgGeneral.add(new DoubleSetting.Builder()
         .name("开箱距离")
-        .description("眼睛到方块**包围盒**的最大距离（与服务端 canInteractWithBlockAt 同一口径）。"
-            + "反作弊严格的服建议 2.0；调大只会在更远处点击，可能被服务端静默拒绝。")
+        .description("眼睛到箱子外框的最大距离。反作弊严格的服保持 2.0。")
         .defaultValue(2.0)
         .min(1.0)
         .sliderMax(4.0)
@@ -240,31 +268,27 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> oneTickTransfer = sgGeneral.add(new BoolSetting.Builder()
         .name("1 tick 瞬时存取")
-        .description("测试功能（默认关）：开箱后把「全量取货 / 全量存货 / 末影箱存取」的全部窗口点击压缩到"
-            + " 1 tick 内完成，不再分 tick 慢速搬运。用于验证服务器反作弊是否放行 1 tick 存取"
-            + "（参考 zenithproxy 可 1 tick 存取不被踢）。双号/三号通用，关掉即恢复原有节奏。")
+        .description("测试项：开箱后所有点击压到 1 tick 完成。默认关，仅验证反作弊用。")
         .defaultValue(false)
         .build());
 
-    private final Setting<Boolean> statsSetting = sgGeneral.add(new StashStatsSetting.Builder()
-        .name("本次搬运")
-        .description("只统计本次在线：趟数 + 潜影盒数。关模块不清零，断线/退服清零；右侧按钮可手动重置。")
+    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
+        .name("调试输出")
+        .description("在聊天栏打印状态机步骤，只在排查问题时开。")
+        .defaultValue(false)
         .build());
 
     // ---------- 末影箱（V6.7p27，双号 + 三号共用） ----------
 
     private final Setting<Boolean> enderEnabled = sgEnder.add(new BoolSetting.Builder()
         .name("启用末影箱中转")
-        .description("背包装满后先把货存进末影箱，到存储区再取出来 —— 单趟多搬 27 个潜影盒。"
-            + "末影箱需预先放在待取货箱区和存储区旁边：分区坐标填了就用坐标那台（会校验方块），"
-            + "留空则自动找最近的。默认开。")
+        .description("先存进末影箱、到存储区再取出，单趟能多搬一批。默认开。")
         .defaultValue(true)
         .build());
 
     private final Setting<Integer> enderSearchRadius = sgEnder.add(new IntSetting.Builder()
         .name("末影箱搜索半径")
-        .description("自动扫描时在玩家周围多少格内找末影箱（水平/垂直同一半径）。"
-            + "下面两条分区坐标填了就以坐标为准，这项不参与。")
+        .description("自动扫描时在周围多少格找末影箱；填了分区坐标就不看这项。")
         .defaultValue(6)
         .min(2)
         .sliderMax(12)
@@ -274,30 +298,32 @@ public class StashMover extends Module {
     // 末影箱分区坐标（V6.7p30，混合模式：坐标优先 + 校验 + 自动扫描兜底）
     // ⚠️ 约定与存储箱/珍珠箱一致：0,0,0 = 未设置 = 自动扫描
 
+    private final Setting<Boolean> secEnderPos = section(sgEnder, "坐标", enderEnabled::get);
+
     private final Setting<BlockPos> enderLootChest = sgEnder.add(new BlockPosSetting.Builder()
         .name("取货区末影箱位置")
-        .description("双号模式：待取货箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .description("双号：待取货箱区旁边那台。0,0,0 = 自动扫描。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<BlockPos> enderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
         .name("存储区末影箱位置")
-        .description("双号模式：存储区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .description("双号：存储区旁边那台。0,0,0 = 自动扫描。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> enderEnabled.get() && mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<BlockPos> trioEnderLootChest = sgEnder.add(new BlockPosSetting.Builder()
         .name("待搬运箱区末影箱位置")
-        .description("三号模式：待搬运箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .description("三号：待搬运箱区旁边那台。0,0,0 = 自动扫描。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
         .build());
 
     private final Setting<BlockPos> trioEnderStoreChest = sgEnder.add(new BlockPosSetting.Builder()
         .name("存储箱区末影箱位置")
-        .description("三号模式：存储箱区旁边那台末影箱。留空（0,0,0）= 自动扫描附近。")
+        .description("三号：存储箱区旁边那台。0,0,0 = 自动扫描。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> enderEnabled.get() && mode.get() == Mode.TRIO)
         .build());
@@ -306,35 +332,37 @@ public class StashMover extends Module {
 
     private final Setting<String> targetPlayer = sgMover.add(new StringSetting.Builder()
         .name("搬运目标玩家")
-        .description("双号模式：拉珍珠搭档的玩家 ID（发给对方「拉我N」，等对方「收到N」）。")
+        .description("拉珍珠搭档的 ID，发给对方「拉我N」并等「收到N」。")
         .defaultValue("")
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<ChestMode> chestMode = sgMover.add(new EnumSetting.Builder<ChestMode>()
         .name("待搬运方式")
-        .description("自动搜索=以玩家为中心扫箱子；单箱子=只搬目标箱子；区域框选=搬指定长方体范围内所有箱子。")
+        .description("自动搜索=扫周围箱子；单箱子=只搬目标箱；区域框选=搬框内全部。")
         .defaultValue(ChestMode.SINGLE)
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
+    private final Setting<Boolean> secMoverPos = section(sgMover, "坐标", () -> mode.get() == Mode.MOVER);
+
     private final Setting<BlockPos> storeChest = sgMover.add(new BlockPosSetting.Builder()
         .name("存储箱位置")
-        .description("卸货的箱子（卸完背包后自杀回重生点）。")
+        .description("卸货用的箱子，卸完自杀回重生点。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<BlockPos> pearlChest = sgMover.add(new BlockPosSetting.Builder()
         .name("珍珠箱位置")
-        .description("存放末影珍珠的箱子（投掷前从这里取珍珠，多余的还回去）。")
+        .description("取珍珠的箱子，投完把多余珍珠还回去。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
 
     private final Setting<BlockPos> trapdoor = sgMover.add(new BlockPosSetting.Builder()
         .name("搬运活板门位置")
-        .description("珍珠房活板门坐标（其正下方 1 格是水，投珍珠进水柱做滞留）。")
+        .description("珍珠房活板门，正下方 1 格必须是水。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.MOVER)
         .build());
@@ -348,21 +376,23 @@ public class StashMover extends Module {
 
     private final Setting<BlockPos> pos1 = sgMover.add(new BlockPosSetting.Builder()
         .name("框选位置1")
-        .description("「区域框选」模式的长方体一角。")
+        .description("「区域框选」模式长方体的一角。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.RANGE)
         .build());
 
     private final Setting<BlockPos> pos2 = sgMover.add(new BlockPosSetting.Builder()
         .name("框选位置2")
-        .description("「区域框选」模式的长方体另一角。")
+        .description("「区域框选」模式长方体的另一角。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.RANGE)
         .build());
 
+    private final Setting<Boolean> secMoverParam = section(sgMover, "参数");
+
     private final Setting<Integer> clickDelay = sgMover.add(new IntSetting.Builder()
         .name("箱子点击延迟")
-        .description("每次槽位点击之间隔多少 tick（防发包过快被踢）。")
+        .description("槽位点击间隔（tick）。发包太快会被踢，默认 1。")
         .defaultValue(1)
         .min(0)
         .sliderMax(10)
@@ -371,7 +401,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> searchDistance = sgMover.add(new IntSetting.Builder()
         .name("箱子搜索距离")
-        .description("「自动搜索」模式扫描箱子的半径（格）。⚠️ 重生点必须在这个范围内。")
+        .description("「自动搜索」的扫描半径（格），重生点必须在范围内。")
         .defaultValue(10)
         .min(1)
         .sliderMax(20)
@@ -380,9 +410,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> dualZoneRadius = sgMover.add(new IntSetting.Builder()
         .name("存储区判定半径")
-        .description("双号开模块时判断「我在待搬运箱区还是存储区」：离存储箱/珍珠箱/活板门的最近水平距离"
-            + "不超过这个值就算在存储区（会先卸货再补回程票）。只在「自动搜索」模式用到——"
-            + "单箱和框选有源区坐标，走双锚点取近，不看这个值。")
+        .description("判断「在待搬运箱区还是存储区」，只用于自动搜索（格）。")
         .defaultValue(32)
         .min(8)
         .sliderMax(128)
@@ -391,21 +419,21 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> onlyShulker = sgMover.add(new BoolSetting.Builder()
         .name("只拿潜影盒")
-        .description("只搬潜影盒，其他物品不动。")
+        .description("只搬潜影盒，其他物品不碰。")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.MOVER || mode.get() == Mode.TRIO)
         .build());
 
     private final Setting<Boolean> ignoreSingleChest = sgMover.add(new BoolSetting.Builder()
         .name("忽略单个箱子")
-        .description("「自动搜索」模式只搬双箱，不碰单箱。")
+        .description("「自动搜索」只搬双箱，跳过单箱。")
         .defaultValue(true)
         .visible(() -> mode.get() == Mode.MOVER && chestMode.get() == ChestMode.AUTO)
         .build());
 
     private final Setting<Boolean> waitForFill = sgMover.add(new BoolSetting.Builder()
         .name("等待箱子填充")
-        .description("「单箱子」模式：箱子拿空后原地等它重新填满（双号/三号通用）。")
+        .description("「单箱子」拿空后原地等它补满，不换箱。")
         .defaultValue(true)
         .visible(() -> (mode.get() == Mode.MOVER && chestMode.get() == ChestMode.SINGLE)
             || (mode.get() == Mode.TRIO && isMoverRole() && this.sourceChestMode.get() == ChestMode.SINGLE))
@@ -413,7 +441,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> waitTimeout = sgMover.add(new IntSetting.Builder()
         .name("等待超时")
-        .description("等箱子填充最多等多少秒（双号/三号通用）。")
+        .description("等补满的最长秒数，超时按搬空处理。")
         .defaultValue(30)
         .min(1)
         .sliderMax(60)
@@ -424,10 +452,12 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> closeWhenFull = sgMover.add(new BoolSetting.Builder()
         .name("箱子满自动关闭")
-        .description("存储箱塞满时自动关模块（关闭则原地等待）。")
+        .description("存储箱满了自动关模块；关掉则原地等待。")
         .defaultValue(true)
         .visible(() -> mode.get() == Mode.MOVER || mode.get() == Mode.TRIO)
         .build());
+
+    private final Setting<Boolean> secMoverRisk = section(sgMover, "危险", () -> mode.get() == Mode.MOVER);
 
     private final Setting<SuicideMode> suicideMode = sgMover.add(new EnumSetting.Builder<SuicideMode>()
         .name("自杀方式")
@@ -438,7 +468,7 @@ public class StashMover extends Module {
 
     private final Setting<String> suicideCommand = sgMover.add(new StringSetting.Builder()
         .name("自杀指令")
-        .description("自杀指令内容（带不带 / 都行）。")
+        .description("自杀用的服务器指令，带不带 / 都行。")
         .defaultValue("/suicide --confirm")
         .visible(() -> mode.get() == Mode.MOVER && suicideMode.get() == SuicideMode.COMMAND)
         .build());
@@ -451,9 +481,7 @@ public class StashMover extends Module {
      */
     private final Setting<Integer> suicideDelay = sgMover.add(new IntSetting.Builder()
         .name("自杀延时")
-        .description("确认腔室里已经有自己的珍珠之后，再等多少 tick 才自杀（20 tick = 1 秒）。"
-            + "⚠️ 3C3U 实测 660 tick 仍会把珍珠吞掉，默认已抬到 1200（60 秒）；"
-            + "设太小珍珠会消失，设 0 = 确认完立刻死（必掉）。")
+        .description("确认腔室有珍珠后再等多少 tick 才自杀（1200 tick = 60 秒）。设小了珍珠会消失。")
         .defaultValue(1200)
         .min(0)
         .sliderMax(2000)
@@ -462,7 +490,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> teleportWaitTimeout = sgMover.add(new IntSetting.Builder()
         .name("等待被拉超时")
-        .description("发出「拉我N」后多少 tick 还没被拉过去，就原样重发一次（100 tick = 5 秒，最多重发 3 次）。")
+        .description("发出「拉我N」后多久没被拉走就重发（100 tick = 5 秒，最多 3 次）。")
         .defaultValue(100)
         .min(40)
         .sliderMax(400)
@@ -481,30 +509,23 @@ public class StashMover extends Module {
 
     // ---------- 拉珍珠（双号 / 三号 2、3 号端） ----------
 
-    private final Setting<String> keyword = sgPearl.add(new StringSetting.Builder()
-        .name("拉我关键字")
-        .description("收到以该关键字开头的私信才拉珍珠（后面可跟数字，如「拉我3」；「不要拉我」不会误触发）。")
-        .defaultValue("拉我")
-        .build());
+    private final Setting<Boolean> secPearlPoint = section(sgPearl, "珍珠点录入");
 
     private final Setting<java.util.Map<String, String>> pearlPoints = sgPearl.add(new StringMapSetting.Builder()
         .name("珍珠点")
-        .description("左边玩家 ID、右边活板门坐标（x y z）。默认靠告示牌识别自动记录，也可右键录入。")
+        .description("玩家 ID 与活板门坐标。告示牌会自动记录，右键录入后再改名。")
         .defaultValue(new LinkedHashMap<>())
         .build());
-
     private final Setting<Boolean> setupMode = sgPearl.add(new BoolSetting.Builder()
         .name("添加珍珠点模式")
-        .description("开启后右键活板门即可记录一个珍珠点（自动起名，之后在「珍珠点」表里改成玩家 ID）。")
+        .description("开启后右键活板门记一个珍珠点，记得回来改成玩家 ID。")
         .defaultValue(false)
         .build());
-
     private final Setting<Boolean> searchSigns = sgPearl.add(new BoolSetting.Builder()
         .name("智能识别告示牌")
-        .description("没找到某个玩家的珍珠点记录时，扫附近告示牌：写有该玩家名字的告示牌正下方就是珍珠点。")
+        .description("没记录时扫附近告示牌，写着该玩家名字的牌子正下方就是珍珠点。")
         .defaultValue(true)
         .build());
-
     private final Setting<Integer> signRadius = sgPearl.add(new IntSetting.Builder()
         .name("搜索告示牌半径")
         .description("扫描告示牌的水平半径（格）。")
@@ -514,22 +535,32 @@ public class StashMover extends Module {
         .sliderMax(128)
         .visible(searchSigns::get)
         .build());
+    private final Setting<Boolean> secPearlGate = section(sgPearl, "请求准入");
 
-    private final Setting<Integer> pathTimeout = sgPearl.add(new IntSetting.Builder()
-        .name("赶路超时")
-        .description("拉珍珠最多允许赶路多少 tick（20 tick = 1 秒），超时自动放弃。")
-        .defaultValue(200)
-        .min(20)
-        .sliderMin(20)
-        .sliderMax(2000)
+    private final Setting<String> keyword = sgPearl.add(new StringSetting.Builder()
+        .name("拉我关键字")
+        .description("收到以它开头的私信才去拉，「拉我3」这种带数字也认。")
+        .defaultValue("拉我")
         .build());
-
+    private final Setting<List<String>> pullWhitelist = sgPearl.add(new StringListSetting.Builder()
+        .name("拉珍珠白名单")
+        .description("只接受这些玩家的请求。双号必填，留空等于谁都不拉。")
+        .defaultValue(new ArrayList<>())
+        .visible(this::isPullerRole)
+        .build());
+    private final Setting<Integer> pullCooldown = sgPearl.add(new IntSetting.Builder()
+        .name("拉珍珠冷却")
+        .description("拉完一次至少隔多久才接下一次请求（40 tick = 2 秒）。")
+        .defaultValue(40)
+        .min(0)
+        .sliderMax(400)
+        .visible(this::isPullerRole)
+        .build());
     private final Setting<Boolean> distanceCheck = sgPearl.add(new BoolSetting.Builder()
         .name("太远的不拉")
-        .description("离珍珠点太远时拒绝请求，并私信告知对方。")
+        .description("离珍珠点太远时拒绝请求，并私信告诉对方。")
         .defaultValue(true)
         .build());
-
     private final Setting<Integer> maxDistance = sgPearl.add(new IntSetting.Builder()
         .name("最大距离")
         .description("允许拉珍珠的最大距离（格）。")
@@ -539,64 +570,54 @@ public class StashMover extends Module {
         .sliderMax(300)
         .visible(distanceCheck::get)
         .build());
+    private final Setting<Boolean> secPearlWalk = section(sgPearl, "赶路");
 
+    private final Setting<Integer> pathTimeout = sgPearl.add(new IntSetting.Builder()
+        .name("赶路超时")
+        .description("去珍珠点最多走多久（200 tick = 10 秒），超时放弃。")
+        .defaultValue(200)
+        .min(20)
+        .sliderMin(20)
+        .sliderMax(2000)
+        .build());
     private final Setting<Boolean> pullerNoDig = sgPearl.add(new BoolSetting.Builder()
         .name("赶路不挖掘")
-        .description("去珍珠点/回出发点的路上禁止 Baritone 破坏方块。"
-            + "拉珍珠只需要走过去点个门，不需要挖；关掉这个开关它就会为了开路一路挖下去（可能挖到基岩层）。"
-            + "⚠️ 若路线本来就得挖一段，这里要关掉。")
+        .description("赶路时禁止寻路破坏方块。默认开；路线本来要挖一段才关。")
         .defaultValue(true)
         .visible(this::isPullerRole)
         .build());
-
-    private final Setting<List<String>> pullWhitelist = sgPearl.add(new StringListSetting.Builder()
-        .name("拉珍珠白名单")
-        .description("只接受这些玩家的拉珍珠请求。⚠️ 双号拉珍珠端**必须填**（留空 = 拒绝所有请求，防陌生人乱拉）；"
-            + "三号模式另由「1 号搬运端」锁定，白名单留空不影响。")
-        .defaultValue(new ArrayList<>())
-        .visible(this::isPullerRole)
-        .build());
-
-    private final Setting<Integer> pullCooldown = sgPearl.add(new IntSetting.Builder()
-        .name("拉珍珠冷却")
-        .description("拉完一次后至少等待多少 tick 才接受下一次请求（40 tick = 2 秒）。")
-        .defaultValue(40)
-        .min(0)
-        .sliderMax(400)
-        .visible(this::isPullerRole)
-        .build());
-
     private final Setting<Boolean> returnToStart = sgPearl.add(new BoolSetting.Builder()
         .name("使用后返回出发点")
-        .description("拉完珍珠后自动走回开始时的位置。")
+        .description("拉完自动走回开始时的位置。")
         .defaultValue(true)
         .build());
+    private final Setting<Boolean> secPearlAdvanced = section(sgPearl, "高级");
 
     private final Setting<Boolean> customRegex = sgPearl.add(new BoolSetting.Builder()
         .name("自定义私聊正则")
-        .description("服务器私信显示格式不一样时打开，自行填正则。")
+        .description("服务器私信格式不一样时打开，自己填正则。")
         .defaultValue(false)
         .build());
-
     private final Setting<String> regex = sgPearl.add(new StringSetting.Builder()
         .name("私聊正则")
-        .description("两个捕获组：第 1 组=发送者，第 2 组=消息内容。默认是 3C 的 📨 发送者 ➡ 内容。")
+        .description("两个捕获组：第 1 组发送者，第 2 组内容。不改就别动。")
         .defaultValue(PeerMessageLogic.DEFAULT_REGEX)
         .visible(customRegex::get)
         .build());
-
     // ---------- 三号模式 ----------
+
+    private final Setting<Boolean> secTrioRole = section(sgTrio, "角色", () -> mode.get() == Mode.TRIO);
 
     private final Setting<Boolean> onlyMover = sgTrio.add(new BoolSetting.Builder()
         .name("只开1号搬运端")
-        .description("2号/3号交给 ZenithProxy 插件拉珍珠。开启后本号固定为 1 号，不用再选角色。")
+        .description("2/3 号交给 ZenithProxy，本号固定当 1 号。")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.TRIO)
         .build());
 
     private final Setting<Boolean> roleMover = sgTrio.add(new BoolSetting.Builder()
         .name("1号搬运端")
-        .description("搬货的那个号：在两区之间往返，不自杀。三个角色只能选一个。")
+        .description("在两区往返搬货、不自杀。三个角色只能选一个。")
         .defaultValue(true)
         .visible(() -> mode.get() == Mode.TRIO && !onlyMover.get())
         .onChanged(v -> {
@@ -606,7 +627,7 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> roleSource = sgTrio.add(new BoolSetting.Builder()
         .name("2号待搬运箱端")
-        .description("守在待搬运箱区的珍珠房：收到 1 号的「拉我N」就点活板门把他拉过来。")
+        .description("守在待搬运箱区珍珠房，收到「拉我N」就点活板门。")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.TRIO && !onlyMover.get())
         .onChanged(v -> {
@@ -616,7 +637,7 @@ public class StashMover extends Module {
 
     private final Setting<Boolean> roleStore = sgTrio.add(new BoolSetting.Builder()
         .name("3号存储箱端")
-        .description("守在存储箱区的珍珠房：收到 1 号的「拉我N」就点活板门把他拉过来。")
+        .description("守在存储箱区珍珠房，收到「拉我N」就点活板门。")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.TRIO && !onlyMover.get())
         .onChanged(v -> {
@@ -624,37 +645,41 @@ public class StashMover extends Module {
         })
         .build());
 
+    private final Setting<Boolean> secTrioPeer = section(sgTrio, "配对", () -> mode.get() == Mode.TRIO);
+
     private final Setting<String> peerSource = sgTrio.add(new StringSetting.Builder()
         .name("2号ID（待搬运箱端）")
-        .description("2 号玩家的 ID：1 号要回待搬运箱区时发「拉我N」给他。")
+        .description("2 号 ID，1 号要回待搬运箱区时发给他。")
         .defaultValue("")
         .visible(() -> mode.get() == Mode.TRIO)
         .build());
 
     private final Setting<String> peerStore = sgTrio.add(new StringSetting.Builder()
         .name("3号ID（存储箱端）")
-        .description("3 号玩家的 ID：1 号要去存储箱区卸货时发「拉我N」给他。")
+        .description("3 号 ID，1 号要去卸货时发给他。")
         .defaultValue("")
         .visible(() -> mode.get() == Mode.TRIO)
         .build());
 
     private final Setting<String> peerMover = sgTrio.add(new StringSetting.Builder()
         .name("1号ID（搬运端）")
-        .description("2/3 号端专用：只响应这个 ID 的「拉我N」，其他人的请求一律不理。")
+        .description("只响应这个 ID 的请求，其他人一律不理。")
         .defaultValue("")
         .visible(() -> mode.get() == Mode.TRIO && !onlyMover.get() && (roleSource.get() || roleStore.get()))
         .build());
 
+    private final Setting<Boolean> secTrioPos = section(sgTrio, "坐标", () -> mode.get() == Mode.TRIO && isMoverRole());
+
     private final Setting<ChestMode> sourceChestMode = sgTrio.add(new EnumSetting.Builder<ChestMode>()
         .name("待搬运方式")
-        .description("待搬运箱区的检索方式。")
+        .description("待搬运箱区的检索方式（三号模式专用）。")
         .defaultValue(ChestMode.AUTO)
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
     private final Setting<BlockPos> sourceTarget = sgTrio.add(new BlockPosSetting.Builder()
         .name("待搬运箱位置")
-        .description("待搬运箱区的基准坐标（判区 + 单箱子模式的目标）。")
+        .description("待搬运箱区的基准坐标，用于判区与单箱模式。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
@@ -675,35 +700,35 @@ public class StashMover extends Module {
 
     private final Setting<BlockPos> sourceTrapdoor = sgTrio.add(new BlockPosSetting.Builder()
         .name("待搬运箱区活板门")
-        .description("待搬运箱区珍珠房的活板门（1 号每趟往这里的水柱投一颗珍珠）。")
+        .description("待搬运箱区活板门，1 号每趟往水柱投一颗珍珠。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
     private final Setting<BlockPos> trioStoreChest = sgTrio.add(new BlockPosSetting.Builder()
         .name("存储箱位置")
-        .description("卸货的箱子。")
+        .description("卸货的箱子（三号模式）。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
     private final Setting<BlockPos> storeTrapdoor = sgTrio.add(new BlockPosSetting.Builder()
         .name("存储箱区活板门")
-        .description("存储箱区珍珠房的活板门（1 号每趟往这里的水柱投一颗珍珠）。")
+        .description("存储箱区活板门，1 号每趟往水柱投一颗珍珠。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
     private final Setting<BlockPos> sourcePearlChest = sgTrio.add(new BlockPosSetting.Builder()
         .name("待搬运箱区珍珠箱")
-        .description("2 号点这边的珍珠箱。留空（0,0,0）就用下面的「通用珍珠箱」。")
+        .description("2 号点的珍珠箱。0,0,0 = 用下面的通用珍珠箱。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
     private final Setting<BlockPos> storePearlChest = sgTrio.add(new BlockPosSetting.Builder()
         .name("存储箱区珍珠箱")
-        .description("3 号点这边的珍珠箱。留空（0,0,0）就用下面的「通用珍珠箱」。")
+        .description("3 号点的珍珠箱。0,0,0 = 用下面的通用珍珠箱。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
@@ -711,14 +736,16 @@ public class StashMover extends Module {
     private final Setting<BlockPos> trioPearlChest = sgTrio.add(new BlockPosSetting.Builder()
         // ⚠️ 名字不要改：Meteor 用设置名当配置键，改名会让老配置里已存的坐标读不出来（V6.7p8 刻意保留原名）
         .name("珍珠箱位置")
-        .description("通用的珍珠箱。只在一条路线上放了一个箱子就填这里；上面两个「分区珍珠箱」填了则以分区为准。")
+        .description("通用珍珠箱，只放了一个箱子时填这里；上面两个填了以分区为准。")
         .defaultValue(new BlockPos(0, 0, 0))
         .visible(() -> mode.get() == Mode.TRIO && isMoverRole())
         .build());
 
+    private final Setting<Boolean> secTrioParam = section(sgTrio, "参数", () -> mode.get() == Mode.TRIO && isMoverRole());
+
     private final Setting<Integer> restockThreshold = sgTrio.add(new IntSetting.Builder()
         .name("补货阈值")
-        .description("手上珍珠少于这个数就去珍珠箱补货。")
+        .description("手上珍珠少于这个数就去补。")
         .defaultValue(4)
         .min(1)
         .sliderMax(16)
@@ -727,7 +754,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> restockTarget = sgTrio.add(new IntSetting.Builder()
         .name("补货目标")
-        .description("精确补到这个数量（一颗一颗补，不是整堆搬）。")
+        .description("精确补到这个数，一颗一颗补。")
         .defaultValue(16)
         .min(1)
         .sliderMax(16)
@@ -736,7 +763,7 @@ public class StashMover extends Module {
 
     private final Setting<Integer> startMaxDistance = sgTrio.add(new IntSetting.Builder()
         .name("启动最远距离")
-        .description("开模块时离最近的区超过这个距离就报警暂停（近的会自己走过去，远的怕走丢/走进危险区）。")
+        .description("开模块时离最近区超过这个数就报警暂停（格）。")
         .defaultValue(64)
         .min(16)
         .max(512)
@@ -811,9 +838,11 @@ public class StashMover extends Module {
      * 所以「5 秒内收到 6 次」基本就等于卡住了——正常玩不会这么频繁。
      * 检测到之后：松键 → 停寻路 → 等 20 tick 让状态稳定 → 寻路到最近的能站人的格子。
      */
-    private static final int ANTI_STUCK_TRIGGER = 6;
+    private static final int ANTI_STUCK_TRIGGER = 8;
     private static final long ANTI_STUCK_WINDOW_MS = 5000;
     private static final int ANTI_STUCK_SETTLE_TICKS = 20;
+    /** 两次脱困之间的最小间隔（V6.7p38：5 秒 → 10 秒，避免刚脱困又被同一批包喂到阈值）。 */
+    private static final long ANTI_STUCK_COOLDOWN_MS = 10_000;
 
     // ===== V6.7p21：过滤箱（有物品但不符合「只拿潜影盒」）的处理 =====
     /** 跳过期：10 秒后才允许重新打开同一个箱子，避免每 tick 重复开同一个箱子。 */
@@ -1024,6 +1053,8 @@ public class StashMover extends Module {
     private int antiStuckCount;
     /** 网络线程发现「疑似卡脚」时置位，由客户端线程（onTick）接手处理。 */
     private volatile boolean antiStuckPending;
+    /** V6.7p38 诊断：本窗口内被忽略的整坐标传送次数（珍珠拉人/重生/跨维度）。 */
+    private int ignoredTeleports;
 
     // 拉珍珠
     private boolean pullActive;
@@ -1128,6 +1159,7 @@ public class StashMover extends Module {
         antiStuckCooldownUntil = 0;
         antiStuckCount = 0;
         antiStuckPending = false;
+        ignoredTeleports = 0;
         lastPos = mc.player != null ? mc.player.getEntityPos() : null;
 
         if (isTrioMover()) {
@@ -1164,16 +1196,34 @@ public class StashMover extends Module {
     // ==================== 防卡（V6.7p9） ====================
 
     /**
-     * 统计服务端位置校正包的频率，判断是否「卡脚」。
+     * 统计服务端**橡皮筋式**位置校正的频率，判断是否「卡脚」。
      *
-     * <p>人卡住时服务端会不停把你拉回原位（每拉一次就是一个位置包），
-     * 5 秒内 6 次基本等于卡死。正常跑图/被珍珠拉一次都不会到这个量。
+     * <p>人卡住时服务端会不停把你拉回原位（每拉一次就是一个相对校正包），
+     * 5 秒内收到 8 次基本等于卡死。正常跑图不会到这个量。
+     *
+     * <p>V6.7p38 修误报（三号模式频繁报「检测到频繁传送」）：原来**所有**
+     * {@link PlayerPositionLookS2CPacket} 都算一次，把「珍珠拉人／重生／跨维度」这类
+     * 整坐标传送也当成了卡脚证据——三号模式一趟来回就有 2 次，很容易凑到阈值。
+     * 现在按 {@code relatives} 分流：整坐标传送（空集合）直接忽略并清窗口，
+     * 只有带 X/Y/Z（或 DELTA_*）的相对校正才计数；纯视角同步也不计。
      */
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
-        if (!(event.packet instanceof PlayerPositionLookS2CPacket)) return;
+        if (!(event.packet instanceof PlayerPositionLookS2CPacket packet)) return;
         // V6.7p13：搬运端（双号/三人1号）与拉珍珠端（双号/三人2/3号）都参与防卡
         if (!isMoverRole() && !isPullerRole()) return;
+
+        Set<PositionFlag> relatives = packet.relatives();
+        if (relatives.isEmpty()) {
+            // 整坐标传送 = 合法位移（珍珠拉人 / 重生 / 跨维度），不是卡脚
+            teleportFlood.clear();
+            ignoredTeleports++;
+            return;
+        }
+        boolean hasPosition = relatives.contains(PositionFlag.X) || relatives.contains(PositionFlag.Y)
+            || relatives.contains(PositionFlag.Z) || relatives.contains(PositionFlag.DELTA_X)
+            || relatives.contains(PositionFlag.DELTA_Y) || relatives.contains(PositionFlag.DELTA_Z);
+        if (!hasPosition) return;   // 只同步视角，与卡脚无关
 
         // ⚠️ 这个回调在**网络线程**：只记时间戳 + 置标志，绝不碰玩家/按键/寻路。
         // 真正的处理放到 onTick（客户端线程），见 tickAntiStuck 的调用点。
@@ -1189,12 +1239,32 @@ public class StashMover extends Module {
         PathManagers.get().stop();
         clearPathTarget();
         warning("检测到频繁传送（5 秒内 " + teleportFlood.count(System.currentTimeMillis())
-            + " 次），判定卡脚，开始脱困");
-        info("我卡住了！请手动检查站位");
+            + " 次相对校正，已忽略 " + ignoredTeleports + " 次整坐标传送），判定卡脚，开始脱困");
+        info("卡住：请手动检查站位");
+        ignoredTeleports = 0;
         if (debug.get()) {
-            info("[防卡] 第 " + antiStuckCount + " 次，状态=" + trioState + "，在水里="
+            info("【搬运】第 " + antiStuckCount + " 次，状态=" + trioState + "，在水里="
                 + (mc.player.isTouchingWater() ? "是" : "否") + "，碰撞=" + mc.player.horizontalCollision);
         }
+    }
+
+    /**
+     * 「合法场景」判定（V6.7p38）：被珍珠拉着走、刚落地等区块、正在投掷序列里，
+     * 这三段本来就会持续收到位置校正包，不该判卡脚。
+     *
+     * <p>真卡住时这几个状态各自的超时（投掷重走 / 等待超时 / 看门狗）会先报警，不会漏。
+     * ⚠️ 刻意**不**跳过 {@code SETTLE}：p19 那次「被拉到活板门下面出不来」正是发生在 SETTLE。
+     */
+    private boolean inLegitTeleportPhase() {
+        if (mode.get() == Mode.TRIO) {
+            return trioState == TrioState.WAIT_TELEPORT || trioState == TrioState.ARRIVE_WAIT
+                || trioState == TrioState.THROW;
+        }
+        if (mode.get() == Mode.MOVER) {
+            return moverState == MoverState.WAIT_TELEPORT || moverState == MoverState.ARRIVE_WAIT
+                || moverState == MoverState.THROW;
+        }
+        return false;
     }
 
     /** 防卡流程：等 20 tick 稳住 → 找最近的安全落脚点 → 寻路过去。 */
@@ -1216,7 +1286,7 @@ public class StashMover extends Module {
         }
 
         antiStuckTicks = -1;
-        antiStuckCooldownUntil = System.currentTimeMillis() + ANTI_STUCK_WINDOW_MS;
+        antiStuckCooldownUntil = System.currentTimeMillis() + ANTI_STUCK_COOLDOWN_MS;
         teleportFlood.clear();
         antiStuckPending = false;
         cooldown = PACE_STEP;
@@ -1272,8 +1342,18 @@ public class StashMover extends Module {
             antiStuckPending = false;
             long now = System.currentTimeMillis();
             if (tick >= 100 && now >= antiStuckCooldownUntil) {
-                startAntiStuck();
-                return;
+                // V6.7p38：在气泡柱里 / 传送与投掷阶段，位置校正包本来就是常态，
+                //   这时候打断只会把正在进行的投掷流程搅乱（p37 实机就是越救越乱）。
+                boolean inWater = mc.player != null && mc.player.isTouchingWater();
+                if (inWater || inLegitTeleportPhase()) {
+                    teleportFlood.clear();
+                    if (debug.get()) {
+                        info("【防卡】忽略一次（" + (inWater ? "在水里" : "传送/投掷阶段") + "）");
+                    }
+                } else {
+                    startAntiStuck();
+                    return;
+                }
             }
         }
 
@@ -1959,7 +2039,7 @@ public class StashMover extends Module {
         if (!StashMoveLogic.canSuicide(tick, pearlConfirmedTick, delay)) {
             long waited = tick - pearlConfirmedTick;
             if (debug.get() && waited % 100 == 0) {
-                info("[双号][自杀] 回程票确认后等待 " + (waited / 20) + "/" + (delay / 20) + " 秒");
+                info("【搬运】回程票确认后等待 " + (waited / 20) + "/" + (delay / 20) + " 秒");
             }
             return;
         }
@@ -2082,7 +2162,7 @@ public class StashMover extends Module {
                 return;
             }
             if (debug.get()) {
-                info("[启动] 判定在" + zoneName() + "（离最近区锚点 " + Math.round(near) + " 格），本区珍珠箱"
+                info("【搬运】判定在" + zoneName() + "（离最近区锚点 " + Math.round(near) + " 格），本区珍珠箱"
                     + (zonePearlChest().equals(BlockPos.ORIGIN) ? "未配置" : "已配置"));
             }
             // 直接赋值：trioState 本来就是 SETTLE，走 setTrioState 会被「状态没变」挡掉而不打印
@@ -2147,7 +2227,7 @@ public class StashMover extends Module {
         if (PathManagers.get().isPathing()) PathManagers.get().stop();
         long waited = tick - arriveWaitStart;
         if (debug.get() && waited % 20 == 0) {
-            info("[三号][到达] 等待加载 " + (waited / 20) + "/" + (ARRIVE_WAIT_TICKS / 20) + " 秒");
+            info("【三号】等待加载 " + (waited / 20) + "/" + (ARRIVE_WAIT_TICKS / 20) + " 秒");
         }
         if (waited < ARRIVE_WAIT_TICKS) return;
         setTrioState(TrioState.SETTLE, "等待结束，开始脱离");
@@ -2352,7 +2432,7 @@ public class StashMover extends Module {
         int target = Math.max(restockTarget.get(), restockThreshold.get());
         int need = StashPearlLogic.missingToTarget(have, restockThreshold.get(), target);
         if (need == 0 && restockPhase == 0) {
-            debugMsg("[补珍珠] 珍珠 " + have + " 颗已够（阈值 " + restockThreshold.get() + "），不用补");
+            debugMsg("【搬运】珍珠 " + have + " 颗已够（阈值 " + restockThreshold.get() + "），不用补");
             setTrioState(TrioState.THROW, "珍珠数量已够");
             cooldown = PACE_RESTOCK_DONE;
             return;
@@ -2374,7 +2454,7 @@ public class StashMover extends Module {
             // V6.7p25：和取货同一套靠近逻辑（能开就开、要走走到能开、目标是箱子旁落脚点）
             if (!goOpenChest(chestPos)) {
                 if (debug.get() && tick % 40 == 0) {
-                    info("[补珍珠] 走近珍珠箱（" + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外）");
+                    info("【搬运】走近珍珠箱（" + String.format(Locale.ROOT, "%.0f", Math.sqrt(distSq)) + " 格外）");
                 }
                 return;
             }
@@ -2390,11 +2470,11 @@ public class StashMover extends Module {
                 restockStepsLeft = need;
                 restockChestSlot = findPearlSlotInContainer();
                 restockInvSlot = findPearlSlotInInventory();
-                debugMsg("[补珍珠] 开始补货：差 " + need + " 颗，箱内槽位=" + restockChestSlot
+                debugMsg("【搬运】开始补货：差 " + need + " 颗，箱内槽位=" + restockChestSlot
                     + " 背包槽位=" + restockInvSlot);
                 if (restockChestSlot < 0) {
                     var handler = containerHandler();
-                    debugMsg("[补珍珠] 界面=" + (handler == null ? "null" : handler.getClass().getSimpleName())
+                    debugMsg("【搬运】界面=" + (handler == null ? "null" : handler.getClass().getSimpleName())
                         + " 槽位=" + (handler == null ? 0 : handler.slots.size())
                         + " 找到珍珠槽位=" + restockChestSlot);
                     closeScreen();
@@ -2468,7 +2548,7 @@ public class StashMover extends Module {
                 closeScreen();
                 restockPhase = 0;
                 restockPutbackTries = 0;
-                debugMsg("[补珍珠] 补货完成，现在有 " + countPearls() + " 颗");
+                debugMsg("【搬运】补货完成，现在有 " + countPearls() + " 颗");
                 setTrioState(TrioState.THROW, "补货完成");
                 cooldown = PACE_RESTOCK_DONE;
             }
@@ -2757,19 +2837,27 @@ public class StashMover extends Module {
      * <p>三者理论上指向同一侧；真出现告示牌贴反/结构异常时，
      * {@link StashMoveLogic#pickThrowSide} 会用「门板侧不能站人」做物理否决。
      *
+     * <p>V6.7p39：**活板门不存在**（被挖掉/开放式腔室）时，FACING 与门板都读不到，
+     * 只剩告示牌；用户口径「牌面朝向即正前方」，此时只用告示牌定侧，不再判负。
+     * 有门时行为完全不变（告示牌 → FACING → 门板，三级）。
+     *
      * @return 该站的一侧；三个来源都读不出时返回 null（投掷阶段会拒绝侧站）
      */
     private Direction throwFrontSide(BlockPos trapdoor) {
         if (mc.world == null || trapdoor == null) return null;
         var st = mc.world.getBlockState(trapdoor);
-        if (!(st.getBlock() instanceof TrapdoorBlock)) return null;
+        boolean hasDoor = st.getBlock() instanceof TrapdoorBlock;
 
         BoxSide sign = boxSideOf(signThrowSide(trapdoor));
-        BoxSide facing = boxSideOf(st.get(TrapdoorBlock.FACING));
-        BoxSide panel = boxSideOf(openLidSide(trapdoor));
+        // V6.7p39：活板门可能**不存在**（被挖掉/被炸掉/本来就是开放式腔室，用户实测场景）。
+        //   这时 FACING 与门板都无从读起，只剩告示牌可用：用户场地上「牌面朝向 = 正前方」，
+        //   直接采用，不再 return null（旧实现在这里直接判负，整个投掷链路报「读不出门板朝向」）。
+        BoxSide facing = hasDoor ? boxSideOf(st.get(TrapdoorBlock.FACING)) : BoxSide.UNKNOWN;
+        BoxSide panel = hasDoor ? boxSideOf(openLidSide(trapdoor)) : BoxSide.UNKNOWN;
         BoxSide picked = StashMoveLogic.pickThrowSide(sign, facing, panel);
 
-        String dump = "告示牌=" + boxSideName(sign) + " 门FACING=" + boxSideName(facing)
+        String dump = (hasDoor ? "" : "[无活板门] ")
+            + "告示牌=" + boxSideName(sign) + " 门FACING=" + boxSideName(facing)
             + " 门板=" + boxSideName(panel);
         if (!dump.equals(lastSideDump)) {
             lastSideDump = dump;
@@ -2892,10 +2980,27 @@ public class StashMover extends Module {
      * @return 0=还在走 1=已到位 2=被挡或超时
      */
     private int stepToward(BlockPos target, int maxTicks) {
+        return stepToward(target, maxTicks, null);
+    }
+
+    /**
+     * 同 {@link #stepToward(BlockPos, int)}，但「到位」要同时满足 {@code arriveCheck}。
+     *
+     * <p>V6.7p38：投掷站位必须先过「站在门板正对面」才算到位。只按距离判会在
+     * along ∈ (1.2, 1.35] 的死区里宣布成功，而贴边判定又不认，结果 2↔3 无限横跳。
+     * 这里改成距离够近但判定没过时**继续朝格心顶**，顶着顶着就进 1.2 了。
+     */
+    private int stepToward(BlockPos target, int maxTicks, BooleanSupplier arriveCheck) {
         if (target == null || mc.player == null) return 2;
         Vec3d c = Vec3d.ofCenter(target);
         double dist = Math.hypot(c.x - mc.player.getX(), c.z - mc.player.getZ());
-        if (dist <= STEP_ARRIVE_EPS) {
+        boolean onTarget = arriveCheck == null || arriveCheck.getAsBoolean();
+        if (StashMoveLogic.needsForwardNudge(dist, onTarget, STEP_ARRIVE_EPS)) {
+            if (debug.get() && tick % 20 == 0) {
+                info("【搬运】距离到位但还没站正，继续微调（距格心 "
+                    + String.format(Locale.ROOT, "%.2f", dist) + " 格）");
+            }
+        } else if (dist <= STEP_ARRIVE_EPS) {
             releaseStepKeys();
             return 1;
         }
@@ -2980,7 +3085,7 @@ public class StashMover extends Module {
             if (purpose == SettlePurpose.THROW) {
                 // 交给 tickThrowSequence 的「重走」计时器处理（门可能刚开、方块状态还没同步完），
                 // 但无论如何都不会退到侧面投掷。
-                debugMsg("[站位] 正前方站不了或读不出门板朝向，拒绝侧站投掷");
+                debugMsg("【搬运】正前方站不了或读不出门板朝向，拒绝侧站投掷");
             } else {
                 enterStuck("柱子周围找不到能站的实心格，请手动确认活板门坐标");
             }
@@ -2992,7 +3097,7 @@ public class StashMover extends Module {
         boolean onOrInColumn = feet.equals(trapdoorPos) || feet.equals(trapdoorPos.up())
             || mc.player.isTouchingWater();
         if (onOrInColumn && !trapdoorIsOpenOrAbsent(trapdoorPos)) {
-            debugMsg("[站位] 人在柱子里/门边上，先打开活板门");
+            debugMsg("【搬运】人在柱子里/门边上，先打开活板门");
             realClick(trapdoorPos);
             cooldown = 10;
             return false;
@@ -3005,12 +3110,14 @@ public class StashMover extends Module {
         if (toTrapdoor > 6.0) {
             walkToPrecise(spot);
             if (debug.get() && tick % 40 == 0) {
-                info("[站位] 距柱子 " + String.format(Locale.ROOT, "%.1f", toTrapdoor) + " 格，用寻路过去");
+                info("【搬运】距柱子 " + String.format(Locale.ROOT, "%.1f", toTrapdoor) + " 格，用寻路过去");
             }
             return false;
         }
 
-        int r = stepToward(spot, 200);
+        // V6.7p38：投掷阶段必须以「站在门板正对面」为到位条件，与贴边判定同源
+        int r = stepToward(spot, 200,
+            purpose == SettlePurpose.THROW ? () -> standsOnFrontSide(trapdoorPos) : null);
         if (r == 1) {
             throwSafeSpot = mc.player.getBlockPos();
             stepFailCount = 0;
@@ -3030,6 +3137,24 @@ public class StashMover extends Module {
     }
 
     /**
+     * 人是否站在「活板门门板正对面」那一侧（XZ 投影判定，不用到格心的距离——
+     * 贴边时人会朝柱心移动，距离反而变大，会在半途把人误判成走错）。
+     *
+     * <p>V6.7p38：站位（{@link #settlePosition}）与贴边（{@link #sneakStepToEdge}）**必须**
+     * 共用本方法。p37 的两套阈值（距离 0.35 / 投影 1.2）在 along ∈ (1.2, 1.35] 留了死区，
+     * 表现就是「已站到正前方」下一秒又说「不在正前方」，来回横跳且手动挪一下就好。
+     */
+    private boolean standsOnFrontSide(BlockPos trapdoor) {
+        if (mc.player == null) return false;
+        Direction front = throwFrontSide(trapdoor);
+        if (front == null) return false;
+        double dx = mc.player.getX() - (trapdoor.getX() + 0.5);
+        double dz = mc.player.getZ() - (trapdoor.getZ() + 0.5);
+        return StashMoveLogic.onFrontSide(dx, dz, front.getOffsetX(), front.getOffsetZ(),
+            FRONT_CELL_TOLERANCE);
+    }
+
+    /**
      * 按住 Shift 短按前进到柱子边缘（V6.7p10，用户口径）。
      *
      * <p>只用在「已经站在柱子旁那一格中心」之后，位移最多 1 格，蹲着不会掉进柱子里；
@@ -3042,17 +3167,9 @@ public class StashMover extends Module {
      */
     private int sneakStepToEdge(BlockPos trapdoor, int maxTicks) {
         BlockPos water = trapdoor.down(1);
-        // V6.7p24：和站位同源（告示牌 → FACING → 门板），不再只依赖开启后的碰撞箱
-        Direction front = throwFrontSide(trapdoor);
-        if (front == null) return 3;
-        // 用「沿正前方轴的投影」判定，而不是到格心的距离：贴边时人会朝柱心移动，
-        // 到格心的距离会变大，用距离会在半途把人退回。
-        double dx = mc.player.getX() - (trapdoor.getX() + 0.5);
-        double dz = mc.player.getZ() - (trapdoor.getZ() + 0.5);
-        if (!StashMoveLogic.onFrontSide(dx, dz, front.getOffsetX(), front.getOffsetZ(),
-                FRONT_CELL_TOLERANCE)) {
-            return 3;
-        }
+        // V6.7p38：与 settlePosition 共用 standsOnFrontSide 一个判定，
+        //   两处各写一遍阈值正是 p37「子步骤 2↔3 无限横跳」的根因。
+        if (!standsOnFrontSide(trapdoor)) return 3;
 
         sneakForThrow();
         Vec3d aim = columnAimPoint(water);

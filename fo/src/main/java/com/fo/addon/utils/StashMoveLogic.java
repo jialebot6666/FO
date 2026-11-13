@@ -465,4 +465,20 @@ public final class StashMoveLogic {
         double perp = Math.abs(dx * frontDz) + Math.abs(dz * frontDx);
         return along > 0.05 && along <= 1.2 && perp <= maxPerp;
     }
+
+    /**
+     * 「距离上到位了，但业务判定还没过」→ 需要继续朝目标格心顶一点（V6.7p38）。
+     *
+     * <p>为什么需要：{@code stepToward} 只看「到目标格心的距离 ≤ STEP_ARRIVE_EPS(0.35)」，
+     * 而贴边判定 {@link #onFrontSide} 要求沿门法线投影 ≤ 1.2（格心在 1.0）。
+     * 于是 along ∈ (1.2, 1.35] 这一段会出现「站位判成功、贴边判失败」，
+     * 人在子步骤 2↔3 之间无限横跳；手动挪一下就好，正是因为往前顶 0.15 格就出了死区。
+     *
+     * @param distToSpot  到目标格心的距离
+     * @param onTarget    业务判定（站在正对面）是否已满足
+     * @param arriveEps   距离到位阈值
+     */
+    public static boolean needsForwardNudge(double distToSpot, boolean onTarget, double arriveEps) {
+        return distToSpot <= arriveEps && !onTarget;
+    }
 }

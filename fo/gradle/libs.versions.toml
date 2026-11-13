@@ -3,7 +3,7 @@
 # 构建产物名 = FO-<mod-version>-<minecraft>，如 6.25 + 1.21.11 -> FO-6.25-1.21.11.jar
 # 正式版 = 纯版本号（如 6.7）；测试版 = 正式版号 + pN（如 6.7p37），未完成/待验证的改动一律带 p，
 # 只有经用户明确确认后才能去掉 p 定为正式版（见 AGENTS.md「命名规范」第 0 条）。
-mod-version = "6.7"
+mod-version = "6.7p39"
 
 # Fabric (https://fabricmc.net/develop)
 jdk = "21"
