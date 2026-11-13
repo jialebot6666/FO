@@ -18,7 +18,7 @@ license: CC0-1.0
 1. **每次改动完成后，必须立即创建一个对应的 Git commit**（信息包含模块名 + 改动摘要），以便追踪和回滚。
 2. **每次改动后，必须编写或更新相关单元测试**，并在交付前运行 `cd fo && ./gradlew build`，确保所有测试和验证全部通过。
 3. **前端全中文**：所有用户可见的界面文本（模块名、设置名、设置描述、下拉框选项、开关、按钮、提示消息、通知、聊天输出）一律中文；不得出现英文 UI 文本（代码标识符、物品 ID、内部类名除外）。新增/修改 UI 文本时必须自查是否中文。
-4. **命名规范（FO 大写 + 版本号不带 V + 产物带 MC 版本）**：**唯一权威来源是仓库根 `AGENTS.md` 的「命名规范」一节**，本节与之保持一致，冲突时以 `AGENTS.md` 为准。要点：① 版本号一律不带 `V` 前缀（写 `6.25`，不写 `V6.25`）；② 构建产物名 = **`FO-<mod版本>-<MC版本>.jar`**，例 `FO-6.25-1.21.11.jar`，由 `fo/build.gradle.kts` 从 `fo/gradle/libs.versions.toml` 的 `mod-version` + `minecraft` 自动拼，**不得在别处写死**；③ Git tag = `<mod版本>`（如 `6.25`）；④ Release 标题 `FO <mod版本>-<MC版本>`，附件名 = 构建产物名；⑤ `fabric.mod.json` 的 `version` 用纯 mod 版本（不带 MC 后缀）；⑥ mod id 保持小写 `fo`，Java 包名 `com.fo.addon` 保持小写。
+4. **命名规范（FO 大写 + 版本号不带 V + 产物带 MC 版本）**：**唯一权威来源是仓库根 `AGENTS.md` 的「命名规范」一节**，本节与之保持一致，冲突时以 `AGENTS.md` 为准。要点：① 版本号一律不带 `V` 前缀（写 `6.25`，不写 `V6.25`）；② 构建产物名 = **`FO-<mod版本>-<MC版本>.jar`**，例 `FO-6.25-1.21.11.jar`，由 `fo/build.gradle.kts` 从 `fo/gradle/libs.versions.toml` 的 `mod-version` + `minecraft` 自动拼，**不得在别处写死**；③ Git tag = `<mod版本>`（如 `6.25`）；④ Release 标题 `FO <mod版本>-<MC版本>`，附件名 = 构建产物名；⑤ `fabric.mod.json` 的 `version` 用纯 mod 版本（不带 MC 后缀）；⑥ mod id 保持小写 `fo`，Java 包名 `com.fo.addon` 保持小写；⑦ **正式版 / 测试版两档**：未完成更新的版本一律是测试版，尾缀**只能**用 `p`（`6.7p37`，勾 Pre-release），**必须经用户明确确认**后才能去掉 `p` 定为正式版（`6.7` → `FO-6.7-1.21.11.jar`）；AI 不得自行转正。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策时，必须先给出方案供用户讨论，由用户确定后再更改代码；未经用户拍板，不得直接动手实现。
 6. **交付**：把 `fo/build/libs/FO-<mod版本>-<MC版本>.jar`（两段都随 `fo/gradle/libs.versions.toml` 的 `mod-version` 与 `minecraft` 走，当前为 `fo/build/libs/FO-6.25-1.21.11.jar`）通过 `present_files` 交给用户。
 

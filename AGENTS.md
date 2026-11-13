@@ -4,7 +4,8 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p36`（见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p36-1.21.11.jar`（详见「命名规范」）
+- 当前版本：`mod-version = 6.7`（**对外正式版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7-1.21.11.jar`
+  （测试版在正式版号后加 `pN`，如 `6.7p37`，产物名 `FO-6.7p37-1.21.11.jar`；详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
   2. FO 自动种树（`modules/AutoTree`）
@@ -885,11 +886,13 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
 4. **务实说话**：没从代码里实际看到的、没验证过的，不说。不根据猜测推断功能，不编结论。不确定就说"不知道"或"需要看代码确认"。
 5. **先讨论后动手**：涉及功能方案、模块设计、功能取舍、行为变化、默认值调整等方向性决策，必须先给出方案由用户拍板，未经确认不得直接改代码（与 `.github/skills/fo-development/SKILL.md` 铁律 5 一致）。
 6. **每次发版在 GitHub 建正式 Release（jar 唯一分发渠道，且仓库里只保留最新版一个 jar）**：
-   每个版本（`x.y`）交付时，构建产物 `FO-x.y-<MC版本>.jar` **不再提交到 releases/ 目录**
+   - ⚠️ **发版前先分档**（「命名规范」第 0 条）：**测试版** = 尾缀 `pN`（`6.7p37`）、Release 勾 **Pre-release**、随时可发；
+     **正式版** = 去掉 `pN`（`6.7`），**必须经用户明确确认后才能创建**，AI 不得自行定版。
+   - 每个版本交付时，构建产物 `FO-x.y-<MC版本>.jar` **不再提交到 releases/ 目录**
    （`.gitignore` 已用 `releases/*.jar` 拦截），流程固定为五步：
    ① commit（信息含模块名+摘要）→
    ② 打 tag `x.y`（**不带 V 前缀**，指向该版本 commit）→
-   ③ 在 GitHub（jialebot6666/FO）创建正式 Release：标题 `FO x.y-<MC版本>`、说明写该版本更新介绍、
+   ③ 在 GitHub（jialebot6666/FO）创建 Release（**测试版勾 Pre-release、正式版不勾**）：标题 `FO x.y-<MC版本>`（测试版即 `FO 6.7p37-1.21.11`）、说明写该版本更新介绍、
       **附件就是构建产物本身，附件名必须与产物同名**（`FO-<mod版本>-<MC版本>.jar`）。
       ⚠️ **禁止**改名、加 `V`、加短哈希/日期后缀 —— 名字对不上就会被当成另一个文件，新旧两版并存；
    ④ **删除此前所有 Release 里的 `.jar` 附件**（做法见下方「Release 附件清理」），
@@ -963,6 +966,25 @@ $rels | ForEach-Object { $t = $_.tag_name; $_.assets | Where-Object { $_.name -l
 
 **本节是唯一权威来源**；任何窗口 / 任何 AI 接手本项目，一律按本节执行，不得沿用旧写法。
 
+0. **正式版 / 测试版两档制（用户 2026-11-13 拍板的硬规则，优先级最高）**：
+   - **未完成更新（改动未验证、功能没收尾、还在按实机反馈迭代）的版本，一律视为测试版**；
+     测试版版本号**尾缀只能用一个 `p`**：`<正式版号>p<N>`（如 `6.7p37`、`6.7p38`，N 递增）。
+     产物名随之是 `FO-6.7p37-1.21.11.jar`。**禁止**用 `-beta` / `-rc` / `-pre` / `-test` / `-fix` 等其它后缀
+     （Fabric 的 semver 会把 `-xxx` 解析成预发行，且命名不统一）。
+   - **测试版不得自行升为正式版**：去 `p` 定版**必须经用户明确确认**（用户说「可以发正式版 / 转正 / 这版定稿」之类）。
+     用户没说，就继续 `pN` 递增发测试版；**AI 不得自行决定转正**。
+   - **正式版版本号 = `<mod版本>-<MC版本>`**，对外统一写成 **`FO-6.7-1.21.11`** 这种形式
+     （`FO-` + 纯 mod 版本 + `-` + MC 版本）；tag 仍是纯 mod 版本 `6.7`，附件名 `FO-6.7-1.21.11.jar`。
+   - **转正流程**（用户确认后执行）：① `fo/gradle/libs.versions.toml` 的 `mod-version` 去掉 `pN` →
+     ② 重新构建，并确认 `fabric.mod.json` 里的 `version` 同步为纯版本号（jar 内不能残留 `pN`）→
+     ③ 打 tag `<mod版本>` → ④ 建**正式** Release（标题 `FO 6.7-1.21.11`，**不勾** Pre-release）→
+     ⑤ 清理旧 jar（硬性规范 6 第 ④ 步）→ ⑥ `releases/README.md` 版本清单加一行并标注「对外正式版」。
+     ⚠️ **转正不删历史**：原 `pN` 的 tag 与 Release 说明全部保留（只是勾上 Pre-release、清掉 jar 附件），
+     保证「这版测过什么、什么时候转正」可回溯。
+   - **测试版 Release 一律勾 Pre-release**；正式版不勾。GitHub 的「Latest」只应落在正式版上。
+   - **版本号重名**：对外正式版号可能与旧内部线（V 时代的 `6.0`~`6.23`，以及 `6.30`~`6.41`）的 tag 重名。
+     处理口径（`6.6`、`6.7` 都按这个走）：**旧的那条 Release 转为草稿**（内容一字不删、仅隐藏），
+     tag 归对外版使用（tag 强制指向新的对外版 commit）。不得删除旧 Release 或旧说明。
 1. **版本号一律不带 `V` 前缀**。正确写法是 `6.25`，不是 `V6.25`。历史遗留的 `V6.25` / `FO-V6.25` 写法已废弃，新版本不得再出现。
 2. **构建产物名 = `FO-<mod版本>-<MC版本>.jar`**，例：`mod-version = 6.25` + `minecraft = 1.21.11` → **`FO-6.25-1.21.11.jar`**。
    - mod 版本来自 `fo/gradle/libs.versions.toml` 的 `mod-version`；MC 版本来自同文件的 `minecraft`。
@@ -982,6 +1004,8 @@ $rels | ForEach-Object { $t = $_.tag_name; $_.assets | Where-Object { $_.name -l
 | Git tag | `V6.25` | `6.25` |
 | Release 标题 | `FO V6.25` | `FO 6.25-1.21.11` |
 | Release 附件 | `FO-V6.25.jar` | `FO-6.25-1.21.11.jar` |
+| 测试版（未定稿，尾缀只能是 `p`） | `6.7-beta` / `6.7-rc1` / `6.7-fix2` | `6.7p37` → `FO-6.7p37-1.21.11.jar` |
+| 正式版（须用户确认后才可发） | 直接拿 `6.7p36` 当正式版 | `6.7` → `FO-6.7-1.21.11.jar` |
 
 ## 详细执行流程
 
