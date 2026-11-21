@@ -1,6 +1,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.utils.AntiChunkLogic;
 import com.fo.addon.utils.Debug;
 import com.fo.addon.utils.DirectionFilter;
 import com.fo.addon.utils.FacingLogic;
@@ -101,6 +102,7 @@ public class ElytraCollector extends Module {
     // ========== Settings ==========
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgFlight = settings.createGroup("飞行");
+    private final SettingGroup sgAntiChunk = settings.createGroup("防卡区块");
 
     private final Setting<String> seedSetting = sgGeneral.add(new StringSetting.Builder()
         .name("世界种子")
@@ -178,6 +180,66 @@ public class ElytraCollector extends Module {
         .defaultValue(2.0)
         .min(0.5)
         .sliderRange(0.5, 10)
+        .build()
+    );
+
+    // ===== 防卡区块 + 俯仰平滑 (内嵌自 Ying 0.7.2 Pitch40Fly，不新增模块) =====
+    private final Setting<Boolean> antiChunkClimb = sgAntiChunk.add(new BoolSetting.Builder()
+        .name("自动防卡区块")
+        .description("面向方向前方未加载区块太近时，强制抬头爬升，避免撞进未加载区块被服务端拉回。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> chunkLookahead = sgAntiChunk.add(new IntSetting.Builder()
+        .name("前方检测距离")
+        .description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")
+        .defaultValue(32)
+        .range(4, 128)
+        .sliderRange(4, 128)
+        .build()
+    );
+
+    private final Setting<Integer> minClimbTicks = sgAntiChunk.add(new IntSetting.Builder()
+        .name("最短爬升时间")
+        .description("触发防卡拉升后至少保持这么多 tick，防止刚拉升就结束导致一抖一抖。")
+        .defaultValue(10)
+        .range(0, 100)
+        .sliderRange(0, 100)
+        .build()
+    );
+
+    private final Setting<Integer> resumeMargin = sgAntiChunk.add(new IntSetting.Builder()
+        .name("恢复余量")
+        .description("未加载区块距离要大于 前方检测距离+该值，且连续 3 tick 满足，才结束拉升。")
+        .defaultValue(16)
+        .range(0, 64)
+        .sliderRange(0, 64)
+        .build()
+    );
+
+    private final Setting<Boolean> pitchSmooth = sgFlight.add(new BoolSetting.Builder()
+        .name("俯仰平滑")
+        .description("爬升/俯冲时按固定角速度平滑过渡，不再硬切 37.72/-54.77 (Ying 0.7.2 同款手感)。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> pitchRotateUp = sgFlight.add(new DoubleSetting.Builder()
+        .name("抬头角速度")
+        .description("俯仰平滑开启时，爬升抬头速度 (度/tick).")
+        .defaultValue(5.45)
+        .min(1)
+        .sliderMax(20)
+        .build()
+    );
+
+    private final Setting<Double> pitchRotateDown = sgFlight.add(new DoubleSetting.Builder()
+        .name("低头角速度")
+        .description("俯仰平滑开启时，俯冲低头速度 (度/tick).")
+        .defaultValue(0.9)
+        .min(0.5)
+        .sliderMax(2)
         .build()
     );
 
@@ -323,6 +385,11 @@ public class ElytraCollector extends Module {
     private int lastGotoTick = 0;
     private long worldSeed = 0L;
     private boolean climbing = false;
+    // ===== 防卡区块 + 俯仰平滑状态 (内嵌自 Ying 0.7.2) =====
+    private boolean antiClimbActive = false;   // 当前爬升是否由防卡区块触发 (有否决权，不受高度滞回提前结束)
+    private int antiClimbTicks = 0;            // 防卡拉升已持续的 tick
+    private int antiClearStreak = 0;           // 前方连续已加载 tick (需 >=3 才结束拉升)
+    private float smoothedPitch = 37.72f;      // 俯仰平滑后的当前 pitch
     private boolean headFound = false;
     private BlockPos exactHead = null;
     private int nearTicks = 0;
@@ -428,6 +495,12 @@ public class ElytraCollector extends Module {
             linkedTrash = true;
             info("已联动开启 FO 自动扔垃圾 (白名单 " + TrashDefaults.DEFAULT_WHITELIST_IDS.size() + " 项).");
         }
+
+        // 防卡区块 / 俯仰平滑状态复位
+        antiClimbActive = false;
+        antiClimbTicks = 0;
+        antiClearStreak = 0;
+        smoothedPitch = 37.72f;
 
         // 按钮保存值为 true 时，激活模块即自动开始 (用户无需再手动点一次按钮)
         if (btnStart.get() && state == State.IDLE && mc.player != null && mc.world != null) {
@@ -676,6 +749,10 @@ public class ElytraCollector extends Module {
         current = ships.get(targetIndex);
         waypoints = ShipWaypoints.from(current.headPos, current.facing);
         climbing = false;
+        antiClimbActive = false;
+        antiClimbTicks = 0;
+        antiClearStreak = 0;
+        smoothedPitch = 37.72f;
         headFound = false;
         frameAirChecked = false;
         frameAirEmpty = false;
@@ -945,9 +1022,24 @@ public class ElytraCollector extends Module {
         } else {
             if (y <= minHeight.get()) climbing = true;
         }
-        float pitch = climbing ? -54.77f : 37.72f;
+        // 防卡区块：接近降落点 (48 格内) 时暂停检测，否则会被迫拉升导致无法降落；
+        // 其余时候前方未加载区块太近时有否决权，强制爬升且至少保持 min-climb-ticks
+        if (horizontalDistance(lp) > 48) {
+            updateAntiChunkClimb();
+        } else {
+            antiClimbActive = false;
+            antiClimbTicks = 0;
+            antiClearStreak = 0;
+        }
+        float targetPitch = climbing ? -54.77f : 37.72f;
+        if (pitchSmooth.get()) {
+            float smoothSpeed = climbing ? pitchRotateUp.get().floatValue() : pitchRotateDown.get().floatValue();
+            smoothedPitch = AntiChunkLogic.stepToward(smoothedPitch, targetPitch, smoothSpeed);
+        } else {
+            smoothedPitch = targetPitch;
+        }
 
-        rotateTo(yaw, pitch);
+        rotateTo(yaw, smoothedPitch);
         mc.options.forwardKey.setPressed(true);
 
         // 先飞到降落点正上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
@@ -2966,6 +3058,54 @@ supplyScanStart = 0;
         double dx = pos.getX() + 0.5 - mc.player.getX();
         double dz = pos.getZ() + 0.5 - mc.player.getZ();
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    // ========== 防卡区块 (内嵌自 Ying 0.7.2 Pitch40Fly，单模块生效) ==========
+
+    /** 面向方向上前方最近未加载区块的距离；-1 表示前方全部已加载 */
+    private double distanceToUnloadedAhead() {
+        float yaw = mc.player.getYaw();
+        double rad = Math.toRadians(yaw);
+        double dirX = -Math.sin(rad);
+        double dirZ = Math.cos(rad);
+        double px = mc.player.getX();
+        double pz = mc.player.getZ();
+        int max = Math.max(chunkLookahead.get() + 32, 192);
+        for (int d = 0; d <= max; d++) {
+            int bx = (int) Math.floor(px + dirX * d);
+            int bz = (int) Math.floor(pz + dirZ * d);
+            if (!mc.world.isChunkLoaded(bx >> 4, bz >> 4)) return d;
+        }
+        return -1;
+    }
+
+    /** 防卡区块状态机：前方未加载区块太近就强制爬升，满足最短时长 + 连续 3 tick 余量才恢复 */
+    private void updateAntiChunkClimb() {
+        if (!antiChunkClimb.get()) {
+            antiClimbActive = false;
+            antiClimbTicks = 0;
+            antiClearStreak = 0;
+            return;
+        }
+        double ahead = distanceToUnloadedAhead();
+        if (antiClimbActive) {
+            antiClimbTicks++;
+            boolean clear = AntiChunkLogic.isClear(ahead, chunkLookahead.get(), resumeMargin.get());
+            antiClearStreak = clear ? antiClearStreak + 1 : 0;
+            climbing = true; // 防卡期间强制保持爬升，不被高度滞回提前打断
+            if (AntiChunkLogic.canEndClimb(antiClimbTicks, antiClearStreak, minClimbTicks.get())) {
+                antiClimbActive = false;
+                antiClimbTicks = 0;
+                antiClearStreak = 0;
+                debugLog("前方区块已加载，结束防卡拉升，恢复 pitch40 飞行.");
+            }
+        } else if (AntiChunkLogic.shouldTrigger(ahead, chunkLookahead.get())) {
+            antiClimbActive = true;
+            antiClimbTicks = 0;
+            antiClearStreak = 0;
+            climbing = true;
+            debugLog("前方 " + String.format("%.0f", ahead) + " 格有未加载区块 (阈值 " + chunkLookahead.get() + ")，触发拉升.");
+        }
     }
 
     private void rotateTo(float targetYaw, float targetPitch) {
