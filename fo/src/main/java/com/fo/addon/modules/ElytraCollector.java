@@ -149,6 +149,11 @@ extends Module {
     private final Setting<Integer> pullUpDangerY;
     private final Setting<Integer> pullUpTargetY;
     private final Setting<Double> pullUpPitch;
+    // ===== 自动补烟花（内嵌自 Jeff Mod Pitch40Util）+ 滑翔失效恢复 =====
+    private final Setting<Boolean> autoFireworkBoost;
+    private final Setting<Double> fireworkVelocityThreshold;
+    private final Setting<Integer> fireworkBoostCooldownTicks;
+    private final Setting<Integer> lowHeightRocketGap;
     private State state;
     private CollectStep collectStep;
     private final List<ShipTarget> ships;
@@ -172,6 +177,10 @@ extends Module {
     private boolean pullUpActive;
     private int pullUpTick;
     private int pullUpLastFireworkTick;
+    private int fireworkBoostCooldown;
+    private int glideFailTicks;
+    private int glideRecoverTicks;
+    private boolean glideRecovering;
     private boolean headFound;
     private net.minecraft.util.math.BlockPos exactHead;
     private int nearTicks;
@@ -300,6 +309,11 @@ extends Module {
         this.pullUpDangerY = this.sgHelpers.add((((new IntSetting.Builder().name("危险Y")).description("低于此 Y 时强制拉升 (降落/恢复期间除外)。默认 40，高于低Y退出线 20。")).defaultValue(40)).range(-64, 260).sliderRange(-64, 260).build());
         this.pullUpTargetY = this.sgHelpers.add((((new IntSetting.Builder().name("目标Y")).description("拉升到该高度后停止。")).defaultValue(200)).range(-20, 320).sliderRange(-20, 320).build());
         this.pullUpPitch = this.sgHelpers.add((((new DoubleSetting.Builder().name("拉升俯仰")).description("拉升时抬头俯仰角 (负值=抬头)。")).defaultValue(-37.72)).min(-90.0).max(-10.0).sliderRange(-80.0, -20.0).build());
+        // 自动补烟花（内嵌自 Jeff Mod Pitch40Util）+ 滑翔失效恢复
+        this.autoFireworkBoost = this.sgHelpers.add((((new BoolSetting.Builder().name("自动补烟花")).description("抬头速度不足或高度过低时自动补一发烟花 (借鉴 Jeff Mod Pitch40Util)。")).defaultValue(true)).build());
+        this.fireworkVelocityThreshold = this.sgHelpers.add((((new DoubleSetting.Builder().name("补烟花速度阈值")).description("抬头阶段垂直速度低于此值就补烟花 (负值=已在下坠)。")).defaultValue(-0.05)).range(-0.5, 1.0).sliderRange(-0.5, 0.5).build());
+        this.fireworkBoostCooldownTicks = this.sgHelpers.add((((new IntSetting.Builder().name("补烟花冷却")).description("两发补烟花之间至少间隔多少 游戏刻。")).defaultValue(10)).range(0, 100).sliderRange(0, 100).build());
+        this.lowHeightRocketGap = this.sgHelpers.add((((new IntSetting.Builder().name("低空补烟花高度差")).description("Y 低于「最低高度+该值」时无条件补烟花。")).defaultValue(20)).range(0, 100).sliderRange(0, 100).build());
         this.state = State.IDLE;
         this.collectStep = CollectStep.TO_P1;
         this.ships = Collections.synchronizedList(new ArrayList());
@@ -317,6 +331,10 @@ extends Module {
         this.pullUpSuppressed = false;
         this.pullUpActive = false;
         this.pullUpTick = 0;
+        this.fireworkBoostCooldown = 0;
+        this.glideFailTicks = 0;
+        this.glideRecoverTicks = 0;
+        this.glideRecovering = false;
         this.sessionSkip = Collections.synchronizedSet(new HashSet());
         this.searchExtends = 0;
         this.takeoffFacing = null;
@@ -400,6 +418,10 @@ extends Module {
         this.pullUpSuppressed = false;
         this.pullUpActive = false;
         this.pullUpTick = 0;
+        this.fireworkBoostCooldown = 0;
+        this.glideFailTicks = 0;
+        this.glideRecoverTicks = 0;
+        this.glideRecovering = false;
         this.landingRecover = false;
         this.recoveryYaw = 0.0f;
         this.recoverStageTick = 0;
@@ -599,6 +621,10 @@ extends Module {
         this.frameAirChecked = false;
         this.frameAirEmpty = false;
         this.frameAirScanTicks = 0;
+        this.fireworkBoostCooldown = 0;
+        this.glideFailTicks = 0;
+        this.glideRecoverTicks = 0;
+        this.glideRecovering = false;
         this.exactHead = null;
         this.nearTicks = 0;
         this.scanAttempts = 0;
@@ -764,15 +790,21 @@ extends Module {
     private void onFlying() {
         if (!this.mc.player.isGliding()) {
             if (this.mc.player.isOnGround()) {
+                this.glideFailTicks = 0;
+                this.glideRecoverTicks = 0;
+                this.glideRecovering = false;
                 this.firstFireworkDone = false;
                 this.takeoffFacing = null;
                 this.state = State.RISING;
                 this.stateTick = 0;
                 return;
             }
-            this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            this.handleGlideFailure();
             return;
         }
+        this.glideFailTicks = 0;
+        this.glideRecoverTicks = 0;
+        this.glideRecovering = false;
 
         net.minecraft.util.math.BlockPos lp = this.waypoints.landing;
 
@@ -897,17 +929,36 @@ extends Module {
         this.rotateTo(yaw, pitch);
         this.mc.options.forwardKey.setPressed(true);
 
+        // 自动补烟花（内嵌自 Jeff Mod Pitch40Util）：抬头速度不足 / 高度过低
+        if (this.fireworkBoostCooldown > 0) {
+            --this.fireworkBoostCooldown;
+        }
+        if (this.autoFireworkBoost.get()
+                && this.fireworkBoostCooldown == 0
+                && !holdForFrame
+                && this.horizontalDistance(lp) > 20.0
+                && this.mc.player.getY() < (double)this.maxHeight.get()) {
+            boolean tooSlow = this.climbing && this.mc.player.getVelocity().y < this.fireworkVelocityThreshold.get();
+            boolean tooLow = this.mc.player.getY() < (double)(this.minHeight.get() + this.lowHeightRocketGap.get());
+            if (tooSlow || tooLow) {
+                this.useFirework();
+                this.fireworkBoostCooldown = Math.max(this.fireworkBoostCooldownTicks.get(), (int)Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0)));
+            }
+        }
+
         // 等框扫描期间绕圈，用烟花维持高度（不降落）
         if (holdForFrame && this.frameAirScanTicks > 0 && this.frameAirScanTicks % 40 == 0) {
             this.useFirework();
+            this.fireworkBoostCooldown = Math.max(this.fireworkBoostCooldownTicks.get(), (int)Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0)));
         }
 
         if (this.frameAirEmpty) {
             if (this.mc.player.getY() < this.maxHeight.get()) {
                 this.climbing = true;
-                if (this.stateTick - this.lastFireworkTick >= Math.max(1, Math.round(this.fireworkInterval.get() * 20))) {
+                if (this.fireworkBoostCooldown == 0 && this.stateTick - this.lastFireworkTick >= Math.max(1, Math.round(this.fireworkInterval.get() * 20))) {
                     this.useFirework();
                     this.lastFireworkTick = this.stateTick;
+                    this.fireworkBoostCooldown = Math.max(this.fireworkBoostCooldownTicks.get(), (int)Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0)));
                 }
             } else {
                 this.leaveShipNow();
@@ -920,6 +971,38 @@ extends Module {
         }
     }
 
+
+    /** 滑翔意外中断（被打断/服务器拒绝/耐久耗尽）：先尝试恢复展开，200 tick 失败自动退出保护 */
+    private void handleGlideFailure() {
+        ++this.glideFailTicks;
+        if (this.glideFailTicks == 1) {
+            net.minecraft.item.ItemStack chest = this.mc.player.getInventory().getStack(38);
+            if (chest.getItem() == net.minecraft.item.Items.ELYTRA && chest.getDamage() >= chest.getMaxDamage() - 1) {
+                this.warning("鞘翅耐久耗尽，无法再展开，自动退出游戏保护.", new Object[0]);
+                this.emergencyExit("FO 鞘翅采集: 鞘翅耐久耗尽，自动退出游戏保护");
+                return;
+            }
+            this.info("滑翔意外中断，尝试恢复展开.", new Object[0]);
+        }
+        if (this.glideFailTicks <= 20) {
+            this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            return;
+        }
+        this.glideRecovering = true;
+        ++this.glideRecoverTicks;
+        this.mc.player.setPitch(-30.0f);
+        this.mc.options.forwardKey.setPressed(true);
+        if (this.glideRecoverTicks % 10 == 0) {
+            this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+        }
+        if (this.glideRecoverTicks % 40 == 0) {
+            this.useFirework();
+        }
+        if (this.glideRecoverTicks > 200) {
+            this.warning("滑翔 200 游戏刻仍无法恢复，判定服务端拒绝，自动退出游戏保护.", new Object[0]);
+            this.emergencyExit("FO 鞘翅采集: 滑翔无法恢复，自动退出游戏保护");
+        }
+    }
 
     void abortStorageForPullUp() {
         if (this.storagePhase == StoragePhase.NONE) {
