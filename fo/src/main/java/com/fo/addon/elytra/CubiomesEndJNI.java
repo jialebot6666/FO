@@ -67,10 +67,11 @@ public final class CubiomesEndJNI {
             throw new IOException("fo.cubiomesend.dir specified but " + libName + " not found in " + dir);
         }
 
-        // 2) 从 jar 内 /natives/windows/ 提取 DLL
-        InputStream stream = CubiomesEndJNI.class.getResourceAsStream("/natives/windows/" + libName);
-        if (stream == null && windows) {
-            stream = CubiomesEndJNI.class.getResourceAsStream("/natives/windows/CubiomesEndJNI.dll");
+        // 2) 从 jar 内按平台目录提取原生库（natives/windows 或 natives/linux）
+        String nativeDir = windows ? "/natives/windows/" : "/natives/linux/";
+        InputStream stream = CubiomesEndJNI.class.getResourceAsStream(nativeDir + libName);
+        if (stream == null) {
+            stream = CubiomesEndJNI.class.getResourceAsStream(nativeDir + (windows ? "CubiomesEndJNI.dll" : "libCubiomesEndJNI.so"));
         }
         if (stream == null) {
             stream = CubiomesEndJNI.class.getResourceAsStream("/" + libName);

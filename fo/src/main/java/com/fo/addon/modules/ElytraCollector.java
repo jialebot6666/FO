@@ -2,6 +2,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
+import com.fo.addon.elytra.CubiomesEndJNI;
 import com.fo.addon.pathing.PathManagers;
 import com.seedfinding.mcbiome.source.BiomeSource;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
@@ -106,6 +107,8 @@ extends Module {
     private final SettingGroup sgFlight;
     private final Setting<String> seedSetting;
     private final Setting<Integer> searchRange;
+    /** 搜索末地环内鞘翅：用 26.3 修复版 cubiomes 原生定位器搜索末地城（适配 Folia 等已修复末地环的服务端） */
+    private final Setting<Boolean> ringSearch;
     private final Setting<Integer> minHeight;
     private final Setting<Integer> maxHeight;
     private final Setting<Integer> riseHeight;
@@ -262,6 +265,7 @@ extends Module {
         this.sgAntiChunk = this.settings.createGroup("防卡区块");
         this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("世界种子")).description("世界种子 (0 = 当前世界). 默认 -7346913998703726680 为本服种子.")).defaultValue("-7346913998703726680")).build());
         this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("搜索半径")).description("搜索半径，单位方块 (从玩家位置).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
+        this.ringSearch = this.sgGeneral.add((((new BoolSetting.Builder().name("搜索末地环内鞘翅")).description("用 26.3 修复版 cubiomes 原生定位器搜索末地城，末地环 (外岛) 的船也能定位；适配 Folia 等已修复末地环的服务端。关闭则用旧版 1.21 种子推算.")).defaultValue(true)).build());
         this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("最低高度")).description("飞行中低于此高度时触发爬升.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
         this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("最高高度")).description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 最低高度 组成滞回区间).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
         this.riseHeight = this.sgFlight.add((((new IntSetting.Builder().name("拉升高度")).description("起飞后抬头爬升到的目标高度 (需高于 最高高度).")).defaultValue(230)).range(200, 320).sliderRange(200, 300).build());
@@ -491,7 +495,19 @@ extends Module {
     /*
      * WARNING - Removed try catching itself - possible behaviour change.
      */
+    /** 搜索入口：末地环模式优先走 26.3 原生定位器，否则走旧版种子推算。 */
     private void searchShips(int generation) {
+        if ((this.ringSearch.get()).booleanValue()) {
+            if (CubiomesEndJNI.isLibraryLoaded()) {
+                this.searchShipsRing(generation);
+                return;
+            }
+            this.warning("末地环定位器未加载（原生库缺失），回退旧版种子推算.", new Object[0]);
+        }
+        this.searchShipsLegacy(generation);
+    }
+
+    private void searchShipsLegacy(int generation) {
         block18: {
             try {
                 if (this.searchCancelled || generation != this.searchGeneration) {
@@ -537,35 +553,7 @@ extends Module {
                 if (this.searchCancelled || generation != this.searchGeneration) {
                     return;
                 }
-                found.sort(Comparator.comparingInt(s -> (s.headPos.getX() - px) * (s.headPos.getX() - px) + (s.headPos.getZ() - pz) * (s.headPos.getZ() - pz)));
-                this.ships.clear();
-                this.ships.addAll(found);
-                this.targetIndex = 0;
-                List list = (List)this.searchResults.get();
-                synchronized (list) {
-                    ((List)this.searchResults.get()).clear();
-                    for (ShipTarget t : found) {
-                        ((List)this.searchResults.get()).add(t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + "," + String.valueOf(t.facing));
-                    }
-                }
-                this.info("找到 " + this.ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ").", new Object[0]);
-                if (this.ships.isEmpty()) {
-                    if (this.searchExtends < 10) {
-                        ++this.searchExtends;
-                        this.info("范围内没有末地船，扩大范围 +" + this.searchExtends * 500 + " 格重新搜索...", new Object[0]);
-                        this.launchSearch();
-                    } else {
-                        this.searchExtends = 0;
-                        this.completeTask("范围内没有末地船，任务完成.");
-                    }
-                } else {
-                    this.searchExtends = 0;
-                    if (this.state == State.SEARCHING) {
-                        this.firstFireworkDone = false;
-                        this.state = State.RISING;
-                        this.stateTick = 0;
-                    }
-                }
+                this.applySearchResults(found, range, generation);
             }
             catch (Exception e) {
                 if (this.searchCancelled || generation != this.searchGeneration) break block18;
@@ -573,6 +561,153 @@ extends Module {
                 this.state = State.IDLE;
                 this.btnStart.set(false);
             }
+        }
+    }
+
+    /**
+     * 末地环模式：用 cubiomes 26.3（末地环修复版）原生定位器搜索末地城。
+     * 原生库提供城市候选、地形可行性、船 piece 包围盒；展示框坐标由包围盒 + 朝向换算
+     *（公式已与 seedfinding 321/321 实测对齐：x/z 端点、y=baseY+bb0.y+5、rot→朝向）。
+     */
+    private void searchShipsRing(int generation) {
+        try {
+            if (this.searchCancelled || generation != this.searchGeneration) {
+                return;
+            }
+            this.worldSeed = this.parseSeed((String)this.seedSetting.get());
+            EndBiomeSource biomeSource = new EndBiomeSource(MCVersion.v1_21, this.worldSeed);
+            EndTerrainGenerator terrainGen = new EndTerrainGenerator(biomeSource);
+            int px = (int)Math.floor(this.mc.player.getX());
+            int pz = (int)Math.floor(this.mc.player.getZ());
+            int spacing = 20;
+            int range = this.searchRange.get() + this.searchExtends * 500;
+            int regionRange = range / (spacing * 16) + 1;
+            int prx = Math.floorDiv(px >> 4, spacing);
+            int prz = Math.floorDiv(pz >> 4, spacing);
+            ArrayList<ShipTarget> found = new ArrayList<ShipTarget>();
+            long handle = CubiomesEndJNI.initEndLocator(CubiomesEndJNI.MC_1_26_3, this.worldSeed);
+            if (handle == 0L) {
+                this.warning("末地环定位器初始化失败，回退旧版种子推算.", new Object[0]);
+                this.searchShipsLegacy(generation);
+                return;
+            }
+            try {
+                int[] out = new int[2];
+                int[] ship = new int[7];
+                for (int drx = -regionRange; drx <= regionRange; ++drx) {
+                    if (this.searchCancelled || generation != this.searchGeneration) {
+                        return;
+                    }
+                    for (int drz = -regionRange; drz <= regionRange; ++drz) {
+                        int rx = prx + drx;
+                        int rz = prz + drz;
+                        if (CubiomesEndJNI.getEndCityAt(handle, rx, rz, out) == 0) {
+                            continue;
+                        }
+                        int bx = out[0];
+                        int bz = out[1];
+                        if (!CubiomesEndJNI.isViableEndCity(handle, bx, bz)) {
+                            continue;
+                        }
+                        int cx = bx >> 4;
+                        int cz = bz >> 4;
+                        if (CubiomesEndJNI.getEndCityShip(handle, cx, cz, ship) == 0) {
+                            continue;
+                        }
+                        int baseY = EndCity.getAverageYPosition(terrainGen, cx, cz);
+                        int[] f = ElytraCollector.frameFromShipBB(ship);
+                        if (f == null) {
+                            continue;
+                        }
+                        net.minecraft.util.math.BlockPos framePos = new net.minecraft.util.math.BlockPos(f[0], baseY + f[1], f[2]);
+                        Direction facing = ElytraCollector.facingFromRot(ship[6]);
+                        net.minecraft.util.math.BlockPos head = framePos.offset(facing, 7).offset(Direction.UP, 3);
+                        if (this.isBlacklisted(head) || this.sessionSkip.contains(this.blacklistKey(head))) {
+                            continue;
+                        }
+                        found.add(new ShipTarget(new CPos(cx, cz), head, facing));
+                        if ((this.debugSetting.get()).booleanValue()) {
+                            this.debugLog("环船 城=(" + bx + "," + bz + ") 龙头=(" + head.getX() + "," + head.getY() + "," + head.getZ() + ") 朝向=" + String.valueOf(facing) + " rot=" + ship[6] + " bb0Y=" + ship[1] + " baseY=" + baseY);
+                        }
+                    }
+                }
+            }
+            finally {
+                CubiomesEndJNI.freeEndLocator(handle);
+            }
+            this.applySearchResults(found, range, generation);
+        }
+        catch (Exception e) {
+            if (this.searchCancelled || generation != this.searchGeneration) {
+                return;
+            }
+            this.error("末地环搜索失败: " + e.getMessage() + "；回退旧版种子推算.", new Object[0]);
+            this.searchShipsLegacy(generation);
+        }
+    }
+
+    /** 搜索结果统一收尾：排序、写列表、没船则扩范围、有船则进入起飞。 */
+    private void applySearchResults(List<ShipTarget> found, int range, int generation) {
+        if (this.searchCancelled || generation != this.searchGeneration) {
+            return;
+        }
+        int px = (int)Math.floor(this.mc.player.getX());
+        int pz = (int)Math.floor(this.mc.player.getZ());
+        found.sort(Comparator.comparingInt(s -> (s.headPos.getX() - px) * (s.headPos.getX() - px) + (s.headPos.getZ() - pz) * (s.headPos.getZ() - pz)));
+        this.ships.clear();
+        this.ships.addAll(found);
+        this.targetIndex = 0;
+        List list = (List)this.searchResults.get();
+        synchronized (list) {
+            ((List)this.searchResults.get()).clear();
+            for (ShipTarget t : found) {
+                ((List)this.searchResults.get()).add(t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + "," + String.valueOf(t.facing));
+            }
+        }
+        this.info("找到 " + this.ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ((this.ringSearch.get()).booleanValue() ? ", 末地环模式 26.3" : "") + ").", new Object[0]);
+        if (this.ships.isEmpty()) {
+            if (this.searchExtends < 10) {
+                ++this.searchExtends;
+                this.info("范围内没有末地船，扩大范围 +" + this.searchExtends * 500 + " 格重新搜索...", new Object[0]);
+                this.launchSearch();
+            } else {
+                this.searchExtends = 0;
+                this.completeTask("范围内没有末地船，任务完成.");
+            }
+        } else {
+            this.searchExtends = 0;
+            if (this.state == State.SEARCHING) {
+                this.firstFireworkDone = false;
+                this.state = State.RISING;
+                this.stateTick = 0;
+            }
+        }
+    }
+
+    /**
+     * 由船 piece 包围盒 + rot 推展示框坐标（相对城市基准 y）。
+     * 局部偏移 (6,5,7) 来自船模板；返回 {worldX, relY, worldZ}，世界 y = baseY + relY。
+     */
+    private static int[] frameFromShipBB(int[] s) {
+        int ox = 6;
+        int oy = 5;
+        int oz = 7;
+        switch (s[6]) {
+            case 0: return new int[]{s[0] + ox, s[1] + oy, s[2] + oz};
+            case 1: return new int[]{s[3] - oz, s[1] + oy, s[2] + ox};
+            case 2: return new int[]{s[3] - ox, s[1] + oy, s[5] - oz};
+            case 3: return new int[]{s[0] + oz, s[1] + oy, s[5] - ox};
+            default: return null;
+        }
+    }
+
+    /** cubiomes rot（0=NONE 1=CW90 2=180 3=CCW90）→ 船头朝向。 */
+    private static Direction facingFromRot(int rot) {
+        switch (rot) {
+            case 1: return Direction.EAST;
+            case 2: return Direction.SOUTH;
+            case 3: return Direction.WEST;
+            default: return Direction.NORTH;
         }
     }
 
