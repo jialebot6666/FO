@@ -144,6 +144,11 @@ extends Module {
     private final Setting<Integer> antiStuckInterval;
     private final Setting<Integer> antiStuckOffset;
     private final Setting<Integer> antiStuckResumeTicks;
+    // ===== 强制拉升（内嵌自 Ying 0.7.2 PullUp / 界面名 Full Up）=====
+    private final Setting<Boolean> pullUp;
+    private final Setting<Integer> pullUpDangerY;
+    private final Setting<Integer> pullUpTargetY;
+    private final Setting<Double> pullUpPitch;
     private State state;
     private CollectStep collectStep;
     private final List<ShipTarget> ships;
@@ -164,6 +169,9 @@ extends Module {
     private net.minecraft.util.math.BlockPos lastJumpPos;
     private int jumpStuckCount;
     private int antiStuckResume;
+    private boolean pullUpActive;
+    private int pullUpTick;
+    private int pullUpLastFireworkTick;
     private boolean headFound;
     private net.minecraft.util.math.BlockPos exactHead;
     private int nearTicks;
@@ -287,6 +295,11 @@ extends Module {
         this.antiStuckInterval = this.sgHelpers.add((((new IntSetting.Builder().name("防卡检测间隔")).description("防卡住检测间隔 (游戏刻).")).defaultValue(20)).range(2, 200).build());
         this.antiStuckOffset = this.sgHelpers.add((((new IntSetting.Builder().name("绕行偏移")).description("防卡住目标点偏移 (沿运动方向，格).")).defaultValue(4)).range(1, 30).sliderRange(1, 30).build());
         this.antiStuckResumeTicks = this.sgHelpers.add((((new IntSetting.Builder().name("恢复等待")).description("触发后等待多少 游戏刻 恢复鞘翅跳跃 (寻路期间保持暂停)。")).defaultValue(80)).range(10, 600).build());
+        // 强制拉升（内嵌自 Ying 0.7.2 PullUp / 界面名 Full Up）
+        this.pullUp = this.sgHelpers.add((((new BoolSetting.Builder().name("强制拉升")).description("低于危险 Y 时无条件强制拉升 (抬头 + 烟花)，升到目标高度自动停止。")).defaultValue(true)).build());
+        this.pullUpDangerY = this.sgHelpers.add((((new IntSetting.Builder().name("危险Y")).description("低于此 Y 时强制拉升 (降落/恢复期间除外)。")).defaultValue(-40)).range(-64, 100).sliderRange(-64, 100).build());
+        this.pullUpTargetY = this.sgHelpers.add((((new IntSetting.Builder().name("目标Y")).description("拉升到该高度后停止。")).defaultValue(200)).range(-20, 320).sliderRange(-20, 320).build());
+        this.pullUpPitch = this.sgHelpers.add((((new DoubleSetting.Builder().name("拉升俯仰")).description("拉升时抬头俯仰角 (负值=抬头)。")).defaultValue(-37.72)).min(-90.0).max(-10.0).sliderRange(-80.0, -20.0).build());
         this.state = State.IDLE;
         this.collectStep = CollectStep.TO_P1;
         this.ships = Collections.synchronizedList(new ArrayList());
@@ -302,6 +315,8 @@ extends Module {
         this.nearTicks = 0;
         this.scanAttempts = 0;
         this.pullUpSuppressed = false;
+        this.pullUpActive = false;
+        this.pullUpTick = 0;
         this.sessionSkip = Collections.synchronizedSet(new HashSet());
         this.searchExtends = 0;
         this.takeoffFacing = null;
@@ -383,6 +398,8 @@ extends Module {
         this.state = State.IDLE;
         this.ships.clear();
         this.pullUpSuppressed = false;
+        this.pullUpActive = false;
+        this.pullUpTick = 0;
         this.landingRecover = false;
         this.recoveryYaw = 0.0f;
         this.recoverStageTick = 0;
@@ -600,6 +617,12 @@ extends Module {
                 return;
             }
             ++this.stateTick;
+            // 强制拉升优先于低 Y 停任务：先保命拉起来，拉不起来再停
+            this.updatePullUp();
+            if (this.pullUpActive && !this.mc.player.isOnGround()) {
+                this.applyPullUp();
+                return;
+            }
             if (this.state != State.IDLE && this.state != State.DONE && (this.lowYExit.get()).booleanValue() && this.mc.player.getY() < (double)(this.lowYThreshold.get()).intValue()) {
                 this.warning("Y=" + String.format("%.1f", this.mc.player.getY()) + " 低于阈值 " + String.valueOf(this.lowYThreshold.get()) + "，任务已停止.", new Object[0]);
                 this.stopTask("低高度任务停止.");
@@ -1274,6 +1297,58 @@ extends Module {
             }
         }
         return true;
+    }
+
+    /** 强制拉升：低于危险 Y 时无条件抬头 + 烟花，升到目标 Y 自动停止（内嵌自 Ying 0.7.2 PullUp） */
+    private void updatePullUp() {
+        if (!this.pullUp.get()) {
+            this.pullUpActive = false;
+            return;
+        }
+        if (this.state == State.IDLE || this.state == State.DONE) {
+            this.pullUpActive = false;
+            return;
+        }
+        // 降落/恢复期间不拉升（与 Ying PullUp 原逻辑一致，避免打断降落）
+        if (this.isLandingOrRecovering()) {
+            if (this.pullUpActive) {
+                this.pullUpActive = false;
+                this.info("进入降落/恢复，暂停强制拉升.", new Object[0]);
+            }
+            return;
+        }
+        ++this.pullUpTick;
+        if (this.pullUpActive) {
+            if (this.mc.player.getY() >= (double)this.pullUpTargetY.get()) {
+                this.pullUpActive = false;
+                this.pullUpTick = 0;
+                this.info("已升到目标高度 " + String.valueOf(this.pullUpTargetY.get()) + "，结束强制拉升.", new Object[0]);
+            }
+            return;
+        }
+        if (this.mc.player.getY() < (double)this.pullUpDangerY.get()) {
+            this.pullUpActive = true;
+            this.pullUpTick = 0;
+            this.pullUpLastFireworkTick = -(int)Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0));
+            this.info("危险高度: 低于 " + String.valueOf(this.pullUpDangerY.get()) + "，强制拉升.", new Object[0]);
+            this.abortStorageForPullUp();
+            PathManagers.get().stop();
+        }
+    }
+
+    private void applyPullUp() {
+        this.mc.player.setPitch(this.pullUpPitch.get().floatValue());
+        this.mc.options.forwardKey.setPressed(true);
+        if (!this.mc.player.isGliding()) {
+            if (!this.mc.player.isOnGround()) {
+                this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            }
+            return;
+        }
+        if ((long)(this.pullUpTick - this.pullUpLastFireworkTick) >= Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0))) {
+            this.useFirework();
+            this.pullUpLastFireworkTick = this.pullUpTick;
+        }
     }
 
     private void onStorageTick() {
