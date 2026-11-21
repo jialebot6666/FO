@@ -271,8 +271,8 @@ extends Module {
         this.sgStorage = this.settings.createGroup("存储");
         this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("存盒空格阈值")).description("背包可用空格 ≤ 此值时，拿到鞘翅后自动去末影箱存鞘翅.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
         this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:golden_carrot;8;32")))).build());
-        this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("低Y停止任务")).description("Y 低于阈值时自动停止任务 (防虚空掉物，不退游戏).")).defaultValue(true)).build());
-        this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("低Y阈值")).description("低于此 Y 自动停止任务.")).defaultValue(-20)).range(-64, 100).sliderRange(-64, 64).build());
+        this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("低Y自动退出")).description("Y 低于阈值时自动退出游戏 (断开服务器，防虚空掉物).")).defaultValue(true)).build());
+        this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("低Y阈值")).description("低于此 Y 自动退出游戏.")).defaultValue(20)).range(-64, 100).sliderRange(-64, 100).build());
         // 防卡区块（内嵌自 Ying 0.7.2 Pitch40Fly）
         this.antiChunkClimb = this.sgAntiChunk.add((((new BoolSetting.Builder().name("防卡区块")).description("面向方向前方未加载区块太近时，强制抬头爬升，避免被服务端拉回。")).defaultValue(true)).build());
         this.chunkLookahead = this.sgAntiChunk.add((((new IntSetting.Builder().name("检测距离")).description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")).defaultValue(32)).range(4, 128).sliderRange(4, 128).build());
@@ -297,7 +297,7 @@ extends Module {
         this.antiStuckResumeTicks = this.sgHelpers.add((((new IntSetting.Builder().name("恢复等待")).description("触发后等待多少 游戏刻 恢复鞘翅跳跃 (寻路期间保持暂停)。")).defaultValue(80)).range(10, 600).build());
         // 强制拉升（内嵌自 Ying 0.7.2 PullUp / 界面名 Full Up）
         this.pullUp = this.sgHelpers.add((((new BoolSetting.Builder().name("强制拉升")).description("低于危险 Y 时无条件强制拉升 (抬头 + 烟花)，升到目标高度自动停止。")).defaultValue(true)).build());
-        this.pullUpDangerY = this.sgHelpers.add((((new IntSetting.Builder().name("危险Y")).description("低于此 Y 时强制拉升 (降落/恢复期间除外)。")).defaultValue(-40)).range(-64, 100).sliderRange(-64, 100).build());
+        this.pullUpDangerY = this.sgHelpers.add((((new IntSetting.Builder().name("危险Y")).description("低于此 Y 时强制拉升 (降落/恢复期间除外)。默认 40，高于低Y退出线 20。")).defaultValue(40)).range(-64, 260).sliderRange(-64, 260).build());
         this.pullUpTargetY = this.sgHelpers.add((((new IntSetting.Builder().name("目标Y")).description("拉升到该高度后停止。")).defaultValue(200)).range(-20, 320).sliderRange(-20, 320).build());
         this.pullUpPitch = this.sgHelpers.add((((new DoubleSetting.Builder().name("拉升俯仰")).description("拉升时抬头俯仰角 (负值=抬头)。")).defaultValue(-37.72)).min(-90.0).max(-10.0).sliderRange(-80.0, -20.0).build());
         this.state = State.IDLE;
@@ -617,15 +617,15 @@ extends Module {
                 return;
             }
             ++this.stateTick;
-            // 强制拉升优先于低 Y 停任务：先保命拉起来，拉不起来再停
             this.updatePullUp();
-            if (this.pullUpActive && !this.mc.player.isOnGround()) {
-                this.applyPullUp();
+            // 低 Y 硬底线：低于阈值直接断开服务器退出游戏（防掉虚空丢物品）
+            if (this.state != State.IDLE && this.state != State.DONE && (this.lowYExit.get()).booleanValue() && this.mc.player.getY() < (double)(this.lowYThreshold.get()).intValue()) {
+                this.warning("当前高度低于阈值 " + String.valueOf(this.lowYThreshold.get()) + "，自动退出游戏.", new Object[0]);
+                this.emergencyExit("FO 鞘翅采集: Y 低于阈值 " + String.valueOf(this.lowYThreshold.get()) + "，自动退出游戏保护");
                 return;
             }
-            if (this.state != State.IDLE && this.state != State.DONE && (this.lowYExit.get()).booleanValue() && this.mc.player.getY() < (double)(this.lowYThreshold.get()).intValue()) {
-                this.warning("Y=" + String.format("%.1f", this.mc.player.getY()) + " 低于阈值 " + String.valueOf(this.lowYThreshold.get()) + "，任务已停止.", new Object[0]);
-                this.stopTask("低高度任务停止.");
+            if (this.pullUpActive && !this.mc.player.isOnGround()) {
+                this.applyPullUp();
                 return;
             }
             if (this.pullUpSuppressed) {
@@ -1195,6 +1195,23 @@ extends Module {
         this.frameHadElytra = false;
         this.pickupSessionDone = false;
         this.beginCollectStep();
+    }
+
+    /** 断开服务器连接（自动退出游戏） */
+    private void disconnect(String reason) {
+        if (this.mc.player == null || this.mc.player.networkHandler == null) {
+            return;
+        }
+        this.mc.player.networkHandler.getConnection().disconnect(net.minecraft.text.Text.literal(reason));
+    }
+
+    /** 自动下线保护：断开服务器 + 停任务 + 关闭模块，避免重连后残留激活 */
+    private void emergencyExit(String reason) {
+        this.disconnect(reason);
+        this.stopTask(reason);
+        if (this.isActive()) {
+            this.toggle();
+        }
     }
 
     private void stopTask(String reason) {
