@@ -1,11 +1,9 @@
+
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
-import com.fo.addon.utils.AntiChunkLogic;
-import com.fo.addon.utils.Debug;
-import com.fo.addon.utils.DirectionFilter;
-import com.fo.addon.utils.FacingLogic;
-import com.fo.addon.utils.TrashDefaults;
+import com.fo.addon.pathing.PathManagers;
+import com.seedfinding.mcbiome.source.BiomeSource;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
 import com.seedfinding.mccore.rand.ChunkRand;
 import com.seedfinding.mccore.util.block.BlockRotation;
@@ -19,57 +17,13 @@ import com.seedfinding.mcfeature.structure.generator.structure.EndCityGenerator;
 import com.seedfinding.mcnoise.simplex.SimplexNoiseSampler;
 import com.seedfinding.mcseed.lcg.LCG;
 import com.seedfinding.mcseed.rand.JRand;
+import com.seedfinding.mcterrain.TerrainGenerator;
 import com.seedfinding.mcterrain.terrain.EndTerrainGenerator;
-import com.fo.addon.pathing.PathManagers;
-import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.gui.GuiTheme;
-import meteordevelopment.meteorclient.gui.widgets.WWidget;
-import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
-import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
-import meteordevelopment.meteorclient.settings.*;
-import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.meteorclient.utils.Utils;
-import meteordevelopment.meteorclient.utils.player.FindItemResult;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.ShulkerBoxBlock;
-import net.minecraft.component.DataComponentTypes;
-import net.minecraft.enchantment.EnchantmentHelper;
-import net.minecraft.enchantment.Enchantments;
-import net.minecraft.entity.EntityType;
-import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.decoration.ItemFrameEntity;
-import net.minecraft.item.BlockItem;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
-import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
-import net.minecraft.registry.Registries;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.screen.GenericContainerScreenHandler;
-import net.minecraft.screen.PlayerScreenHandler;
-import net.minecraft.screen.ScreenHandler;
-import net.minecraft.screen.ShulkerBoxScreenHandler;
-import net.minecraft.screen.slot.SlotActionType;
-import net.minecraft.state.property.Properties;
-import net.minecraft.text.Text;
-import net.minecraft.util.Hand;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.math.noise.InterpolatedNoiseSampler;
-import net.minecraft.util.math.random.CheckedRandom;
-import net.minecraft.world.Heightmap;
-import net.minecraft.world.gen.densityfunction.DensityFunction;
-
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,2265 +31,1345 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.StringListSetting;
+import meteordevelopment.meteorclient.settings.StringSetting;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.orbit.EventHandler;
+import net.minecraft.util.Hand;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.decoration.ItemFrameEntity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ShulkerBoxScreenHandler;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.EnchantmentHelper;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.world.BlockView;
+import net.minecraft.block.Blocks;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.registry.Registry;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3i;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.block.ShulkerBoxBlock;
+import net.minecraft.network.packet.Packet;
+import net.minecraft.block.BlockState;
+import net.minecraft.state.property.Properties;
+import net.minecraft.state.property.Property;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.world.Heightmap;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.random.Random;
+import net.minecraft.util.math.random.CheckedRandom;
+import net.minecraft.util.math.noise.InterpolatedNoiseSampler;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.world.gen.densityfunction.DensityFunction;
+import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.component.type.ContainerComponent;
+import net.minecraft.component.DataComponentTypes;
 
-import static net.minecraft.screen.slot.SlotActionType.PICKUP;
-
-/**
- * ElytraAutoCollector — 全自动鞘翅采集。
- */
-public class ElytraCollector extends Module {
-
+public class ElytraCollector
+extends Module {
     private static final MCVersion VERSION = MCVersion.v1_21;
-
-    // 每次搜索按世界种子重建的原版末地岛屿噪声 (volatile: 后台搜索线程写、tick 线程 debug 读)
     private volatile SimplexNoiseSampler islandNoise;
-    // 末地 3D 噪声 (InterpolatedNoiseSampler, 种子=世界种子，与服务器端一致)
-    private volatile InterpolatedNoiseSampler base3dNoise;
+    private volatile net.minecraft.util.math.noise.InterpolatedNoiseSampler base3dNoise;
+    private final SettingGroup sgGeneral;
+    private final SettingGroup sgFlight;
+    private final Setting<String> seedSetting;
+    private final Setting<Integer> searchRange;
+    private final Setting<Integer> minHeight;
+    private final Setting<Integer> maxHeight;
+    private final Setting<Integer> riseHeight;
+    private final Setting<Double> pitchSpeed;
+    private final Setting<Double> yawSpeed;
+    private final Setting<Double> killAuraReach;
+    private final Setting<Double> fireworkInterval;
+    private final Setting<List<String>> blacklist;
+    private final Setting<List<String>> searchResults;
+    private final Setting<Boolean> btnStart;
+    private final Setting<Boolean> debugSetting;
+    private final SettingGroup sgStorage;
+    private final Setting<Integer> freeSlotDump;
+    private final Setting<List<String>> supplies;
+    private final Setting<Boolean> lowYExit;
+    private final Setting<Integer> lowYThreshold;
+    // ===== 防卡区块 + 俯仰平滑（内嵌自 Ying 0.7.2 Pitch40Fly，不新增模块）=====
+    private final SettingGroup sgAntiChunk;
+    private final Setting<Boolean> antiChunkClimb;
+    private final Setting<Integer> chunkLookahead;
+    private final Setting<Integer> minClimbTicks;
+    private final Setting<Integer> resumeMargin;
+    private final Setting<Boolean> pitchSmooth;
+    private final Setting<Double> pitchRotateUp;
+    private final Setting<Double> pitchRotateDown;
+    // ===== 绕圈扫图 + 缓降增强（内嵌自 Ying 0.7.2 ScanSweep / ElytraSlowFall）=====
+    private final SettingGroup sgHelpers;
+    private final Setting<Boolean> sweepScan;
+    private final Setting<Integer> sweepCenterX;
+    private final Setting<Integer> sweepCenterZ;
+    private final Setting<SweepSide> sweepSide;
+    private final Setting<Double> sweepOffset;
+    private final Setting<Boolean> slowFallBoost;
+    // ===== 起跳防卡（内嵌自 Ying 0.7.2 ElytraJump）=====
+    private final Setting<Boolean> antiStuckJump;
+    private final Setting<Integer> antiStuckInterval;
+    private final Setting<Integer> antiStuckOffset;
+    private final Setting<Integer> antiStuckResumeTicks;
+    private State state;
+    private CollectStep collectStep;
+    private final List<ShipTarget> ships;
+    private int targetIndex;
+    private volatile Thread searchThread;
+    private volatile boolean searchCancelled;
+    private volatile int searchGeneration;
+    private ShipTarget current;
+    private ShipWaypoints waypoints;
+    private int stateTick;
+    private int lastGotoTick;
+    private long worldSeed;
+    private boolean climbing;
+    private boolean antiClimbActive;
+    private int antiClimbTicks;
+    private int antiClearStreak;
+    private float smoothedPitch = 37.72f;
+    private net.minecraft.util.math.BlockPos lastJumpPos;
+    private int jumpStuckCount;
+    private int antiStuckResume;
+    private boolean headFound;
+    private net.minecraft.util.math.BlockPos exactHead;
+    private int nearTicks;
+    private int scanAttempts;
+    private boolean pullUpSuppressed;
+    private final Set<String> sessionSkip;
+    private int searchExtends;
+    private net.minecraft.util.math.Direction takeoffFacing;
+    private int noElytraTicks;
+    private boolean frameHadElytra;
+    private boolean frameAirChecked;
+    private boolean frameAirEmpty;
+    private int frameAirScanTicks;
+    private boolean pickupSessionDone;
+    private boolean firstFireworkDone;
+    private int lastFireworkTick;
+    private boolean landingRecover;
+    private double recoveryTargetY;
+    private float recoveryYaw;
+    private int recoverStageTick;
+    private int recoverCount;
+    private StoragePhase storagePhase;
+    private int storageTick;
+    private int pickupWaitStart;
+    private net.minecraft.util.math.BlockPos ecPos;
+    private net.minecraft.util.math.BlockPos boxPos;
+    private boolean boxFromInventory;
+    private int boxInventorySlot;
+    private int boxBaseline;
+    private int ecBaseline;
+    private boolean dumpNeeded;
+    private boolean resupplyNeeded;
+    private StoragePhase afterClose;
+    private int elytraBeforeFrame;
+    private List<net.minecraft.util.math.BlockPos> placeCandidates;
+    private int placeIndex;
+    private int lastPlaceClick;
+    private int placeClickAttempts;
+    private final ArrayDeque<MoveOp> moveQueue;
+    private int moveState;
+    private int moveSrc;
+    private int moveDst;
+    private int pickStep;
+    private int pickEcSlot;
+    private int pickInvSlot;
+    private int fillIndex;
+    private int takeRule;
+    private int takeSlot;
+    private int takeNeed;
+    private int takeStuckSlot;
+    private int takeStuckTicks;
+    private int takeEmptyTicks;
+    private final Set<net.minecraft.item.Item> takeFailedItems;
+    private int fillStuckSlot;
+    private int fillStuckTicks;
+    private int openRetry;
+    private int boxOpenClickTick;
+    private boolean boxPurposeSupply;
+    private boolean boxPlaceFloorFallback;
+    private int recoverStage;
+    private int ecOpenFailCount;
+    private int supplyScanStart;
+    private boolean supplyPauseDump;
+    private boolean resupplyRescan;
+    private boolean standingMovedOff;
+    private final Object debugLock;
 
     private static SimplexNoiseSampler createIslandNoise(long worldSeed) {
-        // 原版 LegacyNoiseDensityFunctionVisitor: new EndIslands(worldSeed) → CheckedRandom(seed) 跳过 17292 次
         JRand rand = new JRand(worldSeed);
         rand.advance(LCG.JAVA.combine(17292L));
         return new SimplexNoiseSampler(rand);
     }
 
-    // ========== Settings ==========
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgFlight = settings.createGroup("飞行");
-    private final SettingGroup sgAntiChunk = settings.createGroup("防卡区块");
-
-    private final Setting<String> seedSetting = sgGeneral.add(new StringSetting.Builder()
-        .name("世界种子")
-        .description("世界种子 (0 = 当前世界).")
-        .defaultValue("-7346913998703726680")
-        .build()
-    );
-
-    private final Setting<Integer> searchRange = sgGeneral.add(new IntSetting.Builder()
-        .name("搜索半径")
-        .description("搜索半径，单位方块 (从玩家位置).")
-        .defaultValue(5000)
-        .range(320, 100000)
-        .sliderRange(320, 20000)
-        .build()
-    );
-
-    private final Setting<Integer> minHeight = sgFlight.add(new IntSetting.Builder()
-        .name("最低高度")
-        .description("飞行中低于此高度时触发爬升.")
-        .defaultValue(180)
-        .range(100, 300)
-        .sliderRange(120, 260)
-        .build()
-    );
-
-    private final Setting<Integer> maxHeight = sgFlight.add(new IntSetting.Builder()
-        .name("最高高度")
-        .description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 min-height 组成滞回区间).")
-        .defaultValue(220)
-        .range(120, 320)
-        .sliderRange(140, 300)
-        .build()
-    );
-
-    private final Setting<Integer> riseHeight = sgFlight.add(new IntSetting.Builder()
-        .name("爬升高度")
-        .description("起飞后抬头爬升到的目标高度 (需高于 max-height).")
-        .defaultValue(230)
-        .range(200, 320)
-        .sliderRange(200, 300)
-        .build()
-    );
-
-    private final Setting<Double> pitchSpeed = sgFlight.add(new DoubleSetting.Builder()
-        .name("俯仰速度")
-        .description("飞行 (pitch40) 时上下转动视角 (pitch) 的速度 (度/tick).")
-        .defaultValue(10.0)
-        .min(1)
-        .sliderMax(45)
-        .build()
-    );
-
-    private final Setting<Double> yawSpeed = sgFlight.add(new DoubleSetting.Builder()
-        .name("偏航速度")
-        .description("左右转动视角 (yaw) 及鞘翅缓降的转向速度 (度/tick).")
-        .defaultValue(30.0)
-        .min(1)
-        .sliderMax(90)
-        .build()
-    );
-
-    private final Setting<Double> killAuraReach = sgFlight.add(new DoubleSetting.Builder()
-        .name("交互判定距离")
-        .description("攻击展示框 (item_frame) 的判定距离.")
-        .defaultValue(3.0)
-        .min(1)
-        .sliderMax(6)
-        .build()
-    );
-
-    private final Setting<Double> fireworkInterval = sgFlight.add(new DoubleSetting.Builder()
-        .name("烟花间隔")
-        .description("展开鞘翅后立即使用第一个烟花，之后每隔这么多秒再用一个 (秒).")
-        .defaultValue(2.0)
-        .min(0.5)
-        .sliderRange(0.5, 10)
-        .build()
-    );
-
-    // ===== 防卡区块 + 俯仰平滑 (内嵌自 Ying 0.7.2 Pitch40Fly，不新增模块) =====
-    private final Setting<Boolean> antiChunkClimb = sgAntiChunk.add(new BoolSetting.Builder()
-        .name("自动防卡区块")
-        .description("面向方向前方未加载区块太近时，强制抬头爬升，避免撞进未加载区块被服务端拉回。")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> chunkLookahead = sgAntiChunk.add(new IntSetting.Builder()
-        .name("前方检测距离")
-        .description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")
-        .defaultValue(32)
-        .range(4, 128)
-        .sliderRange(4, 128)
-        .build()
-    );
-
-    private final Setting<Integer> minClimbTicks = sgAntiChunk.add(new IntSetting.Builder()
-        .name("最短爬升时间")
-        .description("触发防卡拉升后至少保持这么多 tick，防止刚拉升就结束导致一抖一抖。")
-        .defaultValue(10)
-        .range(0, 100)
-        .sliderRange(0, 100)
-        .build()
-    );
-
-    private final Setting<Integer> resumeMargin = sgAntiChunk.add(new IntSetting.Builder()
-        .name("恢复余量")
-        .description("未加载区块距离要大于 前方检测距离+该值，且连续 3 tick 满足，才结束拉升。")
-        .defaultValue(16)
-        .range(0, 64)
-        .sliderRange(0, 64)
-        .build()
-    );
-
-    private final Setting<Boolean> pitchSmooth = sgFlight.add(new BoolSetting.Builder()
-        .name("俯仰平滑")
-        .description("爬升/俯冲时按固定角速度平滑过渡，不再硬切 37.72/-54.77 (Ying 0.7.2 同款手感)。")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Double> pitchRotateUp = sgFlight.add(new DoubleSetting.Builder()
-        .name("抬头角速度")
-        .description("俯仰平滑开启时，爬升抬头速度 (度/tick).")
-        .defaultValue(5.45)
-        .min(1)
-        .sliderMax(20)
-        .build()
-    );
-
-    private final Setting<Double> pitchRotateDown = sgFlight.add(new DoubleSetting.Builder()
-        .name("低头角速度")
-        .description("俯仰平滑开启时，俯冲低头速度 (度/tick).")
-        .defaultValue(0.9)
-        .min(0.5)
-        .sliderMax(2)
-        .build()
-    );
-
-    private final Setting<List<String>> blacklist = sgGeneral.add(new StringListSetting.Builder()
-        .name("黑名单")
-        .description("黑名单：已经去过的船 (x,z)，搜索时会自动跳过. 自动维护.")
-        .defaultValue(new ArrayList<>())
-        .visible(() -> false) // 黑名单不输出到 UI，只静默记日志
-        .build()
-    );
-
-    private final Setting<List<String>> searchResults = sgGeneral.add(new StringListSetting.Builder()
-        .name("搜索结果")
-        .description("上次搜索结果列表 (x,y,z,朝向)，下一次搜索完成后覆盖.")
-        .defaultValue(new ArrayList<>())
-        .build()
-    );
-
-    // 防止 stopTask 内部置按钮时递归触发 onChanged (必须定义在 btnStart 之前)
-    private boolean btnSelfSet = false;
-
-    private final Setting<Boolean> btnStart = sgGeneral.add(new BoolSetting.Builder()
-        .name("开始采集")
-        .description("开始自动采集.")
-        .defaultValue(false)
-        .onChanged(b -> {
-            if (btnSelfSet) return;
-            if (b) {
-                start();
-            } else {
-                // 关闭按钮 = 立即停止任务 (修复: 之前只处理开启分支, 关闭后状态机仍在运行)
-                stopTask("手动停止.");
-            }
-        })
-        .build()
-    );
-
-    /** 内部置按钮为 false 时使用，防止 onChanged 递归 */
-    private void btnOff() {
-        btnSelfSet = true;
-        btnStart.set(false);
-        btnSelfSet = false;
-    }
-
-    private final Setting<Boolean> debugSetting = sgGeneral.add(new BoolSetting.Builder()
-        .name("调试日志")
-        .description("输出调试日志 (用于校准高度公式).")
-        .defaultValue(false)
-        .build()
-    );
-
-    // ========== Storage Settings ==========
-    private final SettingGroup sgStorage = settings.createGroup("存储");
-
-    private final Setting<Integer> freeSlotDump = sgStorage.add(new IntSetting.Builder()
-        .name("背包空格阈值")
-        .description("背包可用空格 ≤ 此值时，拿到鞘翅后自动去末影箱存鞘翅.")
-        .defaultValue(3)
-        .range(0, 36)
-        .sliderRange(0, 36)
-        .build()
-    );
-
-    private final Setting<List<String>> supplies = sgStorage.add(new StringListSetting.Builder()
-        .name("物资列表")
-        .description("物资列表，格式: 物品ID;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止. 留空 = 不补货.")
-        .defaultValue(new ArrayList<>(List.of("minecraft:firework_rocket;4;16", "minecraft:golden_carrot;8;32", "minecraft:totem_of_undying;3;3")))
-        .build()
-    );
-
-    private final Setting<Boolean> autoTakeBox = sgStorage.add(new BoolSetting.Builder()
-        .name("自动拿空盒")
-        .description("当需要放置鞘翅到潜影盒但背包没有空盒子时，自动从末影箱获取.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> lowYExit = sgStorage.add(new BoolSetting.Builder()
-        .name("低Y退出")
-        .description("Y 低于阈值时自动退出游戏 (防虚空掉物).")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> lowYThreshold = sgStorage.add(new IntSetting.Builder()
-        .name("低Y阈值")
-        .description("低于此 Y 自动退出游戏.")
-        .defaultValue(30)   // 6.41: -20→30。船底最低≈45 不误伤；低于30=已掉出结构/坠落，尽早退出保装备
-        .range(-64, 100)
-        .sliderRange(-64, 64)
-        .build()
-    );
-
-    // ========== 搜索方向过滤 ==========
-    private final SettingGroup sgDirection = settings.createGroup("搜索方向");
-
-    private final Setting<Boolean> searchNorth = sgDirection.add(new BoolSetting.Builder()
-        .name("搜索北方")
-        .description("允许搜索以开始搜索时的位置为中心，北方（-Z）方向扇区内的末地船.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> searchSouth = sgDirection.add(new BoolSetting.Builder()
-        .name("搜索南方")
-        .description("允许搜索以开始搜索时的位置为中心，南方（+Z）方向扇区内的末地船.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> searchEast = sgDirection.add(new BoolSetting.Builder()
-        .name("搜索东方")
-        .description("允许搜索以开始搜索时的位置为中心，东方（+X）方向扇区内的末地船.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> searchWest = sgDirection.add(new BoolSetting.Builder()
-        .name("搜索西方")
-        .description("允许搜索以开始搜索时的位置为中心，西方（-X）方向扇区内的末地船.")
-        .defaultValue(true)
-        .build()
-    );
-
-    // ========== State Machine ==========
-    private enum State { IDLE, SEARCHING, RISING, FLYING, LANDING, COLLECTING, DONE }
-    private enum CollectStep { TO_P1, TO_P2, WAIT_SHULKER, TO_P3, HIT_FRAME, PICK_UP, EQUIP, EXIT_P1, EXIT_LANDING, LEAVE_SHIP }
-    private enum StoragePhase { NONE, PLACE_EC, OPEN_EC, PICK_BOX, CLOSE_SCREEN, PLACE_BOX, OPEN_BOX, FILL_BOX, TAKE_SUPPLIES, MINE_BOX, MINE_EC }
-
-    private State state = State.IDLE;
-    private CollectStep collectStep = CollectStep.TO_P1;
-
-    // ========== Runtime Data ==========
-    private final List<ShipTarget> ships = Collections.synchronizedList(new ArrayList<>());
-    private int targetIndex = 0;
-    private volatile Thread searchThread;
-    private volatile boolean searchCancelled = true;
-    private volatile int searchGeneration = 0;
-
-    private ShipTarget current;
-    private ShipWaypoints waypoints;
-    private int stateTick = 0;
-    private int lastGotoTick = 0;
-    private long worldSeed = 0L;
-    private boolean climbing = false;
-    // ===== 防卡区块 + 俯仰平滑状态 (内嵌自 Ying 0.7.2) =====
-    private boolean antiClimbActive = false;   // 当前爬升是否由防卡区块触发 (有否决权，不受高度滞回提前结束)
-    private int antiClimbTicks = 0;            // 防卡拉升已持续的 tick
-    private int antiClearStreak = 0;           // 前方连续已加载 tick (需 >=3 才结束拉升)
-    private float smoothedPitch = 37.72f;      // 俯仰平滑后的当前 pitch
-    private boolean headFound = false;
-    private BlockPos exactHead = null;
-    private int nearTicks = 0;
-    private int scanAttempts = 0;
-    private boolean pullUpSuppressed = false; // PullUp 独立模块强制拉升期间暂停采集器全部控制 (危险高度保护已移至 PullUp 模块)
-    private final java.util.Set<String> sessionSkip = Collections.synchronizedSet(new java.util.HashSet<>());
-    private int searchExtends = 0;
-    private Direction takeoffFacing = null;
-    private int noElytraTicks = 0;
-    private boolean frameHadElytra = false; // 到达展示框时框里是否有鞘翅 (打掉后框会变空，不能据此判定没鞘翅)
-    private boolean frameAirChecked = false; // 龙头确认后是否已在空中检查过展示框内容
-    private boolean frameAirEmpty = false;   // 空中检查结果：展示框里没有鞘翅
-    private int frameAirScanTicks = 0;       // 空中找展示框实体的累计扫描 tick
-    private boolean pickupSessionDone = false; // 每艘船捡到鞘翅后只触发一次船旁存储会话 (防缺口未补齐时原地无限重启)
-    private boolean firstFireworkDone = false;
-    private int lastFireworkTick = 0;
-    private boolean linkedTrash = false;     // 本次激活是否由我们联动开启了自动扔垃圾 (关闭时智能回滚)
-
-    // ========== 降落恢复爬升 ==========
-    private boolean landingRecover = false;
-    private double recoveryTargetY = 0;
-    private float recoveryYaw = 0f;          // 背对降落点的方向
-    private int recoverStageTick = 0;        // 当前恢复阶段已持续 tick (超时保护，杜绝一直升天)
-    private int recoverCount = 0;            // 本船恢复触发次数 (超过 3 次仍落不了地就停止)
-
-    // ========== 存储会话 (存鞘翅/补货) ==========
-    private StoragePhase storagePhase = StoragePhase.NONE;
-    private int storageTick = 0;
-    private int pickupWaitStart = -1;        // 挖掉后等待拾取的起始 tick
-    private BlockPos ecPos;
-    private BlockPos boxPos;
-    private boolean boxFromInventory = false;
-    private int boxInventorySlot = -1;   // 玩家主栏槽位 0..35
-    private int boxBaseline = 0;         // 放置潜影盒前背包中的潜影盒数量 (挖掉拾取后应恢复)
-    private int ecBaseline = 0;          // 放置末影箱前的末影箱数量
-    private boolean dumpNeeded = false;
-    private boolean resupplyNeeded = false;
-    private StoragePhase afterClose = StoragePhase.NONE;
-    private int elytraBeforeFrame = 0;   // 攻击展示框前的鞘翅数量
-    private List<BlockPos> placeCandidates = new ArrayList<>(); // 放置候选位置 (按距离排序)
-    private int placeIndex = 0;          // 当前候选下标
-    private int lastPlaceClick = -100;   // 上次点击放置的 tick (每 8 tick 才点一次)
-    private int placeClickAttempts = 0;  // 当前候选位置点击次数 (每个位置最多点 2 次)
-
-    // ===== 点击握手: 客户端点击只发包，容器界面状态要等服务器回包 (1~5 tick) 才更新 =====
-    // 用队列 + 光标状态轮询串行化所有搬运点击，防止用过期界面状态连续点击
-    private record MoveOp(int source, int target) {}  // target=-1 拾取后停留在光标; source=-1 直接把光标放下到 target
-    private final ArrayDeque<MoveOp> moveQueue = new ArrayDeque<>();
-    private int moveState = 0;           // 0 空闲 1 等光标非空(拾取后放下) 2 等光标空(放下完成) 3 等光标非空(拾取保留)
-    private int moveSrc = -1;
-    private int moveDst = -1;
-    private int pickStep = 0;            // 取盒流程: 0 空闲 1 光标持有盒子待判定 2 已放下成功 3 放回中(失败)
-    private int pickEcSlot = -1;         // 取盒来源的末影箱槽位
-    private int pickInvSlot = -1;        // 取盒成功时的玩家槽位 (0..35)
-    private int fillIndex = -1;          // 填盒循环当前扫描起点 (-1 未开始)
-    private int takeRule = 0;            // 补货当前规则下标
-    private int takeSlot = -1;           // 补货当前容器槽起点
-    private int takeNeed = 0;            // 补货当前规则还需数量
-    private int takeStuckSlot = -1;      // 补货最近一次 shift 点击的槽 (连续不动 = 背包满被忽略)
-    private int takeStuckTicks = 0;      // 该槽连续不动 tick
-    private int takeEmptyTicks = 0;      // 盒内无物资连续确认 tick (防屏幕同步延迟误判收尾)
-    private final Set<Item> takeFailedItems = new HashSet<>(); // 背包满且无杂物可腾导致拿不到的物品 (整个补货会话有效，防死循环重试)
-    private int fillStuckSlot = -1;      // 存鞘翅最近一次 shift 点击的槽 (连续不动 = 盒子满)
-    private int fillStuckTicks = 0;      // 该槽连续不动 tick
-    private int recoveryAttempts = 0;    // 容器界面异常连续恢复次数 (最多 3 次，之后停任务) — StorageRecovery
-    private int openRetry = 0;           // 当前打开容器已尝试次数 (最多 5 次，间隔 1 秒)
-    private int boxOpenClickTick = -1;   // 最近一次 vanilla 右键 (Utils.rightClick) 的 tick，用于判断点完是否已打开
-    private boolean boxPurposeSupply = false; // 当前潜影盒用途: true=补货 false=存鞘翅
-    private boolean boxPlaceFloorFallback = false; // 潜影盒放置: 挂放 (空气+上方实心) 失败后改用地板放置 (空气+下方实心, 顶面敞开)
-    private int recoverStage = 0;        // 降落恢复阶段: 0=反向拉升到降落点上方25格 1=面向降落点急速下降
-    private int ecOpenFailCount = 0;     // 末影箱连续打开失败轮数 (>0 时跳过扫描已有末影箱，直接放新的)
-    private int supplyScanStart = 0;     // 补货扫描游标: 末影箱内下一个要检查的盒子槽位 (取出盒子后推进，遍历完没凑齐就物资不足)
-    private boolean supplyPauseDump = false; // 补货时背包容量低 (≤ dump-free-slots)：暂停补给，先回收补给盒再存鞘翅腾空间
-    private boolean resupplyRescan = false;  // 存鞘翅腾空间后，重新从头扫描末影箱找补给盒 (补给盒已在游标之前)
-    private boolean standingMovedOff = false; // 打开容器失败时是否已触发"站在容器上走下来"流程
-
-    // ========== Constructor ==========
     public ElytraCollector() {
-        super(AddonTemplate.CATEGORY, "FO 鞘翅采集",
-            "全自动找末地城鞘翅：种子定位 + 龙头精确定位 + 高度保持飞行 + 缓降 + Baritone 寻路 + 打展示框捡鞘翅.");
+        super(AddonTemplate.CATEGORY, "FO 鞘翅采集", "\u5168\u81ea\u52a8\u627e\u672b\u5730\u57ce\u9798\u7fc5\uff1a\u79cd\u5b50\u5b9a\u4f4d + \u9f99\u5934\u7cbe\u786e\u5b9a\u4f4d + \u9ad8\u5ea6\u4fdd\u6301\u98de\u884c + \u7f13\u964d + Baritone \u5bfb\u8def + \u6253\u5c55\u793a\u6846\u6361\u9798\u7fc5.");
+        this.sgGeneral = this.settings.getDefaultGroup();
+        this.sgFlight = this.settings.createGroup("飞行");
+        this.sgAntiChunk = this.settings.createGroup("防卡区块");
+        this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("seed")).description("\u4e16\u754c\u79cd\u5b50 (0 = \u5f53\u524d\u4e16\u754c).")).defaultValue("0")).build());
+        this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("search-range")).description("\u641c\u7d22\u534a\u5f84\uff0c\u5355\u4f4d\u65b9\u5757 (\u4ece\u73a9\u5bb6\u4f4d\u7f6e).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
+        this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("min-height")).description("\u98de\u884c\u4e2d\u4f4e\u4e8e\u6b64\u9ad8\u5ea6\u65f6\u89e6\u53d1\u722c\u5347.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
+        this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("max-height")).description("\u98de\u884c\u4e2d\u9ad8\u4e8e\u6b64\u9ad8\u5ea6\u65f6\u505c\u6b62\u722c\u5347\u3001\u8f6c\u4e3a\u5e73\u7f13\u4e0b\u6ed1 (\u4e0e min-height \u7ec4\u6210\u6ede\u56de\u533a\u95f4).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
+        this.riseHeight = this.sgFlight.add((((new IntSetting.Builder().name("rise-height")).description("\u8d77\u98de\u540e\u62ac\u5934\u722c\u5347\u5230\u7684\u76ee\u6807\u9ad8\u5ea6 (\u9700\u9ad8\u4e8e max-height).")).defaultValue(230)).range(200, 320).sliderRange(200, 300).build());
+        this.pitchSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("pitch-speed")).description("\u98de\u884c (pitch40) \u65f6\u4e0a\u4e0b\u8f6c\u52a8\u89c6\u89d2 (pitch) \u7684\u901f\u5ea6 (\u5ea6/tick).")).defaultValue(10.0).min(1.0).sliderMax(45.0).build());
+        this.yawSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("yaw-speed")).description("\u5de6\u53f3\u8f6c\u52a8\u89c6\u89d2 (yaw) \u53ca\u9798\u7fc5\u7f13\u964d\u7684\u8f6c\u5411\u901f\u5ea6 (\u5ea6/tick).")).defaultValue(30.0).min(1.0).sliderMax(90.0).build());
+        this.killAuraReach = this.sgFlight.add(((new DoubleSetting.Builder().name("kill-aura-reach")).description("\u653b\u51fb\u5c55\u793a\u6846 (item_frame) \u7684\u5224\u5b9a\u8ddd\u79bb.")).defaultValue(3.0).min(1.0).sliderMax(6.0).build());
+        this.fireworkInterval = this.sgFlight.add(((new DoubleSetting.Builder().name("firework-interval")).description("\u5c55\u5f00\u9798\u7fc5\u540e\u7acb\u5373\u4f7f\u7528\u7b2c\u4e00\u4e2a\u70df\u82b1\uff0c\u4e4b\u540e\u6bcf\u9694\u8fd9\u4e48\u591a\u79d2\u518d\u7528\u4e00\u4e2a (\u79d2).")).defaultValue(2.0).min(0.5).sliderRange(0.5, 10.0).build());
+        this.blacklist = this.sgGeneral.add(((((new StringListSetting.Builder().name("blacklist")).description("\u9ed1\u540d\u5355\uff1a\u5df2\u7ecf\u53bb\u8fc7\u7684\u8239 (x,z)\uff0c\u641c\u7d22\u65f6\u4f1a\u81ea\u52a8\u8df3\u8fc7. \u81ea\u52a8\u7ef4\u62a4.")).defaultValue(new ArrayList())).visible(() -> false)).build());
+        this.searchResults = this.sgGeneral.add((((new StringListSetting.Builder().name("search-results")).description("\u4e0a\u6b21\u641c\u7d22\u7ed3\u679c\u5217\u8868 (x,y,z,\u671d\u5411)\uff0c\u4e0b\u4e00\u6b21\u641c\u7d22\u5b8c\u6210\u540e\u8986\u76d6.")).defaultValue(new ArrayList())).build());
+        this.btnStart = this.sgGeneral.add(((((new BoolSetting.Builder().name("start")).description("\u5f00\u59cb\u81ea\u52a8\u91c7\u96c6.")).defaultValue(false)).onChanged(b -> {
+            if (b.booleanValue()) {
+                this.start();
+            }
+        })).build());
+        this.debugSetting = this.sgGeneral.add((((new BoolSetting.Builder().name("debug")).description("\u8f93\u51fa\u8c03\u8bd5\u65e5\u5fd7 (\u7528\u4e8e\u6821\u51c6\u9ad8\u5ea6\u516c\u5f0f).")).defaultValue(false)).build());
+        this.sgStorage = this.settings.createGroup("存储");
+        this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("dump-free-slots")).description("\u80cc\u5305\u53ef\u7528\u7a7a\u683c \u2264 \u6b64\u503c\u65f6\uff0c\u62ff\u5230\u9798\u7fc5\u540e\u81ea\u52a8\u53bb\u672b\u5f71\u7bb1\u5b58\u9798\u7fc5.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
+        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("supplies")).description("\u7269\u8d44\u5217\u8868\uff0c\u683c\u5f0f: \u7269\u54c1ID;\u6700\u4f4e\u503c;\u76ee\u6807\u5e93\u5b58 (\u5982 minecraft:firework_rocket;32;256). \u80cc\u5305\u7269\u8d44\u4f4e\u4e8e\u6700\u4f4e\u503c\u65f6\u81ea\u52a8\u4ece\u672b\u5f71\u7bb1\u8865\u8d27\uff0c\u62ff\u5230\u76ee\u6807\u5e93\u5b58\u4e3a\u6b62.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:cooked_beef;8;32")))).build());
+        this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("low-y-exit")).description("Y 低于阈值时自动停止任务 (防虚空掉物，不退游戏).")).defaultValue(true)).build());
+        this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("low-y-threshold")).description("低于此 Y 自动停止任务.")).defaultValue(-20)).range(-64, 100).sliderRange(-64, 64).build());
+        // 防卡区块（内嵌自 Ying 0.7.2 Pitch40Fly）
+        this.antiChunkClimb = this.sgAntiChunk.add((((new BoolSetting.Builder().name("anti-chunk-climb")).description("面向方向前方未加载区块太近时，强制抬头爬升，避免被服务端拉回。")).defaultValue(true)).build());
+        this.chunkLookahead = this.sgAntiChunk.add((((new IntSetting.Builder().name("chunk-lookahead")).description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")).defaultValue(32)).range(4, 128).sliderRange(4, 128).build());
+        this.minClimbTicks = this.sgAntiChunk.add((((new IntSetting.Builder().name("min-climb-ticks")).description("触发防卡拉升后至少保持多少 tick，防止一抖一抖。")).defaultValue(10)).range(0, 100).sliderRange(0, 100).build());
+        this.resumeMargin = this.sgAntiChunk.add((((new IntSetting.Builder().name("resume-margin")).description("未加载区块距离要大于 检测距离+该值 且连续 3 tick 满足，才结束拉升。")).defaultValue(16)).range(0, 64).sliderRange(0, 64).build());
+        // 俯仰平滑（内嵌自 Ying 0.7.2 Pitch40Fly）
+        this.pitchSmooth = this.sgFlight.add((((new BoolSetting.Builder().name("pitch-smooth")).description("爬升/俯冲时按固定角速度平滑过渡，不硬切 37.72/-54.77。")).defaultValue(true)).build());
+        this.pitchRotateUp = this.sgFlight.add((((new DoubleSetting.Builder().name("pitch-rotate-up")).description("俯仰平滑开启时，爬升抬头速度 (度/tick).")).defaultValue(5.45)).min(1.0).sliderMax(20.0).build());
+        this.pitchRotateDown = this.sgFlight.add((((new DoubleSetting.Builder().name("pitch-rotate-down")).description("俯仰平滑开启时，俯冲低头速度 (度/tick).")).defaultValue(0.9)).min(0.5).sliderMax(2.0).build());
+        // 绕圈扫图（内嵌自 Ying 0.7.2 ScanSweep）
+        this.sgHelpers = this.settings.createGroup("辅助");
+        this.sweepScan = this.sgHelpers.add((((new BoolSetting.Builder().name("sweep-scan")).description("未确认龙头时绕中心点扫图：视角始终垂直于「中心点→当前位置」连线。")).defaultValue(false)).build());
+        this.sweepCenterX = this.sgHelpers.add((((new IntSetting.Builder().name("sweep-center-x")).description("扫图中心点 X 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
+        this.sweepCenterZ = this.sgHelpers.add((((new IntSetting.Builder().name("sweep-center-z")).description("扫图中心点 Z 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
+        this.sweepSide = this.sgHelpers.add((((new EnumSetting.Builder<SweepSide>().name("sweep-side")).description("取垂线的哪个方向：直线的左边 / 右边。")).defaultValue(SweepSide.LEFT)).build());
+        this.sweepOffset = this.sgHelpers.add((((new DoubleSetting.Builder().name("sweep-offset")).description("偏移角 (度)：在垂线朝向上再转这么多度，范围 -30 ~ 30。")).defaultValue(0.0)).range(-30.0, 30.0).sliderRange(-30.0, 30.0).decimalPlaces(4).build());
+        this.slowFallBoost = this.sgHelpers.add((((new BoolSetting.Builder().name("slow-fall-boost")).description("缓降增强：平视 + 每 2 tick 翻转 yaw 180° 抵消水平速度。")).defaultValue(true)).build());
+        // 起跳防卡（内嵌自 Ying 0.7.2 ElytraJump）
+        this.antiStuckJump = this.sgHelpers.add((((new BoolSetting.Builder().name("anti-stuck-jump")).description("起跳防卡：连续两次检测在同一位置时用 Baritone 寻路绕开。")).defaultValue(false)).build());
+        this.antiStuckInterval = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-interval")).description("防卡住检测间隔 (tick).")).defaultValue(20)).range(2, 200).build());
+        this.antiStuckOffset = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-offset")).description("防卡住目标点偏移 (沿运动方向，格).")).defaultValue(4)).range(1, 30).sliderRange(1, 30).build());
+        this.antiStuckResumeTicks = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-resume-tick")).description("触发后等待多少 tick 恢复鞘翅跳跃 (Baritone 寻路期间保持暂停)。")).defaultValue(80)).range(10, 600).build());
+        this.state = State.IDLE;
+        this.collectStep = CollectStep.TO_P1;
+        this.ships = Collections.synchronizedList(new ArrayList());
+        this.targetIndex = 0;
+        this.searchCancelled = true;
+        this.searchGeneration = 0;
+        this.stateTick = 0;
+        this.lastGotoTick = 0;
+        this.worldSeed = 0L;
+        this.climbing = false;
+        this.headFound = false;
+        this.exactHead = null;
+        this.nearTicks = 0;
+        this.scanAttempts = 0;
+        this.pullUpSuppressed = false;
+        this.sessionSkip = Collections.synchronizedSet(new HashSet());
+        this.searchExtends = 0;
+        this.takeoffFacing = null;
+        this.noElytraTicks = 0;
+        this.frameHadElytra = false;
+        this.frameAirChecked = false;
+        this.frameAirEmpty = false;
+        this.frameAirScanTicks = 0;
+        this.pickupSessionDone = false;
+        this.firstFireworkDone = false;
+        this.lastFireworkTick = 0;
+        this.landingRecover = false;
+        this.recoveryTargetY = 0.0;
+        this.recoveryYaw = 0.0f;
+        this.recoverStageTick = 0;
+        this.recoverCount = 0;
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.pickupWaitStart = -1;
+        this.boxFromInventory = false;
+        this.boxInventorySlot = -1;
+        this.boxBaseline = 0;
+        this.ecBaseline = 0;
+        this.dumpNeeded = false;
+        this.resupplyNeeded = false;
+        this.afterClose = StoragePhase.NONE;
+        this.elytraBeforeFrame = 0;
+        this.placeCandidates = new ArrayList<net.minecraft.util.math.BlockPos>();
+        this.placeIndex = 0;
+        this.lastPlaceClick = -100;
+        this.placeClickAttempts = 0;
+        this.moveQueue = new ArrayDeque();
+        this.moveState = 0;
+        this.moveSrc = -1;
+        this.moveDst = -1;
+        this.pickStep = 0;
+        this.pickEcSlot = -1;
+        this.pickInvSlot = -1;
+        this.fillIndex = -1;
+        this.takeRule = 0;
+        this.takeSlot = -1;
+        this.takeNeed = 0;
+        this.takeStuckSlot = -1;
+        this.takeStuckTicks = 0;
+        this.takeEmptyTicks = 0;
+        this.takeFailedItems = new HashSet<net.minecraft.item.Item>();
+        this.fillStuckSlot = -1;
+        this.fillStuckTicks = 0;
+        this.openRetry = 0;
+        this.boxOpenClickTick = -1;
+        this.boxPurposeSupply = false;
+        this.boxPlaceFloorFallback = false;
+        this.recoverStage = 0;
+        this.ecOpenFailCount = 0;
+        this.supplyScanStart = 0;
+        this.supplyPauseDump = false;
+        this.resupplyRescan = false;
+        this.standingMovedOff = false;
+        this.debugLock = new Object();
     }
 
-    // 黑名单不输出到 UI (彗星界面)，只静默记日志；"清除黑名单"由勾选框改为按钮
-    @Override
     public WWidget getWidget(GuiTheme theme) {
-        WSection section = theme.section("黑名单", true);
-        WButton clear = section.add(theme.button("清除黑名单")).expandX().widget();
+        WSection section = theme.section("\u9ed1\u540d\u5355", true);
+        WButton clear = (WButton)section.add((WWidget)theme.button("\u6e05\u9664\u9ed1\u540d\u5355")).expandX().widget();
         clear.action = () -> {
-            synchronized (blacklist.get()) {
-                blacklist.get().clear();
+            List list = (List)this.blacklist.get();
+            synchronized (list) {
+                ((List)this.blacklist.get()).clear();
             }
-            info("黑名单已清空.");
+            this.info("\u9ed1\u540d\u5355\u5df2\u6e05\u7a7a.", new Object[0]);
         };
         return section;
     }
 
-    @Override
-    public void onActivate() {
-        // 联动：自动打开「FO 自动扔垃圾」(白名单 + 61 项默认列表)，并标记本次联动开启
-        AutoTrash trash = Modules.get().get(AutoTrash.class);
-        if (trash != null && !trash.isActive()) {
-            trash.enableForElytraLink();
-            linkedTrash = true;
-            info("已联动开启 FO 自动扔垃圾 (白名单 " + TrashDefaults.DEFAULT_WHITELIST_IDS.size() + " 项).");
-        }
-
-        // 防卡区块 / 俯仰平滑状态复位
-        antiClimbActive = false;
-        antiClimbTicks = 0;
-        antiClearStreak = 0;
-        smoothedPitch = 37.72f;
-
-        // 按钮保存值为 true 时，激活模块即自动开始 (用户无需再手动点一次按钮)
-        if (btnStart.get() && state == State.IDLE && mc.player != null && mc.world != null) {
-            start();
-        }
-    }
-
-    @Override
     public void onDeactivate() {
-        // 联动回滚：仅关闭由本次联动开启的自动扔垃圾（手动开的不会被关）
-        if (linkedTrash) {
-            AutoTrash trash = Modules.get().get(AutoTrash.class);
-            if (trash != null) trash.disableForElytraLink();
-            linkedTrash = false;
-        }
-        searchCancelled = true;
-        searchGeneration++;
-        searchThread = null;
-        state = State.IDLE;
-        ships.clear();
-        pullUpSuppressed = false;
-        landingRecover = false;
-        recoveryYaw = 0f;
-        recoverStageTick = 0;
-        storagePhase = StoragePhase.NONE;
-        storageTick = 0;
-        boxInventorySlot = -1;
-        resetStorageClick();
-        releaseForward();
+        this.searchCancelled = true;
+        ++this.searchGeneration;
+        this.searchThread = null;
+        this.state = State.IDLE;
+        this.ships.clear();
+        this.pullUpSuppressed = false;
+        this.landingRecover = false;
+        this.recoveryYaw = 0.0f;
+        this.recoverStageTick = 0;
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.boxInventorySlot = -1;
+        this.resetStorageClick();
+        this.releaseForward();
         PathManagers.get().stop();
     }
 
     private void resetStorageClick() {
-        moveQueue.clear();
-        moveState = 0;
-        moveSrc = -1;
-        moveDst = -1;
-        pickStep = 0;
-        pickEcSlot = -1;
-        pickInvSlot = -1;
-        fillIndex = -1;
-        takeRule = 0;
-        takeSlot = -1;
-        takeNeed = 0;
-        takeStuckSlot = -1;
-        takeStuckTicks = 0;
-        takeEmptyTicks = 0;
-        takeFailedItems.clear();
-        fillStuckSlot = -1;
-        fillStuckTicks = 0;
-        openRetry = 0;
-        boxPurposeSupply = false;
-        ecOpenFailCount = 0;
-        supplyScanStart = 0;
-        standingMovedOff = false;
+        this.moveQueue.clear();
+        this.moveState = 0;
+        this.moveSrc = -1;
+        this.moveDst = -1;
+        this.pickStep = 0;
+        this.pickEcSlot = -1;
+        this.pickInvSlot = -1;
+        this.fillIndex = -1;
+        this.takeRule = 0;
+        this.takeSlot = -1;
+        this.takeNeed = 0;
+        this.takeStuckSlot = -1;
+        this.takeStuckTicks = 0;
+        this.takeEmptyTicks = 0;
+        this.takeFailedItems.clear();
+        this.fillStuckSlot = -1;
+        this.fillStuckTicks = 0;
+        this.openRetry = 0;
+        this.boxPurposeSupply = false;
+        this.ecOpenFailCount = 0;
+        this.supplyScanStart = 0;
+        this.standingMovedOff = false;
     }
 
-    // ========== Start ==========
     private void start() {
-        if (mc.player == null || mc.world == null) {
-            // 配置加载时可能误触发 (按钮保存值为 true)，此时游戏未进存档，直接忽略
-            btnOff();
+        if (this.state != State.IDLE && this.state != State.DONE) {
+            this.btnStart.set(false);
             return;
         }
-        if (state != State.IDLE && state != State.DONE) {
-            btnOff();
-            return;
+        this.state = State.SEARCHING;
+        this.searchExtends = 0;
+        this.takeoffFacing = null;
+        this.landingRecover = false;
+        this.recoveryYaw = 0.0f;
+        this.recoverStageTick = 0;
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.boxInventorySlot = -1;
+        this.info("\u5f00\u59cb\u641c\u7d22\u672b\u5730\u57ce (\u8303\u56f4=" + String.valueOf(this.searchRange.get()) + " \u65b9\u5757)...", new Object[0]);
+        if ((this.debugSetting.get()).booleanValue()) {
+            this.info("\u8c03\u8bd5\u65e5\u5fd7\u6587\u4ef6: " + String.valueOf(this.debugFilePath().toAbsolutePath()), new Object[0]);
         }
-        state = State.SEARCHING;
-        searchExtends = 0;
-        takeoffFacing = null;
-        landingRecover = false;
-        recoveryYaw = 0f;
-        recoverStageTick = 0;
-        storagePhase = StoragePhase.NONE;
-        storageTick = 0;
-        boxInventorySlot = -1;
-        info("开始搜索末地城 (范围=" + searchRange.get() + " 方块)...");
-        if (parseSupplies().isEmpty()) {
-            info("物资列表为空，自动补货已跳过 (如需补货请在存储分组中配置).");
-        }
-        if (debugSetting.get()) {
-            info("调试日志文件: " + debugFilePath().toAbsolutePath());
-        }
-        launchSearch();
+        this.launchSearch();
     }
 
-    // 独立搜索线程；generation 递增使旧任务的结果失效，cancelled 使循环可被真正打断
     private void launchSearch() {
-        searchCancelled = false;
-        int gen = ++searchGeneration;
-        Thread t = new Thread(() -> searchShips(gen), "ElytraCollector-Search");
+        this.searchCancelled = false;
+        int gen = ++this.searchGeneration;
+        Thread t = new Thread(() -> this.searchShips(gen), "ElytraCollector-Search");
         t.setDaemon(true);
-        searchThread = t;
+        this.searchThread = t;
         t.start();
     }
 
-    // ========== Search ==========
+    /*
+     * WARNING - Removed try catching itself - possible behaviour change.
+     */
     private void searchShips(int generation) {
-        try {
-            if (searchCancelled || generation != searchGeneration) return;
-            worldSeed = parseSeed(seedSetting.get());
-            EndCity endCity = new EndCity(VERSION);
-            EndCityGenerator generator = new EndCityGenerator(VERSION);
-            ChunkRand rand = new ChunkRand();
-            EndBiomeSource biomeSource = new EndBiomeSource(VERSION, worldSeed);
-            // 按世界种子重建原版末地岛屿噪声 (用于生物群系判定 + 高度链)
-            islandNoise = createIslandNoise(worldSeed);
-            // 末地 3D 噪声 (与服务器端一致: 世界种子)
-            base3dNoise = new InterpolatedNoiseSampler(new CheckedRandom(worldSeed), 0.25, 0.25, 80.0, 160.0, 4.0);
-            // 高度过滤：与 miku ElytraFinder 完全一致 — seedfinding 高度链 (getAverageYPosition ≥ 60)
-            // 不再用自写噪声链 (阈值低 1 格会报假船)，generate 内部也用真实地形，双保险不报假城
-            EndTerrainGenerator terrainGen = new EndTerrainGenerator(biomeSource);
-
-            int px = (int) Math.floor(mc.player.getX());
-            int pz = (int) Math.floor(mc.player.getZ());
-
-            int spacing = endCity.getSpacing();
-            int range = searchRange.get() + searchExtends * 500;
-            int regionRange = (range / (spacing * 16)) + 1;
-            int prx = Math.floorDiv(px >> 4, spacing);
-            int prz = Math.floorDiv(pz >> 4, spacing);
-
-            List<ShipTarget> found = new ArrayList<>();
-
-            for (int drx = -regionRange; drx <= regionRange; drx++) {
-                if (searchCancelled || generation != searchGeneration) return;
-                for (int drz = -regionRange; drz <= regionRange; drz++) {
-                    int rx = prx + drx;
-                    int rz = prz + drz;
-                    CPos city = endCity.getInRegion(worldSeed, rx, rz, rand);
-                    if (city == null) continue;
-                    // 与 miku ElytraFinder 完全一致：seedfinding 生物群系判定 (末地中山/高岛)
-                    if (!endCity.canSpawn(city, biomeSource)) continue;
-                    // 与 miku ElytraFinder 完全一致：seedfinding 地形高度判定 (min(getHeightInGround) ≥ 60)
-                    if (!endCity.canGenerate(city, terrainGen)) continue;
-
-                    generator.generate(terrainGen, city.getX(), city.getZ(), rand);
-                    boolean hasShip = generator.hasShip();
-                    if (hasShip) {
-                        ShipTarget t = extractShip(generator, city);
-                        if (t != null && !isBlacklisted(t.headPos) && !sessionSkip.contains(blacklistKey(t.headPos))) {
+        block18: {
+            try {
+                if (this.searchCancelled || generation != this.searchGeneration) {
+                    return;
+                }
+                this.worldSeed = this.parseSeed((String)this.seedSetting.get());
+                EndCity endCity = new EndCity(VERSION);
+                EndCityGenerator generator = new EndCityGenerator(VERSION);
+                ChunkRand rand = new ChunkRand();
+                EndBiomeSource biomeSource = new EndBiomeSource(VERSION, this.worldSeed);
+                this.islandNoise = ElytraCollector.createIslandNoise(this.worldSeed);
+                this.base3dNoise = new net.minecraft.util.math.noise.InterpolatedNoiseSampler((net.minecraft.util.math.random.Random)new net.minecraft.util.math.random.CheckedRandom(this.worldSeed), 0.25, 0.25, 80.0, 160.0, 4.0);
+                EndTerrainGenerator terrainGen = new EndTerrainGenerator(biomeSource);
+                int px = (int)Math.floor(this.mc.player.getX());
+                int pz = (int)Math.floor(this.mc.player.getZ());
+                int spacing = endCity.getSpacing();
+                int range = this.searchRange.get() + this.searchExtends * 500;
+                int regionRange = range / (spacing * 16) + 1;
+                int prx = Math.floorDiv(px >> 4, spacing);
+                int prz = Math.floorDiv(pz >> 4, spacing);
+                ArrayList<ShipTarget> found = new ArrayList<ShipTarget>();
+                for (int drx = -regionRange; drx <= regionRange; ++drx) {
+                    if (this.searchCancelled || generation != this.searchGeneration) {
+                        return;
+                    }
+                    for (int drz = -regionRange; drz <= regionRange; ++drz) {
+                        ShipTarget t;
+                        int rx = prx + drx;
+                        int rz = prz + drz;
+                        CPos city = endCity.getInRegion(this.worldSeed, rx, rz, rand);
+                        if (city == null || !endCity.canSpawn(city, (BiomeSource)biomeSource) || !endCity.canGenerate(city, (TerrainGenerator)terrainGen)) continue;
+                        generator.generate(terrainGen, city.getX(), city.getZ(), rand);
+                        boolean hasShip = generator.hasShip();
+                        if (hasShip && (t = this.extractShip(generator, city)) != null && !this.isBlacklisted(t.headPos) && !this.sessionSkip.contains(this.blacklistKey(t.headPos))) {
                             found.add(t);
-                            if (debugSetting.get()) {
-                                debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + t.facing
-                                    + " E=" + String.format("%.4f", endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
+                            if ((this.debugSetting.get()).booleanValue()) {
+                                this.debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + String.valueOf(t.facing) + " E=" + String.format("%.4f", this.endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
                             }
                         }
+                        generator.reset();
                     }
-                    generator.reset();
                 }
-            }
-
-            if (searchCancelled || generation != searchGeneration) return;
-
-            // 方向过滤：按玩家所在位置的方位过滤 (北/南/东/西 独立开关，可只搜单方向)
-            {
-                int before = found.size();
-                boolean n = searchNorth.get(), s = searchSouth.get(), e = searchEast.get(), w = searchWest.get();
-                found.removeIf(t -> !com.fo.addon.utils.DirectionFilter.shouldKeep(px, pz, t.headPos.getX(), t.headPos.getZ(), n, s, e, w));
-                if (before != found.size()) {
-                    info("方向过滤: 候船 " + before + " → 保留 " + found.size() + " (北=" + n + " 南=" + s + " 东=" + e + " 西=" + w + ").");
+                if (this.searchCancelled || generation != this.searchGeneration) {
+                    return;
                 }
-            }
-
-            found.sort(Comparator.comparingInt(s ->
-                (s.headPos.getX() - px) * (s.headPos.getX() - px) + (s.headPos.getZ() - pz) * (s.headPos.getZ() - pz)
-            ));
-
-            ships.clear();
-            ships.addAll(found);
-            targetIndex = 0;
-
-            // 保存搜索结果 (下一次搜索会覆盖)
-            synchronized (searchResults.get()) {
-                searchResults.get().clear();
-                for (ShipTarget t : found) {
-                    searchResults.get().add(t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + "," + t.facing);
+                found.sort(Comparator.comparingInt(s -> (s.headPos.getX() - px) * (s.headPos.getX() - px) + (s.headPos.getZ() - pz) * (s.headPos.getZ() - pz)));
+                this.ships.clear();
+                this.ships.addAll(found);
+                this.targetIndex = 0;
+                List list = (List)this.searchResults.get();
+                synchronized (list) {
+                    ((List)this.searchResults.get()).clear();
+                    for (ShipTarget t : found) {
+                        ((List)this.searchResults.get()).add(t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + "," + String.valueOf(t.facing));
+                    }
                 }
-            }
-
-            info("找到 " + ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ").");
-            if (ships.isEmpty()) {
-                if (searchExtends < 10) {
-                    searchExtends++;
-                    info("范围内没有末地船，扩大范围 +" + (searchExtends * 500) + " 格重新搜索...");
-                    launchSearch();
+                this.info("\u627e\u5230 " + this.ships.size() + " \u8258\u5e26\u8239\u672b\u5730\u57ce (\u5df2\u6392\u9664\u9ed1\u540d\u5355, \u8303\u56f4=" + range + ").", new Object[0]);
+                if (this.ships.isEmpty()) {
+                    if (this.searchExtends < 10) {
+                        ++this.searchExtends;
+                        this.info("\u8303\u56f4\u5185\u6ca1\u6709\u672b\u5730\u8239\uff0c\u6269\u5927\u8303\u56f4 +" + this.searchExtends * 500 + " \u683c\u91cd\u65b0\u641c\u7d22...", new Object[0]);
+                        this.launchSearch();
+                    } else {
+                        this.searchExtends = 0;
+                        this.completeTask("\u8303\u56f4\u5185\u6ca1\u6709\u672b\u5730\u8239\uff0c\u4efb\u52a1\u5b8c\u6210.");
+                    }
                 } else {
-                    searchExtends = 0;
-                    completeTask("范围内没有末地船，任务完成.");
-                }
-            } else {
-                searchExtends = 0;
-                if (state == State.SEARCHING) {
-                    firstFireworkDone = false;
-                    state = State.RISING;
-                    stateTick = 0;
+                    this.searchExtends = 0;
+                    if (this.state == State.SEARCHING) {
+                        this.firstFireworkDone = false;
+                        this.state = State.RISING;
+                        this.stateTick = 0;
+                    }
                 }
             }
-        } catch (Exception e) {
-            if (!searchCancelled && generation == searchGeneration) {
-                error("搜索失败: " + e.getMessage());
-                state = State.IDLE;
-                btnOff();
+            catch (Exception e) {
+                if (this.searchCancelled || generation != this.searchGeneration) break block18;
+                this.error("\u641c\u7d22\u5931\u8d25: " + e.getMessage(), new Object[0]);
+                this.state = State.IDLE;
+                this.btnStart.set(false);
             }
         }
     }
 
     private ShipTarget extractShip(EndCityGenerator generator, CPos chunk) {
         try {
-            BlockPos itemFrame = null;
-            int sternX = 0, sternZ = 0, sternCount = 0;
+            net.minecraft.util.math.BlockPos itemFrame = null;
+            int sternX = 0;
+            int sternZ = 0;
+            int sternCount = 0;
             for (Pair<Generator.ILootType, BPos> p : generator.getChestsPos()) {
                 Generator.ILootType lt = p.getFirst();
                 BPos b = p.getSecond();
                 if (lt == EndCityGenerator.LootType.SHIP_ELYTRA) {
-                    itemFrame = new BlockPos(b.getX(), b.getY(), b.getZ());
-                } else if (lt == EndCityGenerator.LootType.SHIP_SENTRY_2 || lt == EndCityGenerator.LootType.SHIP_SENTRY_3) {
-                    sternX += b.getX();
-                    sternZ += b.getZ();
-                    sternCount++;
+                    itemFrame = new net.minecraft.util.math.BlockPos(b.getX(), b.getY(), b.getZ());
+                    continue;
                 }
+                if (lt != EndCityGenerator.LootType.SHIP_SENTRY_2 && lt != EndCityGenerator.LootType.SHIP_SENTRY_3) continue;
+                sternX += b.getX();
+                sternZ += b.getZ();
+                ++sternCount;
             }
-            if (itemFrame == null || sternCount == 0) return null;
-
+            if (itemFrame == null || sternCount == 0) {
+                return null;
+            }
             int dx = sternX / sternCount - itemFrame.getX();
             int dz = sternZ / sternCount - itemFrame.getZ();
-            Direction behind = (Math.abs(dx) > Math.abs(dz))
-                ? (dx > 0 ? Direction.EAST : Direction.WEST)
-                : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
-            Direction facing = behind.getOpposite();
-
-            // X/Z 由种子精确计算；Y 不可靠 (种子库用整城平均地形高度)，留到飞行靠近后扫描真实龙头修正
-            BlockPos head = itemFrame.offset(facing, 7).offset(Direction.UP, 3);
+            net.minecraft.util.math.Direction behind = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? net.minecraft.util.math.Direction.EAST : net.minecraft.util.math.Direction.WEST) : (dz > 0 ? net.minecraft.util.math.Direction.SOUTH : net.minecraft.util.math.Direction.NORTH);
+            net.minecraft.util.math.Direction facing = behind.getOpposite();
+            net.minecraft.util.math.BlockPos head = itemFrame.offset(facing, 7).offset(net.minecraft.util.math.Direction.UP, 3);
             return new ShipTarget(chunk, head, facing);
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             return null;
         }
     }
 
     private void beginFlyToTarget() {
-        if (targetIndex >= ships.size()) {
-            completeTask("全部末地城已处理，任务完成.");
+        if (this.targetIndex >= this.ships.size()) {
+            this.completeTask("\u5168\u90e8\u672b\u5730\u57ce\u5df2\u5904\u7406\uff0c\u4efb\u52a1\u5b8c\u6210.");
             return;
         }
-        current = ships.get(targetIndex);
-        waypoints = ShipWaypoints.from(current.headPos, current.facing);
-        climbing = false;
-        antiClimbActive = false;
-        antiClimbTicks = 0;
-        antiClearStreak = 0;
-        smoothedPitch = 37.72f;
-        headFound = false;
-        frameAirChecked = false;
-        frameAirEmpty = false;
-        frameAirScanTicks = 0;
-        exactHead = null;
-        nearTicks = 0;
-        scanAttempts = 0;
-        firstFireworkDone = false;
-        landingRecover = false;
-        recoverCount = 0;
-        stateTick = 0;
-        info("飞向最近未去过的船，朝向=" + directionLabel(current.facing));  // V4.24: 不显示坐标（无政府服禁止暴露）
-        state = State.FLYING;
+        this.current = this.ships.get(this.targetIndex);
+        this.waypoints = ShipWaypoints.from(this.current.headPos, this.current.facing);
+        this.climbing = false;
+        this.headFound = false;
+        this.frameAirChecked = false;
+        this.frameAirEmpty = false;
+        this.frameAirScanTicks = 0;
+        this.exactHead = null;
+        this.nearTicks = 0;
+        this.scanAttempts = 0;
+        this.firstFireworkDone = false;
+        this.landingRecover = false;
+        this.recoverCount = 0;
+        this.stateTick = 0;
+        this.info("\u98de\u5411\u6700\u8fd1\u672a\u53bb\u8fc7\u7684\u8239 \u8fd1\u4f3c\u9f99\u5934=" + String.valueOf(this.current.headPos) + " \u671d\u5411=" + String.valueOf(this.current.facing), new Object[0]);
+        this.state = State.FLYING;
     }
 
-    // ========== Tick ==========
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         try {
-            if (mc.player == null || mc.world == null) return;
-            stateTick++;
-
-            // 低高度安全网：只有任务运行中才生效 (防虚空掉物)；低于阈值自动退出游戏 (断开服务器)
-            if (state != State.IDLE && state != State.DONE
-                && lowYExit.get() && mc.player.getY() < lowYThreshold.get()) {
-                warning("当前高度低于阈值 " + lowYThreshold.get() + "，自动退出游戏.");  // V4.24: 不显示 Y 坐标
-                emergencyExit("FO 鞘翅采集: Y 低于阈值 " + lowYThreshold.get() + "，自动退出游戏保护");
+            if (this.mc.player == null || this.mc.world == null) {
                 return;
             }
-
-            // 独立 PullUp 模块强制拉升期间：暂停采集器全部控制 (危险高度保护已移至独立 PullUp 模块)
-            if (pullUpSuppressed) {
+            ++this.stateTick;
+            if (this.state != State.IDLE && this.state != State.DONE && (this.lowYExit.get()).booleanValue() && this.mc.player.getY() < (double)(this.lowYThreshold.get()).intValue()) {
+                this.warning("Y=" + String.format("%.1f", this.mc.player.getY()) + " \u4f4e\u4e8e\u9608\u503c " + String.valueOf(this.lowYThreshold.get()) + "\uff0c\u4efb\u52a1\u5df2\u505c\u6b62.", new Object[0]);
+                this.stopTask("\u4f4e\u9ad8\u5ea6\u4efb\u52a1\u505c\u6b62.");
                 return;
             }
-
-            // 存储会话 (存鞘翅/补货) 优先于飞行状态机
-            if (storagePhase != StoragePhase.NONE) {
-                onStorageTick();
+            if (this.pullUpSuppressed) {
                 return;
             }
-
-            switch (state) {
-                case RISING -> onRising();
-                case FLYING -> onFlying();
-                case LANDING -> onLanding();
-                case COLLECTING -> onCollecting();
-                default -> {}
+            if (this.storagePhase != StoragePhase.NONE) {
+                this.onStorageTick();
+                return;
             }
-        } catch (Throwable t) {
-            error("任务异常: " + t);
+            switch (this.state.ordinal()) {
+                case 2: {
+                    this.onRising();
+                    break;
+                }
+                case 3: {
+                    this.onFlying();
+                    break;
+                }
+                case 4: {
+                    this.onLanding();
+                    break;
+                }
+                case 5: {
+                    this.onCollecting();
+                    break;
+                }
+            }
+        }
+        catch (Throwable t) {
+            this.error("\u4efb\u52a1\u5f02\u5e38: " + String.valueOf(t), new Object[0]);
             t.printStackTrace();
-            stopTask("任务异常，停止任务.");
+            this.stopTask("\u4efb\u52a1\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
         }
     }
 
-    // ========== 起飞爬升 (跳 -> 展开鞘翅 -> 抬头 -> 烟花爬升) ==========
     private void onRising() {
-        // 恢复流程有独立的阶段超时保护 (30s/30s/20s)，不套用普通起飞超时 (恢复全程可达几十秒)
-        if (!landingRecover && stateTick > 400) {
-            error("起飞超时 (可能没穿鞘翅或没有烟花).");
-            state = State.IDLE;
-            btnOff();
-            releaseForward();
+        if (!this.landingRecover && this.stateTick > 400) {
+            this.error("\u8d77\u98de\u8d85\u65f6 (\u53ef\u80fd\u6ca1\u7a7f\u9798\u7fc5\u6216\u6ca1\u6709\u70df\u82b1).", new Object[0]);
+            this.state = State.IDLE;
+            this.btnStart.set(false);
+            this.releaseForward();
             return;
         }
-
-        // 地面且需要存储操作时先执行 (补货/存鞘翅)
-        if (mc.player.isOnGround() && stateTick <= 2) {
-            maybeStartSession();
-            if (storagePhase != StoragePhase.NONE) return;
-        }
-
-        // 起飞方向：降落恢复阶段 0 反向 (背对降落点) 拉升；阶段 1 pitch40 模式平滑转向飞向降落点；末地城起飞朝向龙头朝向，首次平地起飞保持原方向
-        if (landingRecover) {
-            recoverStageTick++;
-            if (recoverStage == 0) {
-                rotateFastTo(recoveryYaw, mc.player.getPitch());
-            } else {
-                // 阶段 1: pitch40 模式 (平滑转向 + 平缓下滑)，不用急速俯冲
-                rotateTo(yawTowards(waypoints.landing), 37.72f);
-            }
-        } else if (takeoffFacing != null) {
-            faceDirection(takeoffFacing);
-        }
-
-        // 降落恢复: 阶段 0 抬头爬升 (到降落点上方 25 格)；阶段 1 pitch40 模式下滑 (pitch 由 rotateTo 控制)；正常起飞抬头爬升
-        if (!(landingRecover && recoverStage == 1)) {
-            mc.player.setPitch(-45f);
-        }
-        mc.options.forwardKey.setPressed(true);
-
-        if (!mc.player.isGliding()) {
-            if (mc.player.isOnGround()) {
-                // 第一次起跳 (先停掉遗留的 baritone 寻路，防止它抢走移动控制权导致起跳失败)
-                PathManagers.get().stop();
-                mc.player.jump();
-            } else if (stateTick % 4 == 0) {
-                // 在空中再跳一下展开鞘翅（与起跳错开，避免反作弊误判）
-                mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
-            }
-            return;
-        }
-
-        // 展开鞘翅后立刻使用第一个烟花，之后按 UI 间隔
-        if (!firstFireworkDone) {
-            useFirework();
-            firstFireworkDone = true;
-            lastFireworkTick = stateTick;
-        } else if (!(landingRecover && recoverStage == 1)
-            && stateTick - lastFireworkTick >= Math.max(1, Math.round(fireworkInterval.get() * 20))) {
-            useFirework();
-            lastFireworkTick = stateTick;
-        }
-
-        if (landingRecover) {
-            // 恢复流程: 0 反向拉升到降落点上方 25 格 → 1 pitch40 模式飞向降落点，到达降落点上方后转缓降
-            // 超时保护：拉升 30 秒、飞向降落点 30 秒，超时强制进入下一阶段，杜绝一直升天
-            BlockPos lp = waypoints.landing;
-            if (recoverStage == 0) {
-                if (mc.player.getY() >= lp.getY() + 25 || recoverStageTick > 600) {
-                    recoverStage = 1;
-                    recoverStageTick = 0;
-                    info("已拉升到降落点上方 25 格，用 pitch40 模式飞向降落点.");
-                }
-            } else {
-                if (horizontalDistance(lp) <= 3 || recoverStageTick > 600) {
-                    releaseForward();
-                    landingRecover = false;
-                    recoverStage = 0;
-                    recoverStageTick = 0;
-                    info("已回到降落点上方，进入缓降.");
-                    state = State.LANDING;
-                    stateTick = 0;
-                }
-            }
-        } else if (mc.player.getY() >= riseHeight.get()) {
-            if (ships.isEmpty()) {
-                // 等后台重新搜索完成
-                mc.player.setPitch(-20f);
-                mc.options.forwardKey.setPressed(true);
-            } else {
-                releaseForward();
-                firstFireworkDone = false;
-                beginFlyToTarget();
-            }
-        }
-    }
-
-    // ========== 飞行 (高度保持 + 龙头精确扫描，找到前不下降) ==========
-    private void onFlying() {
-        if (!mc.player.isGliding()) {
-            if (mc.player.isOnGround()) {
-                firstFireworkDone = false;
-                takeoffFacing = null;
-                state = State.RISING;
-                stateTick = 0;
+        // 起跳防卡（内嵌自 Ying 0.7.2 ElytraJump）：连续两次检测在同一位置就用 Baritone 绕开
+        if (this.antiStuckJump.get() && !this.landingRecover && !this.mc.player.isGliding()) {
+            if (this.antiStuckResume > 0) {
+                --this.antiStuckResume;
                 return;
             }
-            mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            if (this.stateTick > 20 && this.stateTick % this.antiStuckInterval.get() == 0) {
+                if (this.lastJumpPos != null && this.mc.player.getBlockPos().equals(this.lastJumpPos)) {
+                    ++this.jumpStuckCount;
+                } else {
+                    this.jumpStuckCount = 0;
+                }
+                this.lastJumpPos = this.mc.player.getBlockPos().toImmutable();
+                if (this.jumpStuckCount >= 2) {
+                    int off = this.antiStuckOffset.get();
+                    double rad = Math.toRadians(this.mc.player.getYaw());
+                    int bx = this.mc.player.getBlockX() + (int)Math.round(-Math.sin(rad) * (double)off);
+                    int bz = this.mc.player.getBlockZ() + (int)Math.round(Math.cos(rad) * (double)off);
+                    PathManagers.get().moveTo(new net.minecraft.util.math.BlockPos(bx, this.mc.player.getBlockY(), bz), false);
+                    this.antiStuckResume = this.antiStuckResumeTicks.get();
+                    this.jumpStuckCount = 0;
+                    this.info("起跳卡住，绕行到 (" + bx + "," + this.mc.player.getBlockY() + "," + bz + ").", new Object[0]);
+                    return;
+                }
+            }
+        }
+        if (this.mc.player.isOnGround() && this.stateTick <= 2) {
+            this.maybeStartSession();
+            if (this.storagePhase != StoragePhase.NONE) {
+                return;
+            }
+        }
+        if (this.landingRecover) {
+            ++this.recoverStageTick;
+            if (this.recoverStage == 0) {
+                this.rotateFastTo(this.recoveryYaw, this.mc.player.getPitch());
+            } else {
+                this.rotateTo(this.yawTowards(this.waypoints.landing), 37.72f);
+            }
+        } else if (this.takeoffFacing != null) {
+            this.faceDirection(this.takeoffFacing);
+        }
+        if (!this.landingRecover || this.recoverStage != 1) {
+            this.mc.player.setPitch(-45.0f);
+        }
+        this.mc.options.forwardKey.setPressed(true);
+        if (!this.mc.player.isGliding()) {
+            if (this.mc.player.isOnGround()) {
+                PathManagers.get().stop();
+                this.mc.player.jump();
+            } else if (this.stateTick % 4 == 0) {
+                this.mc.player.networkHandler.sendPacket((net.minecraft.network.packet.Packet)new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket((net.minecraft.entity.Entity)this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            }
+            return;
+        }
+        if (!this.firstFireworkDone) {
+            this.useFirework();
+            this.firstFireworkDone = true;
+            this.lastFireworkTick = this.stateTick;
+        } else if (!(this.landingRecover && this.recoverStage == 1 || (long)(this.stateTick - this.lastFireworkTick) < Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0)))) {
+            this.useFirework();
+            this.lastFireworkTick = this.stateTick;
+        }
+        if (this.landingRecover) {
+            net.minecraft.util.math.BlockPos lp = this.waypoints.landing;
+            if (this.recoverStage == 0) {
+                if (this.mc.player.getY() >= (double)(lp.getY() + 25) || this.recoverStageTick > 600) {
+                    this.recoverStage = 1;
+                    this.recoverStageTick = 0;
+                    this.info("\u5df2\u62c9\u5347\u5230\u964d\u843d\u70b9\u4e0a\u65b9 25 \u683c\uff0c\u7528 pitch40 \u6a21\u5f0f\u98de\u5411\u964d\u843d\u70b9.", new Object[0]);
+                }
+            } else if (this.horizontalDistance(lp) <= 3.0 || this.recoverStageTick > 600) {
+                this.releaseForward();
+                this.landingRecover = false;
+                this.recoverStage = 0;
+                this.recoverStageTick = 0;
+                this.info("\u5df2\u56de\u5230\u964d\u843d\u70b9\u4e0a\u65b9\uff0c\u8fdb\u5165\u7f13\u964d.", new Object[0]);
+                this.state = State.LANDING;
+                this.stateTick = 0;
+            }
+        } else if (this.mc.player.getY() >= (double)(this.riseHeight.get()).intValue()) {
+            if (this.ships.isEmpty()) {
+                this.mc.player.setPitch(-20.0f);
+                this.mc.options.forwardKey.setPressed(true);
+            } else {
+                this.releaseForward();
+                this.firstFireworkDone = false;
+                this.beginFlyToTarget();
+            }
+        }
+    }
+
+    private void onFlying() {
+        if (!this.mc.player.isGliding()) {
+            if (this.mc.player.isOnGround()) {
+                this.firstFireworkDone = false;
+                this.takeoffFacing = null;
+                this.state = State.RISING;
+                this.stateTick = 0;
+                return;
+            }
+            this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
             return;
         }
 
-        BlockPos lp = waypoints.landing;
+        net.minecraft.util.math.BlockPos lp = this.waypoints.landing;
 
-        // 未确认龙头：进入种子区域后检测龙头，每 5 秒再检测一次，检测 8 次仍没有就直接走
-        if (!headFound) {
-            if (horizontalDistance(lp) < 80) {
-                nearTicks++;
-                if (nearTicks == 1 && debugSetting.get() && !cityTerrainHigh()) {
-                    // 船可能悬在虚空上 (城市在地上)，地形高度判断不可靠，交给龙头扫描确认，不直接杀
-                    debugLog("注意: 地形高度判断不足 (船可能在虚空上)，改由龙头扫描确认.");
+        if (!this.headFound) {
+            if (this.horizontalDistance(lp) < 80.0) {
+                ++this.nearTicks;
+                if (this.nearTicks == 1 && this.debugSetting.get() && !this.cityTerrainHigh()) {
+                    this.debugLog("注意: 地形高度判断不足 (船可能在虚空上)，改由龙头扫描确认.");
                 }
-                if (nearTicks % 20 == 0) {
-                    // 扫描框 (3x3 区块) 全部加载后才检测并计数，避免加载慢的真城被误杀
+                if (this.nearTicks % 20 == 0) {
                     boolean loaded = true;
                     for (int dx = -1; dx <= 1 && loaded; dx++) {
                         for (int dz = -1; dz <= 1; dz++) {
-                            if (!mc.world.isChunkLoaded((current.headPos.getX() >> 4) + dx, (current.headPos.getZ() >> 4) + dz)) {
+                            if (!this.mc.world.getChunkManager().isChunkLoaded((this.current.headPos.getX() >> 4) + dx, (this.current.headPos.getZ() >> 4) + dz)) {
                                 loaded = false;
                                 break;
                             }
                         }
                     }
                     if (loaded) {
-                        scanAttempts++;
-                        // 每秒检测一次，共 7 次 (±40 高度范围)
-                        DragonHead exact = findDragonHead(current.headPos, 10, 40);
+                        ++this.scanAttempts;
+                        DragonHead exact = this.findDragonHead(this.current.headPos, 10, 40);
                         if (exact != null) {
-                            // 位置用扫描结果；朝向用种子计算结果 (区块里墙面龙头的 FACING 在部分服务端会被翻转，不可靠)
-                            exactHead = exact.pos;
-                            waypoints = ShipWaypoints.from(exactHead, current.facing);
-                            headFound = true;
-                            info("已确认龙头，朝向=" + directionLabel(current.facing));  // V4.24: 不显示坐标（无政府服禁止暴露）
-                            if (debugSetting.get()) {
-                                int realTop = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, exactHead.getX(), exactHead.getZ());
-                                debugLog("head=(" + exactHead.getX() + "," + exactHead.getY() + "," + exactHead.getZ() + ") 龙头下地表=" + realTop + " seedY=" + current.headPos.getY());
+                            this.exactHead = exact.pos;
+                            this.waypoints = ShipWaypoints.from(this.exactHead, this.current.facing);
+                            this.headFound = true;
+                            this.info("已确认龙头: " + this.exactHead + " 朝向=" + this.current.facing);
+                            if (this.debugSetting.get()) {
+                                int realTop = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, this.exactHead.getX(), this.exactHead.getZ());
+                                this.debugLog("head=(" + this.exactHead.getX() + "," + this.exactHead.getY() + "," + this.exactHead.getZ() + ") 龙头下地表=" + realTop + " seedY=" + this.current.headPos.getY());
                             }
                         } else {
-                            info("检测龙头第 " + scanAttempts + "/7 次未找到");  // V4.24: 不显示目标坐标（无政府服禁止暴露）
+                            this.info("检测龙头第 " + this.scanAttempts + "/7 次未找到 (目标=" + this.current.headPos.getX() + "," + this.current.headPos.getZ() + ").");
                         }
                     }
                 }
-                if (!headFound && scanAttempts >= 7) {
-                    // 最终仲裁：±200 高度范围整列再扫一次，确认真的没有龙头才拉黑
-                    DragonHead last = findDragonHead(current.headPos, 10, 200);
-                    if (last != null) {
-                        exactHead = last.pos;
-                        waypoints = ShipWaypoints.from(exactHead, current.facing);
-                        headFound = true;
-                        info("整列扫描发现龙头: " + exactHead + " 朝向=" + current.facing);
-                    } else {
-                        // 确认没有龙头：判定为假城，永久拉黑并重新搜索
-                        warning("检测 7 次且整列无龙头，判定为假城，加入黑名单并重新搜索.");
-                        addBlacklist(current.headPos);
-                        sessionSkip.add(blacklistKey(current.headPos));
-                        ships.clear();
-                        targetIndex = 0;
-                        searchExtends = 0;
-                        takeoffFacing = null;
-                        firstFireworkDone = false;
-                        state = State.RISING;
-                        stateTick = 0;
-                        launchSearch();
+                if (!this.headFound && this.scanAttempts >= 7) {
+                    DragonHead last = this.findDragonHead(this.current.headPos, 10, 200);
+                    if (last == null) {
+                        this.warning("检测 7 次且整列无龙头，判定为假城，加入黑名单并重新搜索.");
+                        this.addBlacklist(this.current.headPos);
+                        this.sessionSkip.add(this.blacklistKey(this.current.headPos));
+                        this.ships.clear();
+                        this.targetIndex = 0;
+                        this.searchExtends = 0;
+                        this.takeoffFacing = null;
+                        this.firstFireworkDone = false;
+                        this.state = State.RISING;
+                        this.stateTick = 0;
+                        this.launchSearch();
                         return;
                     }
+                    this.exactHead = last.pos;
+                    this.waypoints = ShipWaypoints.from(this.exactHead, this.current.facing);
+                    this.headFound = true;
+                    this.info("整列扫描发现龙头: " + this.exactHead + " 朝向=" + this.current.facing);
                 }
             } else {
-                nearTicks = 0;
+                this.nearTicks = 0;
             }
 
-            if (headFound) {
-                stateTick = 0;
+            if (this.headFound) {
+                this.stateTick = 0;
             }
         }
 
-        // 龙头已确认 → 空中检查展示框：只查 p3 这个精确坐标上有没有"挂在墙上的"展示框实体，
-        // 有 → 再看框里有没有鞘翅；没有 → 没有鞘翅可拿 → 跳过该船：
-        // p3 = 展示框精确位置 (龙头 + 船尾方向 7 格 - 3 格，结构偏移)；
-        // 只检测 p3 这一个格子的展示框，避免加载范围内相邻船的展示框被误判成目标船的
-        if (headFound && !frameAirChecked) {
-            if (frameAirScanTicks % 20 == 0) {
-                ItemFrameEntity airFrame = findFrameAt(waypoints.p3); // 第一步：精确坐标上有没有展示框实体
+        if (this.headFound && !this.frameAirChecked) {
+            if (this.frameAirScanTicks % 20 == 0) {
+                net.minecraft.entity.decoration.ItemFrameEntity airFrame = this.findFrameAt(this.waypoints.p3);
                 if (airFrame != null) {
-                    frameAirChecked = true;
-                    frameAirEmpty = airFrame.getHeldItemStack().getItem() != Items.ELYTRA; // 第二步：框里有没有鞘翅
-                    if (frameAirEmpty) {
-                        info("展示框里没有鞘翅，不降落：拉升到 max-height 以上后跳过该船.");
-                        climbing = true;
+                    this.frameAirChecked = true;
+                    this.frameAirEmpty = airFrame.getHeldItemStack().getItem() != net.minecraft.item.Items.ELYTRA;
+                    if (this.frameAirEmpty) {
+                        this.info("展示框里没有鞘翅，不降落：拉升到 max-height 以上后跳过该船.");
+                        this.climbing = true;
                     } else {
-                        info("展示框里有鞘翅，按原计划降落.");
+                        this.info("展示框里有鞘翅，按原计划降落.");
                     }
                 }
             }
-            frameAirScanTicks++;
-            if (frameAirScanTicks > 120) {
-                frameAirChecked = true;
-                frameAirEmpty = true; // 找不到展示框实体 → 没有鞘翅可拿 → 跳过该船
-                info("空中未找到展示框实体，按无鞘翅处理 (跳过该船).");
+            ++this.frameAirScanTicks;
+            if (this.frameAirScanTicks > 120) {
+                this.frameAirChecked = true;
+                this.frameAirEmpty = true;
+                this.info("空中未找到展示框实体，按无鞘翅处理 (跳过该船).");
             }
         }
 
-        // 高度保持滞回飞行
-        float yaw = yawTowards(lp);
-        double y = mc.player.getY();
-        if (climbing) {
-            if (y >= maxHeight.get()) climbing = false;
-        } else {
-            if (y <= minHeight.get()) climbing = true;
-        }
-        // 防卡区块：接近降落点 (48 格内) 时暂停检测，否则会被迫拉升导致无法降落；
-        // 其余时候前方未加载区块太近时有否决权，强制爬升且至少保持 min-climb-ticks
-        if (horizontalDistance(lp) > 48) {
-            updateAntiChunkClimb();
-        } else {
-            antiClimbActive = false;
-            antiClimbTicks = 0;
-            antiClearStreak = 0;
-        }
-        float targetPitch = climbing ? -54.77f : 37.72f;
-        if (pitchSmooth.get()) {
-            float smoothSpeed = climbing ? pitchRotateUp.get().floatValue() : pitchRotateDown.get().floatValue();
-            smoothedPitch = AntiChunkLogic.stepToward(smoothedPitch, targetPitch, smoothSpeed);
-        } else {
-            smoothedPitch = targetPitch;
+        float yaw = !this.headFound && this.sweepScan.get() ? this.sweepYaw() : this.yawTowards(lp);
+        double y = this.mc.player.getY();
+        if (this.climbing) {
+            if (y >= this.maxHeight.get() && !this.antiClimbActive) this.climbing = false;
+        } else if (y <= this.minHeight.get()) {
+            this.climbing = true;
         }
 
-        rotateTo(yaw, smoothedPitch);
-        mc.options.forwardKey.setPressed(true);
+        // 防卡区块：只在"已确认龙头、飞向船"的阶段生效，避免干扰龙头扫描
+        if (this.headFound && !this.frameAirEmpty) {
+            this.updateAntiChunkClimb(lp);
+        } else {
+            this.antiClimbActive = false;
+            this.antiClimbTicks = 0;
+            this.antiClearStreak = 0;
+        }
 
-        // 先飞到降落点正上方，再进入下降；展示框无鞘翅则先拉升到 max-height 以上，到了就跳过该船
-        if (frameAirEmpty) {
-            if (mc.player.getY() < maxHeight.get()) {
-                climbing = true;
-                // 拉升时也要用烟花加速，否则速度掉光会坠落 (与 RISING 共用放烟花间隔)
-                if (stateTick - lastFireworkTick >= Math.max(1, Math.round(fireworkInterval.get() * 20))) {
-                    useFirework();
-                    lastFireworkTick = stateTick;
+        float pitch = this.climbing ? -54.77f : 37.72f;
+        if (this.pitchSmooth.get()) {
+            float speed = pitch < this.smoothedPitch ? this.pitchRotateUp.get().floatValue() : this.pitchRotateDown.get().floatValue();
+            this.smoothedPitch = ElytraCollector.stepToward(this.smoothedPitch, pitch, speed);
+            pitch = this.smoothedPitch;
+        } else {
+            this.smoothedPitch = pitch;
+        }
+
+        this.rotateTo(yaw, pitch);
+        this.mc.options.forwardKey.setPressed(true);
+
+        if (this.frameAirEmpty) {
+            if (this.mc.player.getY() < this.maxHeight.get()) {
+                this.climbing = true;
+                if (this.stateTick - this.lastFireworkTick >= Math.max(1, Math.round(this.fireworkInterval.get() * 20))) {
+                    this.useFirework();
+                    this.lastFireworkTick = this.stateTick;
                 }
             } else {
-                leaveShipNow();
-                return;
+                this.leaveShipNow();
             }
-        } else if (headFound && horizontalDistance(lp) <= 3) {
-            state = State.LANDING;
-            stateTick = 0;
+            return;
+        }
+        if (this.headFound && this.horizontalDistance(lp) <= 3.0) {
+            this.state = State.LANDING;
+            this.stateTick = 0;
         }
     }
 
-    // ========== 与独立 PullUp 模块的协调 ==========
-    // 拉升前中止存储会话：容器界面开着时玩家被冻结无法拉升，先关界面/停寻路/复位再拉升 (不影响任务，拉升完继续)
-    // 供 PullUp 模块在强制拉升开始时调用
+
     void abortStorageForPullUp() {
-        if (storagePhase == StoragePhase.NONE) return;
-        if (isContainerOpen()) mc.player.closeHandledScreen();
+        if (this.storagePhase == StoragePhase.NONE) {
+            return;
+        }
+        if (this.isContainerOpen()) {
+            this.mc.player.closeHandledScreen();
+        }
         PathManagers.get().stop();
-        releaseForward();
-        storagePhase = StoragePhase.NONE;
-        storageTick = 0;
-        resetStorageClick();
-        info("危险高度: 中止存储会话，强制拉升.");
+        this.releaseForward();
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.resetStorageClick();
+        this.info("\u5371\u9669\u9ad8\u5ea6: \u4e2d\u6b62\u5b58\u50a8\u4f1a\u8bdd\uff0c\u5f3a\u5236\u62c9\u5347.", new Object[0]);
     }
 
-    // PullUp 模块用：采集器是否处于降落/降落恢复 (此时由 landing 自身接管，独立拉升模块不干预)
     boolean isLandingOrRecovering() {
-        return state == State.LANDING || landingRecover;
+        return this.state == State.LANDING || this.landingRecover;
     }
 
-    // PullUp 模块拉升期间：暂停采集器全部控制 (由 PullUp 全权接管)
     boolean isPullUpSuppressed() {
-        return pullUpSuppressed;
+        return this.pullUpSuppressed;
     }
 
     void setPullUpSuppressed(boolean suppressed) {
-        pullUpSuppressed = suppressed;
-        if (!suppressed) releaseForward();
+        this.pullUpSuppressed = suppressed;
+        if (!suppressed) {
+            this.releaseForward();
+        }
     }
 
-    // ========== 缓降 (龙头已精确确认) ==========
     private void onLanding() {
-        BlockPos lp = waypoints.landing;
-        double hDist = horizontalDistance(lp);
-
-        // 降落检测：与降落点 Y 轴差低于 -10 (自身比降落点低 10 格，且仍在空中) → 反向 (背对降落点) 触发拉升，升到降落点上方 25 格
-        if (!landingRecover && !mc.player.isOnGround()
-            && mc.player.getY() < lp.getY() - 10) {
-            recoverCount++;
-            if (recoverCount > 3) {
-                stopTask("多次偏离降落点无法降落，停止任务.");
+        double ddz;
+        double ddy;
+        net.minecraft.util.math.BlockPos lp = this.waypoints.landing;
+        double hDist = this.horizontalDistance(lp);
+        if (!this.landingRecover && !this.mc.player.isOnGround() && this.mc.player.getY() < (double)(lp.getY() - 10)) {
+            ++this.recoverCount;
+            if (this.recoverCount > 3) {
+                this.stopTask("\u591a\u6b21\u504f\u79bb\u964d\u843d\u70b9\u65e0\u6cd5\u964d\u843d\uff0c\u505c\u6b62\u4efb\u52a1.");
                 return;
             }
-            landingRecover = true;
-            recoverStage = 0;
-            recoverStageTick = 0;
-            recoveryYaw = yawTowards(lp) + 180f;   // 反向: 背对降落点拉升
-            firstFireworkDone = false;
-            info("低于降落点 10 格，反向拉升 (目标降落点上方 25 格).");
-            state = State.RISING;
-            stateTick = 0;
+            this.landingRecover = true;
+            this.recoverStage = 0;
+            this.recoverStageTick = 0;
+            this.recoveryYaw = this.yawTowards(lp) + 180.0f;
+            this.firstFireworkDone = false;
+            this.info("\u4f4e\u4e8e\u964d\u843d\u70b9 10 \u683c\uff0c\u53cd\u5411\u62c9\u5347 (\u76ee\u6807\u964d\u843d\u70b9\u4e0a\u65b9 25 \u683c).", new Object[0]);
+            this.state = State.RISING;
+            this.stateTick = 0;
             return;
         }
-
-        if (mc.player.isOnGround()) {
-            if (hDist < 3) {
-                releaseForward();
-                recoverCount = 0;
-                info("已降落在降落点.");
-                state = State.COLLECTING;
-                collectStep = CollectStep.TO_P1;
-                stateTick = 0;
-                beginCollectStep();
+        if (this.mc.player.isOnGround()) {
+            if (hDist < 3.0) {
+                this.releaseForward();
+                this.recoverCount = 0;
+                this.info("\u5df2\u964d\u843d\u5728\u964d\u843d\u70b9.", new Object[0]);
+                this.state = State.COLLECTING;
+                this.collectStep = CollectStep.TO_P1;
+                this.stateTick = 0;
+                this.beginCollectStep();
                 return;
             }
-            // 落偏了：baritone 走到降落点
-            if (stateTick < 6 || !PathManagers.get().isPathing()) {
+            if (this.stateTick < 6 || !PathManagers.get().isPathing()) {
                 PathManagers.get().moveTo(lp, false);
             }
-            if (stateTick > 6 && !PathManagers.get().isPathing() && hDist < 2.5) {
-                releaseForward();
-                state = State.COLLECTING;
-                collectStep = CollectStep.TO_P1;
-                stateTick = 0;
-                beginCollectStep();
+            if (this.stateTick > 6 && !PathManagers.get().isPathing() && hDist < 2.5) {
+                this.releaseForward();
+                this.state = State.COLLECTING;
+                this.collectStep = CollectStep.TO_P1;
+                this.stateTick = 0;
+                this.beginCollectStep();
             }
             return;
         }
-
-        if (!mc.player.isGliding()) {
-            mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+        if (!this.mc.player.isGliding()) {
+            this.mc.player.networkHandler.sendPacket((net.minecraft.network.packet.Packet)new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket((net.minecraft.entity.Entity)this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
             return;
         }
-
-        // 先急速下降，直到距离降落点小于 20 格才触发缓降 (直接瞄准，防止高速绕圈)
-        double ddx = mc.player.getX() - (lp.getX() + 0.5);
-        double ddy = mc.player.getY() - (lp.getY() + 0.5);
-        double ddz = mc.player.getZ() - (lp.getZ() + 0.5);
-        if (ddx * ddx + ddy * ddy + ddz * ddz > 400) {
-            mc.player.setYaw(yawTowards(lp));
-            mc.player.setPitch(55f);
-            mc.options.forwardKey.setPressed(true);
+        double ddx = this.mc.player.getX() - ((double)lp.getX() + 0.5);
+        if (ddx * ddx + (ddy = this.mc.player.getY() - ((double)lp.getY() + 0.5)) * ddy + (ddz = this.mc.player.getZ() - ((double)lp.getZ() + 0.5)) * ddz > 400.0) {
+            this.mc.player.setYaw(this.yawTowards(lp));
+            this.mc.player.setPitch(55.0f);
+            this.mc.options.forwardKey.setPressed(true);
             return;
         }
-
-        if (hDist > 3) {
-            // 尚未到达准确坐标：直接瞄准飞向它并逐渐下降
-            double dy = mc.player.getY() - (lp.getY() + 1);
-            mc.player.setYaw(yawTowards(lp));
-            mc.player.setPitch((float) Math.min(45, Math.max(5, dy * 0.8)));
-            mc.options.forwardKey.setPressed(true);
+        if (hDist > 3.0) {
+            double dy = this.mc.player.getY() - (double)(lp.getY() + 1);
+            this.mc.player.setYaw(this.yawTowards(lp));
+            this.mc.player.setPitch((float)Math.min(45.0, Math.max(5.0, dy * 0.8)));
+            this.mc.options.forwardKey.setPressed(true);
         } else {
-            // 已到准确坐标：缓降（平视 + 翻转 yaw 抵消水平速度）
-            releaseForward();
-            mc.player.setPitch(0f);
-            if (stateTick % 2 == 0) {
-                mc.player.setYaw(mc.player.getYaw() + 180f);
+            this.releaseForward();
+            this.mc.player.setPitch(0.0f);
+            if (this.slowFallBoost.get() && this.stateTick % 2 == 0) {
+                this.mc.player.setYaw(this.mc.player.getYaw() + 180.0f);
             }
         }
     }
 
-    // ========== 地面采集 ==========
     private void beginCollectStep() {
-        if (waypoints == null) { state = State.RISING; return; }
-        switch (collectStep) {
-            case TO_P1 -> PathManagers.get().moveTo(waypoints.p1, false);
-            case TO_P2 -> PathManagers.get().moveTo(waypoints.p2, false);
-            case TO_P3 -> PathManagers.get().moveTo(waypoints.p3, false);
-            case HIT_FRAME -> {
-                // 只记录基数，不在这里攻击：先在 onCollecting 确认框里有鞘翅再打
-                elytraBeforeFrame = countElytraMain();
+        if (this.waypoints == null) {
+            this.state = State.RISING;
+            return;
+        }
+        switch (this.collectStep.ordinal()) {
+            case 0: {
+                PathManagers.get().moveTo(this.waypoints.p1, false);
+                break;
             }
-            case PICK_UP -> pickUpElytra();
-            case EQUIP -> equipElytra();
-            case EXIT_P1 -> PathManagers.get().moveTo(waypoints.p1, false);
-            case EXIT_LANDING -> PathManagers.get().moveTo(waypoints.landing.down(4), false);
-            case LEAVE_SHIP -> PathManagers.get().moveTo(waypoints.landing.down(4), false);
-            default -> {}
+            case 1: {
+                PathManagers.get().moveTo(this.waypoints.p2, false);
+                break;
+            }
+            case 3: {
+                PathManagers.get().moveTo(this.waypoints.p3, false);
+                break;
+            }
+            case 4: {
+                this.elytraBeforeFrame = this.countElytraMain();
+                break;
+            }
+            case 5: {
+                this.pickUpElytra();
+                break;
+            }
+            case 6: {
+                this.equipElytra();
+                break;
+            }
+            case 7: {
+                PathManagers.get().moveTo(this.waypoints.p1, false);
+                break;
+            }
+            case 8: {
+                PathManagers.get().moveTo(this.waypoints.landing.down(4), false);
+                break;
+            }
+            case 9: {
+                PathManagers.get().moveTo(this.waypoints.landing.down(4), false);
+                break;
+            }
         }
     }
 
     private void onCollecting() {
-        switch (collectStep) {
-            case TO_P1 -> { if (reached(waypoints.p1, 2.5)) advance(CollectStep.TO_P2); }
-            case TO_P2 -> { if (reached(waypoints.p2, 2.5)) advance(CollectStep.WAIT_SHULKER); }
-            case WAIT_SHULKER -> {
-                // 只等潜影贝还在鞘翅正前方固定一格时 (结构 SHIP_SENTRY_1 位置)；传走/闪现到别处都不算威胁
-                if (!hasShulkerAtGuard()) {
-                    advance(CollectStep.TO_P3);
-                } else if (stateTick - lastGotoTick >= 20) {
-                    // 潜影贝还在：每 1 秒重新寻路 #2 修正站位
-                    PathManagers.get().moveTo(waypoints.p2, false);
-                    lastGotoTick = stateTick;
-                }
+        switch (this.collectStep.ordinal()) {
+            case 0: {
+                if (!this.reached(this.waypoints.p1, 2.5)) break;
+                this.advance(CollectStep.TO_P2);
+                break;
             }
-            case TO_P3 -> { if (reached(waypoints.p3, 2.0)) advance(CollectStep.HIT_FRAME); }
-            case HIT_FRAME -> {
-                ItemFrameEntity frame = getNearestItemFrame(killAuraReach.get() + 2);
-                if (frame != null && stateTick == 1) {
-                    // 记录到达时的原始内容：打掉后展示框会变空，只有到达时就没鞘翅才直接离开
-                    frameHadElytra = frame.getHeldItemStack().getItem() == Items.ELYTRA;
-                    if (!frameHadElytra) {
-                        info("展示框里没有鞘翅，直接离开该船.");
-                        leaveShipNow();
+            case 1: {
+                if (!this.reached(this.waypoints.p2, 2.5)) break;
+                this.advance(CollectStep.WAIT_SHULKER);
+                break;
+            }
+            case 2: {
+                if (!this.hasShulkerAtGuard()) {
+                    this.advance(CollectStep.TO_P3);
+                    break;
+                }
+                if (this.stateTick - this.lastGotoTick < 20) break;
+                PathManagers.get().moveTo(this.waypoints.p2, false);
+                this.lastGotoTick = this.stateTick;
+                break;
+            }
+            case 3: {
+                if (!this.reached(this.waypoints.p3, 2.0)) break;
+                this.advance(CollectStep.HIT_FRAME);
+                break;
+            }
+            case 4: {
+                net.minecraft.entity.decoration.ItemFrameEntity frame = this.getNearestItemFrame(this.killAuraReach.get() + 2.0);
+                if (frame != null && this.stateTick == 1) {
+                    boolean bl = this.frameHadElytra = frame.getHeldItemStack().getItem() == net.minecraft.item.Items.ELYTRA;
+                    if (!this.frameHadElytra) {
+                        this.info("\u5c55\u793a\u6846\u91cc\u6ca1\u6709\u9798\u7fc5\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                        this.leaveShipNow();
                         return;
                     }
                 }
-                // 首个 tick 立即打一次，之后每 1 秒补打 (最多 3 次)，等掉落出现
-                if ((stateTick <= 1 || stateTick % 20 == 0) && noElytraTicks < 3) {
-                    noElytraTicks++;
-                    hitItemFrame();
+                if ((this.stateTick <= 1 || this.stateTick % 20 == 0) && this.noElytraTicks < 3) {
+                    ++this.noElytraTicks;
+                    this.hitItemFrame();
                 }
-                if (findDroppedElytra() != null || countElytraMain() > elytraBeforeFrame) {
-                    advance(CollectStep.PICK_UP);
-                } else if (stateTick > 80) {
-                    info("攻击展示框后没有鞘翅掉落，直接离开该船.");
-                    leaveShipNow();
+                if (this.findDroppedElytra() != null || this.countElytraMain() > this.elytraBeforeFrame) {
+                    this.advance(CollectStep.PICK_UP);
+                    break;
                 }
+                if (this.stateTick <= 80) break;
+                this.info("\u653b\u51fb\u5c55\u793a\u6846\u540e\u6ca1\u6709\u9798\u7fc5\u6389\u843d\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                this.leaveShipNow();
+                break;
             }
-            case PICK_UP -> {
-                // 掉落的鞘翅优先：径直走过去捡 (不依赖 baritone，就 1~3 格)
-                ItemEntity item = findDroppedElytra();
+            case 5: {
+                net.minecraft.entity.ItemEntity item = this.findDroppedElytra();
                 if (item != null) {
-                    walkTowards(item.getX(), item.getZ());
-                    if (item.squaredDistanceTo(mc.player) < 1.2) {
-                        mc.options.forwardKey.setPressed(false);
-                    }
-                } else if (countElytraMain() > elytraBeforeFrame) {
-                    // 已捡到鞘翅 → 进入穿戴
-                    mc.options.forwardKey.setPressed(false);
-                    advance(CollectStep.EQUIP);
-                } else if (stateTick > 60) {
-                    // 掉落物不见了但没捡到：直接走，不无限重试
-                    info("鞘翅掉落消失未拾取，直接离开该船.");
-                    leaveShipNow();
+                    this.walkTowards(item.getX(), item.getZ());
+                    if (!(item.squaredDistanceTo((net.minecraft.entity.Entity)this.mc.player) < 1.2)) break;
+                    this.mc.options.forwardKey.setPressed(false);
+                    break;
                 }
+                if (this.countElytraMain() > this.elytraBeforeFrame) {
+                    this.mc.options.forwardKey.setPressed(false);
+                    this.advance(CollectStep.EQUIP);
+                    break;
+                }
+                if (this.stateTick <= 60) break;
+                this.info("\u9798\u7fc5\u6389\u843d\u6d88\u5931\u672a\u62fe\u53d6\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                this.leaveShipNow();
+                break;
             }
-            case EQUIP -> {
-                if (isWearingFullDurabilityElytra()) {
-                    // 捡到鞘翅 (已穿戴) → 立刻在当前位置触发背包检测 (存鞘翅/补货)，不用等走回降落点；
-                    // 每艘船只在捡到鞘翅后尝试一次会话，防止缺口未补齐时原地无限重启会话
-                    if (!pickupSessionDone) {
-                        pickupSessionDone = true;
-                        maybeStartSession();
-                        if (storagePhase != StoragePhase.NONE) {
-                            return; // 存储会话在船旁直接执行，结束后回本步骤继续
+            case 6: {
+                if (this.isWearingFullDurabilityElytra()) {
+                    if (!this.pickupSessionDone) {
+                        this.pickupSessionDone = true;
+                        this.maybeStartSession();
+                        if (this.storagePhase != StoragePhase.NONE) {
+                            return;
                         }
                     }
-                    advance(CollectStep.EXIT_P1);
-                } else {
-                    equipElytra();
+                    this.advance(CollectStep.EXIT_P1);
+                    break;
                 }
+                this.equipElytra();
+                break;
             }
-            case EXIT_P1 -> {
-                if (reached(waypoints.p1, 2.5)) {
-                    advance(CollectStep.EXIT_LANDING);
-                }
-                // 对齐 Ying：无超时跳步，一直走到 p1 才进入下一阶段 (曾加 30s 超时跳过 → 没回点就起飞撞墙，已删)
+            case 7: {
+                if (!this.reached(this.waypoints.p1, 2.5)) break;
+                this.advance(CollectStep.EXIT_LANDING);
+                break;
             }
-            case EXIT_LANDING -> {
-                if (reached(waypoints.landing, 2.5)) {
-                    addBlacklist(current.headPos);
-                    info("该船完成，加入黑名单.");
-                    finishShip();
-                }
-                // 对齐 Ying：无超时跳步，回不到降落点就一直走 (曾加 30s 超时直接完成 → 在错误位置起飞撞墙，已删)
+            case 8: {
+                if (!this.reached(this.waypoints.landing, 2.5)) break;
+                this.addBlacklist(this.current.headPos);
+                this.info("\u8be5\u8239\u5b8c\u6210\uff0c\u52a0\u5165\u9ed1\u540d\u5355.", new Object[0]);
+                this.finishShip();
+                break;
             }
-            case LEAVE_SHIP -> {
-                // 已回降落点：修正起飞方向后起飞离开
-                if (reached(waypoints.landing.down(4), 2.5)) {
-                    releaseForward();
-                    info("已回到降落点，起飞离开.");
-                    state = State.RISING;
-                    stateTick = 0;
-                }
-                // 对齐 Ying：无超时跳步，一直走到降落点才起飞 (曾加 30s 超时原地起飞 → 位置不在降落点撞墙，已删)
+            case 9: {
+                if (!this.reached(this.waypoints.landing.down(4), 2.5)) break;
+                this.releaseForward();
+                this.info("\u5df2\u56de\u5230\u964d\u843d\u70b9\uff0c\u8d77\u98de\u79bb\u5f00.", new Object[0]);
+                this.state = State.RISING;
+                this.stateTick = 0;
             }
         }
     }
 
     private void advance(CollectStep next) {
-        collectStep = next;
-        stateTick = 0;
-        lastGotoTick = 0;
-        noElytraTicks = 0;
-        frameHadElytra = false;
-        pickupSessionDone = false;
-        beginCollectStep();
-    }
-
-    // ========== 任务控制 (完成/停止/掉线/退出) ==========
-    // 自动断开服务器连接 (用户要求: 背包潜影盒也满了就自动下线 log 掉)
-    private void disconnect(String reason) {
-        if (mc.player == null || mc.player.networkHandler == null) return;
-        mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
-    }
-
-    // 6.41: 自动下线保护统一出口——断开服务器 + 停任务 + 关闭模块本身。
-    // 必须关闭模块：只 disconnect+stopTask 会让模块残留激活，重连后鞘翅采集还亮着、
-    // 联动的自动扔垃圾也残留开启（用户实测：关掉后 onTick 仍在扔垃圾）。
-    private void emergencyExit(String reason) {
-        disconnect(reason);
-        stopTask(reason);
-        if (isActive()) toggle();   // onDeactivate → 联动回滚关闭自动扔垃圾，干净恢复
+        this.collectStep = next;
+        this.stateTick = 0;
+        this.lastGotoTick = 0;
+        this.noElytraTicks = 0;
+        this.frameHadElytra = false;
+        this.pickupSessionDone = false;
+        this.beginCollectStep();
     }
 
     private void stopTask(String reason) {
-        info(reason);
-        searchCancelled = true;
-        searchGeneration++;
-        searchThread = null;
-        storagePhase = StoragePhase.NONE;
-        storageTick = 0;
-        landingRecover = false;
-        recoveryYaw = 0f;
-        recoverStageTick = 0;
-        recoverCount = 0;
-        recoveryAttempts = 0;
-        releaseForward();
-        resetStorageClick();
-        if (state != State.IDLE) state = State.IDLE;
+        this.info(reason, new Object[0]);
+        this.searchCancelled = true;
+        ++this.searchGeneration;
+        this.searchThread = null;
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.landingRecover = false;
+        this.recoveryYaw = 0.0f;
+        this.recoverStageTick = 0;
+        this.recoverCount = 0;
+        this.releaseForward();
+        this.resetStorageClick();
+        if (this.state != State.IDLE) {
+            this.state = State.IDLE;
+        }
         PathManagers.get().stop();
-        btnOff();
+        this.btnStart.set(false);
     }
 
     private void completeTask(String reason) {
-        // 只停止任务，绝不在模块内关闭游戏 (防止任何路径导致游戏静默退出)
-        stopTask(reason);
+        this.stopTask(reason);
     }
 
-    // ========== 船完成 → 检查存储需求 ==========
     private void finishShip() {
-        maybeStartSession();
-        if (storagePhase == StoragePhase.NONE) {
-            relaunchAfterShip();
+        this.maybeStartSession();
+        if (this.storagePhase == StoragePhase.NONE) {
+            this.relaunchAfterShip();
         }
     }
 
     private void maybeStartSession() {
-        // 存鞘翅触发条件：背包可用空格 ≤ 阈值才存 (对齐 Ying 原版 freeSlots <= dump-free-slots。
-        // 曾改为"背包里有鞘翅就存"：每艘船都在起飞前挖盒存储，玩家位置被带离降落点，起飞朝船体撞墙，已回退)
-        dumpNeeded = freeSlots() <= freeSlotDump.get();
-        resupplyNeeded = anyDeficit();
-        if (dumpNeeded || resupplyNeeded) {
-            info("存储会话: 存鞘翅=" + dumpNeeded + ", 补货=" + resupplyNeeded);
-            if (resupplyNeeded) {
-                // 明确提示缺哪些物资 (修复: 之前只报 true/false, 用户不知道缺什么)
-                StringBuilder sb = new StringBuilder("缺少物资: ");
-                for (SupplyRule r : parseSupplies()) {
-                    int have = countItem(r.item);
-                    if (have < r.min) {
-                        sb.append(r.item.getName().getString())
-                            .append("(").append(have).append("/").append(r.min).append(") ");
-                    }
-                }
-                info(sb.toString().trim());
-            }
-            // 快捷路径：只存鞘翅 (无补货) 且背包有可用鞘翅盒/空盒 → 直接放盒存，不用开末影箱
-            // (用户要求"取得一个鞘翅就自动存入潜影盒"，背包常备盒时最省事；只用鞘翅盒/空盒，绝不污染补给盒)
-            if (dumpNeeded && !resupplyNeeded) {
-                int bpBox = findBackpackElytraBox();
-                if (bpBox != -1) {
-                    info("存储: 背包有可用潜影盒，直接放盒存鞘翅 (无需末影箱).");
-                    boxInventorySlot = bpBox;
-                    boxFromInventory = true;
-                    pickInvSlot = bpBox;
-                    boxPurposeSupply = false;
-                    ecPos = null;
-                    boxPos = null;
-                    storagePhase = StoragePhase.PLACE_BOX;
-                    storageTick = 0;
-                    supplyScanStart = 0;
-                    supplyPauseDump = false;
-                    resupplyRescan = false;
-                    releaseForward();
-                    PathManagers.get().stop();
-                    return;
-                }
-            }
-            storagePhase = StoragePhase.PLACE_EC;
-            storageTick = 0;
-            ecPos = null;
-            boxPos = null;
-            boxInventorySlot = -1;
-            boxFromInventory = false;
-supplyScanStart = 0;
-        supplyPauseDump = false;
-        resupplyRescan = false;
-            releaseForward();
+        this.dumpNeeded = this.freeSlots() <= this.freeSlotDump.get();
+        this.resupplyNeeded = this.anyDeficit();
+        if (this.dumpNeeded || this.resupplyNeeded) {
+            this.info("\u5b58\u50a8\u4f1a\u8bdd: \u5b58\u9798\u7fc5=" + this.dumpNeeded + ", \u8865\u8d27=" + this.resupplyNeeded, new Object[0]);
+            this.storagePhase = StoragePhase.PLACE_EC;
+            this.storageTick = 0;
+            this.ecPos = null;
+            this.boxPos = null;
+            this.boxInventorySlot = -1;
+            this.boxFromInventory = false;
+            this.supplyScanStart = 0;
+            this.supplyPauseDump = false;
+            this.resupplyRescan = false;
+            this.releaseForward();
             PathManagers.get().stop();
         }
     }
 
     private void relaunchAfterShip() {
-        ships.clear();
-        targetIndex = 0;
-        searchExtends = 0;
-        // 起飞前触发的存储会话可能还没有任何船 (current == null)，此时不修正起飞方向
-        takeoffFacing = current != null ? current.facing : null;
-        firstFireworkDone = false;
-        landingRecover = false;
-        state = State.RISING;
-        stateTick = 0;
-        launchSearch();
+        this.ships.clear();
+        this.targetIndex = 0;
+        this.searchExtends = 0;
+        this.takeoffFacing = this.current != null ? this.current.facing : null;
+        this.firstFireworkDone = false;
+        this.landingRecover = false;
+        this.state = State.RISING;
+        this.stateTick = 0;
+        this.launchSearch();
     }
 
-    // 展示框没有鞘翅掉落：离开该船并重新搜索
-    // 触发时机区分：在空中 → 直接起飞离开；已降落 → 先回降落点修正起飞方向，再起飞离开
     private void leaveShipNow() {
-        addBlacklist(current.headPos);
-        info("该船跳过并加入黑名单，重新搜索最近未去过的船.");
-        ships.clear();
-        targetIndex = 0;
-        searchExtends = 0;
-        takeoffFacing = current.facing;
-        firstFireworkDone = false;
-        landingRecover = false;
-        releaseForward();
-        launchSearch();
-        if (mc.player.isOnGround() && waypoints != null && horizontalDistance(waypoints.landing) > 2.5) {
-            // 已降落：先走到降落点 (甲板站立点) 修正起飞方向
-            info("已降落：先回降落点修正起飞方向后再离开.");
-            state = State.COLLECTING;
-            collectStep = CollectStep.LEAVE_SHIP;
-            stateTick = 0;
-            beginCollectStep();
+        this.addBlacklist(this.current.headPos);
+        this.info("\u8be5\u8239\u8df3\u8fc7\u5e76\u52a0\u5165\u9ed1\u540d\u5355\uff0c\u91cd\u65b0\u641c\u7d22\u6700\u8fd1\u672a\u53bb\u8fc7\u7684\u8239.", new Object[0]);
+        this.ships.clear();
+        this.targetIndex = 0;
+        this.searchExtends = 0;
+        this.takeoffFacing = this.current.facing;
+        this.firstFireworkDone = false;
+        this.landingRecover = false;
+        this.releaseForward();
+        this.launchSearch();
+        if (this.mc.player.isOnGround() && this.waypoints != null && this.horizontalDistance(this.waypoints.landing) > 2.5) {
+            this.info("\u5df2\u964d\u843d\uff1a\u5148\u56de\u964d\u843d\u70b9\u4fee\u6b63\u8d77\u98de\u65b9\u5411\u540e\u518d\u79bb\u5f00.", new Object[0]);
+            this.state = State.COLLECTING;
+            this.collectStep = CollectStep.LEAVE_SHIP;
+            this.stateTick = 0;
+            this.beginCollectStep();
         } else {
-            // 在空中或已在降落点：直接起飞离开
-            state = State.RISING;
-            stateTick = 0;
+            this.state = State.RISING;
+            this.stateTick = 0;
         }
     }
 
-    // ========== 存储会话主循环 (主线程 tick 驱动) ==========
     private void onStorageTick() {
         try {
-            storageTick++;
-            if (storageTick > 1200) {
-                stopTask("存储会话超时 (阶段=" + storagePhase + ")，停止任务.");
+            ++this.storageTick;
+            if (this.storageTick > 1200) {
+                this.stopTask("\u5b58\u50a8\u4f1a\u8bdd\u8d85\u65f6 (\u9636\u6bb5=" + String.valueOf(this.storagePhase) + ")\uff0c\u505c\u6b62\u4efb\u52a1.");
                 return;
             }
-            releaseForward();
-            execMoves(); // 点击握手：等服务器回包确认后再继续下一步
-            switch (storagePhase) {
-                case PLACE_EC -> onPlaceEc();
-                case OPEN_EC -> onOpenEc();
-                case PICK_BOX -> onPickBox();
-                case CLOSE_SCREEN -> onCloseScreen();
-                case PLACE_BOX -> onPlaceBox();
-                case OPEN_BOX -> onOpenBox();
-                case FILL_BOX -> onFillBox();
-                case TAKE_SUPPLIES -> {
-                    // 补货中背包可用空格 ≤ dump-free-slots 且身上还有未穿戴鞘翅 → 暂停补给：
-                    // 挖掉补给盒放入末影箱 → 拿空盒把鞘翅存进去腾背包 → 再次补给
-                    if (freeSlots() <= freeSlotDump.get() && countElytraMain() > 0) {
-                        supplyPauseDump = true;
-                        resupplyRescan = true;
-                        dumpNeeded = true;
-                        info("补给暂停: 背包剩余 " + freeSlots() + " 槽，先回收补给盒、存鞘翅腾背包.");
-                        storagePhase = StoragePhase.MINE_BOX;
-                        storageTick = 0;
-                    } else {
-                        onTakeSupplies();
-                    }
+            this.releaseForward();
+            this.execMoves();
+            switch (this.storagePhase.ordinal()) {
+                case 1: {
+                    this.onPlaceEc();
+                    break;
                 }
-                case MINE_BOX -> onMineBox();
-                case MINE_EC -> onMineEc();
-                default -> {}
+                case 2: {
+                    this.onOpenEc();
+                    break;
+                }
+                case 3: {
+                    this.onPickBox();
+                    break;
+                }
+                case 4: {
+                    this.onCloseScreen();
+                    break;
+                }
+                case 5: {
+                    this.onPlaceBox();
+                    break;
+                }
+                case 6: {
+                    this.onOpenBox();
+                    break;
+                }
+                case 7: {
+                    this.onFillBox();
+                    break;
+                }
+                case 8: {
+                    if (this.freeSlots() <= this.freeSlotDump.get() && this.countElytraMain() > 0) {
+                        this.supplyPauseDump = true;
+                        this.resupplyRescan = true;
+                        this.dumpNeeded = true;
+                        this.info("\u8865\u7ed9\u6682\u505c: \u80cc\u5305\u5269\u4f59 " + this.freeSlots() + " \u69fd\uff0c\u5148\u56de\u6536\u8865\u7ed9\u76d2\u3001\u5b58\u9798\u7fc5\u817e\u80cc\u5305.", new Object[0]);
+                        this.storagePhase = StoragePhase.MINE_BOX;
+                        this.storageTick = 0;
+                        break;
+                    }
+                    this.onTakeSupplies();
+                    break;
+                }
+                case 9: {
+                    this.onMineBox();
+                    break;
+                }
+                case 10: {
+                    this.onMineEc();
+                    break;
+                }
             }
-        } catch (Throwable t) {
-            error("存储会话异常: " + t);
+        }
+        catch (Throwable t) {
+            this.error("\u5b58\u50a8\u4f1a\u8bdd\u5f02\u5e38: " + String.valueOf(t), new Object[0]);
             t.printStackTrace();
-            stopTask("存储会话异常，停止任务.");
+            this.stopTask("\u5b58\u50a8\u4f1a\u8bdd\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
         }
     }
 
     private void onPlaceEc() {
-        if (storageTick == 1) {
-            // 先检测周围有没有末影箱 (上次遗留的)，有就直接打开；但上一轮打开失败过则跳过它直接放新的
-            if (ecOpenFailCount == 0) {
-                BlockPos existing = findNearbyEnderChest(5);
-                if (existing != null) {
-                    ecPos = existing;
-                    info("存储: 发现周围已有末影箱 " + existing + "，直接打开.");
-                    storagePhase = StoragePhase.OPEN_EC;
-                    storageTick = 0;
-                    openRetry = 0;
-                    return;
-                }
+        if (this.storageTick == 1) {
+            net.minecraft.util.math.BlockPos existing;
+            if (this.ecOpenFailCount == 0 && (existing = this.findNearbyEnderChest(5)) != null) {
+                this.ecPos = existing;
+                this.info("\u5b58\u50a8: \u53d1\u73b0\u5468\u56f4\u5df2\u6709\u672b\u5f71\u7bb1 " + String.valueOf(existing) + "\uff0c\u76f4\u63a5\u6253\u5f00.", new Object[0]);
+                this.storagePhase = StoragePhase.OPEN_EC;
+                this.storageTick = 0;
+                this.openRetry = 0;
+                return;
             }
-            int ecSlot = findItemSlot(Items.ENDER_CHEST);
+            int ecSlot = this.findItemSlot(net.minecraft.item.Items.ENDER_CHEST);
             if (ecSlot == -1) {
-                if (dumpNeeded) {
-                    // 存鞘翅是刚需 (背包快满)，没末影箱只能停
-                    stopTask("背包里没有末影箱，无法存鞘翅，停止任务. 请先准备末影箱.");
-                } else {
-                    // 只是补货 → 跳过存储会话，继续主任务 (修复: 之前直接停任务导致"一直不启动")
-                    info("背包里没有末影箱，跳过补货，继续任务.");
-                    storagePhase = StoragePhase.NONE;
-                    storageTick = 0;
-                    dumpNeeded = false;
-                    resupplyNeeded = false;
+                this.stopTask("\u80cc\u5305\u91cc\u6ca1\u6709\u672b\u5f71\u7bb1\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.ecBaseline = this.countItem(net.minecraft.item.Items.ENDER_CHEST);
+            this.ensureItemSelected(ecSlot);
+            this.placeCandidates = this.findPlaceSpots(null);
+            if (this.placeCandidates.isEmpty() && this.waypoints != null && this.waypoints.p2 != null) {
+                this.info("\u9644\u8fd1\u65e0\u7a7a\u4f4d\uff0c\u6539\u7528\u68c0\u6d4b\u6f5c\u5f71\u8d1d\u7684\u4f4d\u7f6e " + String.valueOf(this.waypoints.p2) + " \u9644\u8fd1\u653e\u7f6e.", new Object[0]);
+                this.placeCandidates = this.findPlaceSpotsAt(this.waypoints.p2, null);
+            }
+            if (this.placeCandidates.isEmpty()) {
+                this.stopTask("\u627e\u4e0d\u5230\u653e\u7f6e\u672b\u5f71\u7bb1\u7684\u4f4d\u7f6e\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.placeIndex = 0;
+            this.lastPlaceClick = -100;
+            this.placeClickAttempts = 0;
+        }
+        if (this.storageTick >= 4 && this.storageTick - this.lastPlaceClick >= 8) {
+            if (this.placeIndex >= this.placeCandidates.size()) {
+                this.stopTask("\u672b\u5f71\u7bb1\u653e\u7f6e\u5931\u8d25 (\u5df2\u5c1d\u8bd5\u6240\u6709\u5019\u9009\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            net.minecraft.util.math.BlockPos spot = this.placeCandidates.get(this.placeIndex);
+            if (this.mc.player.squaredDistanceTo((double)spot.getX() + 0.5, (double)spot.getY() + 0.5, (double)spot.getZ() + 0.5) > 16.0) {
+                if (!PathManagers.get().isPathing()) {
+                    PathManagers.get().moveTo(spot, false);
                 }
                 return;
             }
-            ecBaseline = countItem(Items.ENDER_CHEST);
-            ensureItemSelected(ecSlot);
-            placeCandidates = findPlaceSpots(null);
-            if (placeCandidates.isEmpty() && waypoints != null && waypoints.p2 != null) {
-                // 附近没有空位 → 把末影箱放到检测潜影贝的位置 (p2)
-                info("附近无空位，改用检测潜影贝的位置 " + waypoints.p2 + " 附近放置.");
-                placeCandidates = findPlaceSpotsAt(waypoints.p2, null);
-            }
-            if (placeCandidates.isEmpty()) {
-                stopTask("找不到放置末影箱的位置，停止任务.");
-                return;
-            }
-            placeIndex = 0;
-            lastPlaceClick = -100;
-            placeClickAttempts = 0;
-        }
-        // 每 8 tick 点击一次，同一位置最多点 2 次，失败换下一个候选位置
-        if (storageTick >= 4 && storageTick - lastPlaceClick >= 8) {
-            if (placeIndex >= placeCandidates.size()) {
-                stopTask("末影箱放置失败 (已尝试所有候选位置)，停止任务.");
-                return;
-            }
-            BlockPos spot = placeCandidates.get(placeIndex);
-            if (mc.player.squaredDistanceTo(spot.getX() + 0.5, spot.getY() + 0.5, spot.getZ() + 0.5) > 16) {
-                // 距离太远 (如回退到 p2 附近)：先走过去再点
-                if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(spot, false);
-                return;
-            }
-            lastPlaceClick = storageTick;
-            placeClickAttempts++;
-            ecPos = spot;
-            // 视角面对目标格下方方块再点 (反作弊校验视线)，face UP 会把末影箱放到目标格上
-            faceBlockForPlace(spot.down(), Direction.UP);
-            interactAt(spot.down());
-            if (placeClickAttempts >= 2) {
-                placeIndex++;
-                placeClickAttempts = 0;
+            this.lastPlaceClick = this.storageTick;
+            ++this.placeClickAttempts;
+            this.ecPos = spot;
+            this.faceBlockForPlace(spot.down(), net.minecraft.util.math.Direction.UP);
+            this.interactAt(spot.down());
+            if (this.placeClickAttempts >= 2) {
+                ++this.placeIndex;
+                this.placeClickAttempts = 0;
             }
         }
-        if (ecPos != null && isEnderChestBlock(mc.world.getBlockState(ecPos))) {
+        if (this.ecPos != null && this.isEnderChestBlock(this.mc.world.getBlockState(this.ecPos))) {
             PathManagers.get().stop();
-            storagePhase = StoragePhase.OPEN_EC;
-            storageTick = 0;
-            openRetry = 0;
+            this.storagePhase = StoragePhase.OPEN_EC;
+            this.storageTick = 0;
+            this.openRetry = 0;
             return;
         }
-        if (storageTick > 80) {
-            stopTask("末影箱放置失败 (超时)，停止任务.");
+        if (this.storageTick > 80) {
+            this.stopTask("\u672b\u5f71\u7bb1\u653e\u7f6e\u5931\u8d25 (\u8d85\u65f6)\uff0c\u505c\u6b62\u4efb\u52a1.");
         }
     }
 
-    // 扫描周围 (水平半径 radius) 有没有末影箱方块
-    private BlockPos findNearbyEnderChest(int radius) {
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        BlockPos p = mc.player.getBlockPos();
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -2; dy <= 2; dy++) {
+    private net.minecraft.util.math.BlockPos findNearbyEnderChest(int radius) {
+        net.minecraft.util.math.BlockPos.Mutable m = new net.minecraft.util.math.BlockPos.Mutable();
+        net.minecraft.util.math.BlockPos p = this.mc.player.getBlockPos();
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                for (int dy = -2; dy <= 2; ++dy) {
                     m.set(p.getX() + dx, p.getY() + dy, p.getZ() + dz);
-                    if (isEnderChestBlock(mc.world.getBlockState(m))) return m.toImmutable();
-                }
-            }
-        }
-        return null;
-    }
-
-    private void onOpenEc() {
-        if (storageTick == 1) {
-            if (ecPos == null || !isEnderChestBlock(mc.world.getBlockState(ecPos))) {
-                // 末影箱不在原位：回到放置流程 (重新扫描/重新放置)
-                info("末影箱不在原位，重新放置.");
-                storagePhase = StoragePhase.PLACE_EC;
-                storageTick = 0;
-                return;
-            }
-            standingMovedOff = false;
-        }
-        // 打开前：若玩家站在末影箱上，先走下来再打开 (站在上面打开会被服务器拒绝/命中判定异常)
-        if (!standingMovedOff && isStandingOnBlock(ecPos)) {
-            BlockPos off = findStandOffSpot(ecPos);
-            if (off != null && !PathManagers.get().isPathing()) {
-                PathManagers.get().moveTo(off, false);
-                info("存储: 玩家站在末影箱上，先走下来再打开.");
-            }
-            if (isStandingOnBlock(ecPos)) return; // 还没走下来，等 baritone 到位
-            standingMovedOff = true;
-        }
-        // 打开重试：最多 5 次，每次间隔 1 秒 (storageTick 1/21/41/61/81)
-        if (openRetry < 5 && storageTick == 1 + openRetry * 20) {
-            // V4.16: 六面检测——末影箱顶面可能被盖住、玩家也可能站在侧面/下方，
-            // 固定 UP 面交互会被服务器按视线回溯拒绝；改为选玩家正对的面交互
-            Vec3d eye = mc.player.getEyePos();
-            Direction face = faceById(FacingLogic.bestFaceIndex(
-                eye.x, eye.y, eye.z, ecPos.getX() + 0.5, ecPos.getY() + 0.5, ecPos.getZ() + 0.5));
-            faceBlockForPlace(ecPos, face);
-            interactAt(ecPos, face);
-            openRetry++;
-        }
-        if (isContainerOpen()) {
-            if (storageTick < 3) return; // 等服务器同步末影箱内容
-            ecOpenFailCount = 0;
-            storagePhase = StoragePhase.PICK_BOX;
-            storageTick = 0;
-        } else if (storageTick > 1 + 4 * 20 + 12) {
-            // 5 次都没打开：先检测是否站在末影箱上，站在上面就先走下来再按抓包流程处理；
-            // 否则回放置流程，放置一个新的末影箱再试
-            if (isStandingOnBlock(ecPos)) {
-                standingMovedOff = false;
-                storageTick = 0;
-                info("打开末影箱失败且玩家站在末影箱上，先走下来再重试.");
-                return;
-            }
-            warning("打开末影箱失败 (已尝试 5 次)，放置新的末影箱再试.");
-            ecOpenFailCount++;
-            storagePhase = StoragePhase.PLACE_EC;
-            storageTick = 0;
-            ecPos = null;
-            openRetry = 0;
-        }
-    }
-
-    private void onPickBox() {
-        var sh = mc.player.currentScreenHandler;
-        int rows = currentRows();
-        if (sh == null || rows <= 0) {
-            stopTask("末影箱界面异常，停止任务.");
-            return;
-        }
-        // 等服务器同步完末影箱内容再扫描 (否则会误判没有空位潜影盒)
-        if (storageTick < 3) return;
-
-        // 取盒流程 (点击握手)
-        if (pickStep == 1) {
-            if (!moveIdle()) return; // 光标还没拿到盒子
-            int emptyScreen = firstEmptyPlayerScreenSlot(sh, rows);
-            if (emptyScreen != -1) {
-                pickInvSlot = emptyScreen - rows * 9 + 9;
-                moveQueue.add(new MoveOp(-1, emptyScreen)); // 放下到空玩家槽
-                pickStep = 2;
-            } else {
-                moveQueue.add(new MoveOp(-1, pickEcSlot));  // 没空位：放回末影箱
-                pickStep = 3;
-            }
-            return;
-        }
-        if (pickStep == 2) {
-            if (!moveIdle()) return;
-            boxInventorySlot = pickInvSlot;
-            boxFromInventory = false;
-            pickStep = 0;
-            // 预取备用盒 (鞘翅已存完且无补货需求) → 盒子留在背包，会话直接结束；
-            // 正常取盒 (还有鞘翅/补货要处理) → 继续放置流程
-            afterClose = (dumpNeeded || resupplyNeeded) ? StoragePhase.PLACE_BOX : StoragePhase.MINE_EC;
-            storagePhase = StoragePhase.CLOSE_SCREEN;
-            storageTick = 0;
-            return;
-        }
-        if (pickStep == 3) {
-            if (!moveIdle()) return;
-            pickStep = 0;
-            // 补货意图：背包无空位 = 拿不了物资，和"物资不足"同性质，直接停止 (避免每艘船循环跳过补货)
-            if (boxPurposeSupply) {
-                stopTask("背包无空位放潜影盒，无法补货，停止任务.");
-                return;
-            }
-            // 存鞘翅意图：背包 0 空位 = 鞘翅也捡不起来，任务已卡死，直接停止 (避免每艘船循环跳过)
-            stopTask("背包无空位放潜影盒，无法存鞘翅，停止任务.");
-            return;
-        }
-        if (!moveIdle()) return; // 归还上一盒的搬运还没完成
-
-        // 先归还上一盒 (放入末影箱) — QUICK_MOVE shift 点击，服务器自动放到末影箱第一个空位
-        if (boxInventorySlot != -1) {
-            int screenSlot = invSlotToScreen(rows, boxInventorySlot);
-            if (firstEmptyContainerSlot(sh, rows) == -1) {
-                stopTask("末影箱已满，无法归还潜影盒，停止任务.");
-                return;
-            }
-            click(SlotActionType.QUICK_MOVE, screenSlot);
-            boxInventorySlot = -1;
-            return;
-        }
-
-        // 诊断日志：打印末影箱实际内容，确认识别情况
-        int nonEmpty = 0;
-        StringBuilder items = new StringBuilder();
-        for (int i = 0; i <= containerLast(rows); i++) {
-            ItemStack st = sh.getSlot(i).getStack();
-            if (st.isEmpty()) continue;
-            nonEmpty++;
-            if (items.length() < 80) items.append(st.getItem().getName().getString()).append("(").append(st.getCount()).append(") ");
-        }
-        info("存储: 末影箱行数=" + rows + " 非空槽=" + nonEmpty + " [" + items + "]");
-
-        // 重新评估需求 (补货不因中途满足而提前结束：必须遍历末影箱到最后一位才收尾)
-        // 存鞘翅：会话一旦开始，只要身上还有未穿戴的鞘翅就继续拿下一盒存
-        // (一盒存满后腾出的背包格会让 freeSlots 变大，不能用 freeSlots 判定提前结束)
-        if (dumpNeeded) {
-            dumpNeeded = countElytraMain() > 0;
-        }
-        if (!dumpNeeded && !resupplyNeeded) {
-            // 存完鞘翅且无补货需求：确保背包常备一个可用潜影盒 (用户要求"末影箱的空盒再拿一个出来")，
-            // 下一船捡到鞘翅时可直接放盒，不用再开末影箱 (受"自动拿空盒"开关控制)
-            if (autoTakeBox.get() && findBackpackElytraBox() == -1) {
-                int spare = findEcBoxWithSpace(sh, rows);
-                if (spare != -1) {
-                    info("存储: 预取一个潜影盒进背包备用.");
-                    pickEcSlot = spare;
-                    boxPurposeSupply = false;
-                    pickStep = 1;
-                    moveQueue.add(new MoveOp(spare, -1)); // 拾取盒子到光标
-                    return;
-                }
-            }
-            storagePhase = StoragePhase.MINE_EC;
-            storageTick = 0;
-            return;
-        }
-        if (dumpNeeded) {
-            // 优先用背包里可存鞘翅的潜影盒 (鞘翅盒/空盒，跳过补给盒)
-            int bpBox = findBackpackElytraBox();
-            if (bpBox != -1) {
-                boxInventorySlot = bpBox;
-                boxFromInventory = true;
-                pickInvSlot = bpBox; // 记录来源槽位，挖回拾取后优先恢复该槽
-                boxPurposeSupply = false;
-                afterClose = StoragePhase.PLACE_BOX;
-                storagePhase = StoragePhase.CLOSE_SCREEN;
-                storageTick = 0;
-                return;
-            }
-            int ecBox = findEcBoxWithSpace(sh, rows);
-            if (ecBox != -1) {
-                pickEcSlot = ecBox;
-                boxPurposeSupply = false;
-                pickStep = 1;
-                moveQueue.add(new MoveOp(ecBox, -1)); // 拾取盒子到光标
-                return;
-            }
-            // 末影箱全是满盒、背包也没有可用鞘翅盒/空盒 (只剩补给盒或满盒)：
-            // 按用户要求自动下线保护——既不能把鞘翅塞进补给盒，也不能让鞘翅烂在背包
-            info("末影箱与背包均无可用潜影盒 (补给盒已保护)，自动下线.");
-            emergencyExit("FO 鞘翅采集: 末影箱与背包均无空潜影盒，自动下线保护");
-            return;
-        }
-        if (resupplyNeeded) {
-            // 存鞘翅腾空间后重新从头扫描，补给盒 (已过游标) 才能被再次选中继续补货
-            if (resupplyRescan) {
-                resupplyRescan = false;
-                supplyScanStart = 0;
-                info("存储: 存鞘翅腾出空间，从末影箱开头重新扫描补给.");
-            }
-            // 遍历到末影箱最后一位后才收尾：即使中途已经拿齐，也要继续向后遍历
-            if (supplyScanStart > containerLast(rows)) {
-                if (anyDeficit()) {
-                    stopTask("物资不足 (末影箱内已遍历完所有潜影盒)，停止任务.");
-                    return;
-                }
-                info("存储: 补货遍历完成.");
-                resupplyNeeded = false;
-                storagePhase = StoragePhase.MINE_EC;
-                storageTick = 0;
-                return;
-            }
-            // 从扫描游标逐格向后遍历 (游标严格递增，每格最多处理一次)：
-            // 散放物资 (末影箱里的非潜影盒物品) 直接 shift 点击拿进背包；潜影盒走取盒流程
-            List<SupplyRule> rules = parseSupplies();
-            for (int i = supplyScanStart; i <= containerLast(rows); i++) {
-                ItemStack st = sh.getSlot(i).getStack();
-                if (st.isEmpty()) {
-                    supplyScanStart = i + 1;
-                    continue;
-                }
-                if (!isShulkerBox(st)) {
-                    // 散放物资：直接 shift 点击 (服务器自动放进背包空位/合并)，不占光标
-                    if (!takeFailedItems.contains(st.getItem()) && needsItem(st.getItem())) {
-                        supplyScanStart = i + 1;
-                        click(SlotActionType.QUICK_MOVE, i);
-                        info("存储: 从末影箱直接拿取散放物资 " + st.getItem().getName().getString() + ".");
-                    } else {
-                        supplyScanStart = i + 1; // 不需要或拿不到的散放物资：跳过
-                    }
-                    return;
-                }
-                // 潜影盒：盒内有需要的 (仍有缺口) 且未失败的物资才取
-                boolean hasSupply = false;
-                for (SupplyRule r : rules) {
-                    if (!takeFailedItems.contains(r.item) && needsItem(r.item) && shulkerItems(st).contains(r.item)) {
-                        hasSupply = true;
-                        break;
-                    }
-                }
-                if (hasSupply) {
-                    supplyScanStart = i + 1;
-                    pickEcSlot = i;
-                    boxPurposeSupply = true;
-                    pickStep = 1;
-                    moveQueue.add(new MoveOp(i, -1));
-                    return;
-                }
-                supplyScanStart = i + 1; // 这盒没有需要的物资：跳过继续扫
-                return;
-            }
-            // 扫描到尾部但游标还没越界 (理论上不会到这)：直接收尾
-            supplyScanStart = containerLast(rows) + 1;
-            return;
-        }
-        storagePhase = StoragePhase.MINE_EC;
-        storageTick = 0;
-    }
-
-    private void onCloseScreen() {
-        if (isContainerOpen()) {
-            if (storageTick == 1) mc.player.closeHandledScreen();
-            if (storageTick > 40) {
-                stopTask("关闭容器界面超时，停止任务.");
-                return;
-            }
-            return;
-        }
-        if (storageTick < 4) return; // 等服务端处理关闭包
-        storagePhase = afterClose;
-        afterClose = StoragePhase.NONE;
-        storageTick = 0;
-    }
-
-    private void onPlaceBox() {
-        if (storageTick == 1) {
-            if (boxInventorySlot == -1) {
-                stopTask("潜影盒槽位丢失，停止任务.");
-                return;
-            }
-            boxInventorySlot = ensureItemSelected(boxInventorySlot);
-            // 潜影盒：优先找空气格 + 上方有实心方块 → 对着上方方块放置 (挂在它下方)
-            placeCandidates = findBoxPlaceSpots(ecPos);
-            boxPlaceFloorFallback = false;
-            if (placeCandidates.isEmpty()) {
-                // 没有挂放位置 → 直接用后备：空气格 + 下方有实心方块，对着下方方块放置 (顶面敞开，不会被反作弊拦截打开)
-                info("附近没有挂放位置 (空气+上方实心)，改用地板放置.");
-                placeCandidates = findBoxFloorSpots(ecPos);
-                boxPlaceFloorFallback = true;
-            }
-            if (placeCandidates.isEmpty()) {
-                stopTask("找不到放置潜影盒的位置 (需要空气格且上方有方块)，停止任务.");
-                return;
-            }
-            placeIndex = 0;
-            lastPlaceClick = -100;
-            placeClickAttempts = 0;
-        }
-        // 每 8 tick 点击一次，同一位置最多点 2 次，失败换下一个候选位置
-        if (storageTick >= 4 && storageTick - lastPlaceClick >= 8) {
-            if (placeIndex >= placeCandidates.size()) {
-                if (!boxPlaceFloorFallback) {
-                    // 挂放位置全部失败 → 改用地板放置 (顶面敞开，好打开)
-                    info("挂放位置全部放置失败，改用地板放置.");
-                    placeCandidates = findBoxFloorSpots(ecPos);
-                    boxPlaceFloorFallback = true;
-                    placeIndex = 0;
-                    placeClickAttempts = 0;
-                    if (placeCandidates.isEmpty()) {
-                        stopTask("潜影盒放置失败 (找不到地板放置位置)，停止任务.");
-                        return;
-                    }
-                } else {
-                    stopTask("潜影盒放置失败 (已尝试所有候选位置)，停止任务.");
-                    return;
-                }
-            }
-            BlockPos spot = placeCandidates.get(placeIndex);
-            if (mc.player.squaredDistanceTo(spot.getX() + 0.5, spot.getY() + 0.5, spot.getZ() + 0.5) > 16) {
-                if (!PathManagers.get().isPathing()) PathManagers.get().moveTo(spot, false);
-                return;
-            }
-            lastPlaceClick = storageTick;
-            placeClickAttempts++;
-            boxPos = spot;
-            boxBaseline = countBoxes();
-            if (boxPlaceFloorFallback) {
-                // 地板放置：对着下方方块顶面放置 (盒子放在它上面)，同末影箱的放置方式
-                faceBlockForPlace(spot.down(), Direction.UP);
-                interactAt(spot.down(), Direction.UP);
-            } else {
-                // 挂放：视角面对目标格上方的实心方块 (抬头，反作弊校验视线)，face DOWN 会把潜影盒放到它下方的空气格
-                faceBlockForPlace(spot.up(), Direction.DOWN);
-                interactAt(spot.up(), Direction.DOWN);
-            }
-            if (placeClickAttempts >= 2) {
-                placeIndex++;
-                placeClickAttempts = 0;
-            }
-        }
-        if (boxPos != null && isShulkerBlock(mc.world.getBlockState(boxPos))) {
-            PathManagers.get().stop();
-            storagePhase = StoragePhase.OPEN_BOX;
-            storageTick = 0;
-            return;
-        }
-        // 挂放 + 地板放置两轮尝试需要更多时间
-        if (storageTick > 160) {
-            stopTask("潜影盒放置失败 (超时)，停止任务.");
-        }
-    }
-
-    private void onOpenBox() {
-        if (storageTick == 1) {
-            if (boxPos == null || !isShulkerBlock(mc.world.getBlockState(boxPos))) {
-                // 盒子不在原位：挖掉重来 (回末影箱重新取盒)
-                warning("潜影盒不在原位，挖掉重来.");
-                storagePhase = StoragePhase.MINE_BOX;
-                storageTick = 0;
-                return;
-            }
-            standingMovedOff = false;
-        }
-        // 打开前：若玩家站在潜影盒上，先走下来再打开 (站在上面打开会被服务器拒绝/命中判定异常)
-        if (!standingMovedOff && isStandingOnBlock(boxPos)) {
-            BlockPos off = findStandOffSpot(boxPos);
-            if (off != null && !PathManagers.get().isPathing()) {
-                PathManagers.get().moveTo(off, false);
-                info("存储: 玩家站在潜影盒上，先走下来再打开.");
-            }
-            if (isStandingOnBlock(boxPos)) return; // 还没走下来，等 baritone 到位
-            standingMovedOff = true;
-        }
-        // 打开重试：最多 5 次，每次间隔 1 秒 (storageTick 1/21/41/61/81)
-        if (openRetry < 5 && storageTick == 1 + openRetry * 20) {
-            lookAtBoxCenter(); // 对准盒子中心 (不指定面：顶面被盖住时准星也会命中盒子侧面)
-            openRetry++;
-        }
-        // 准星命中盒子后才用 vanilla 右键管线 (Meteor Utils.rightClick → Minecraft.startUseItem)：
-        // 交互包由客户端准星射线 (mc.hitResult) 生成，与视线完全一致，反作弊按视线回溯不会拦截
-        // (之前手工构造点击位置与视线不符，被反作弊拦截导致打不开)
-        if (openRetry > 0 && boxOpenClickTick == -1 && isLookingAtBox()) {
-            boxOpenClickTick = storageTick;
-            Utils.rightClick();
-        } else if (boxOpenClickTick != -1 && !isContainerOpen() && storageTick - boxOpenClickTick > 8) {
-            boxOpenClickTick = -1; // 点完 8 tick 还没开：下一轮重试再点
-        }
-        if (isContainerOpen()) {
-            if (storageTick < 3) return; // 等服务器同步潜影盒内容
-            recoveryAttempts = 0; // 界面恢复成功，清除异常计数
-            storagePhase = boxPurposeSupply ? StoragePhase.TAKE_SUPPLIES : StoragePhase.FILL_BOX;
-            storageTick = 0;
-            openRetry = 0;
-            boxOpenClickTick = -1;
-        } else if (storageTick > 1 + 4 * 20 + 12) {
-            // 5 次都没打开：先检测是否站在潜影盒上，站在上面就先走下来再按抓包流程处理；
-            // 否则挖掉这个盒子，回末影箱重新取盒再试
-            if (isStandingOnBlock(boxPos)) {
-                standingMovedOff = false;
-                storageTick = 0;
-                openRetry = 0;
-                boxOpenClickTick = -1;
-                info("打开潜影盒失败且玩家站在潜影盒上，先走下来再重试.");
-                return;
-            }
-            warning("打开潜影盒失败 (已尝试 5 次)，挖掉重来.");
-            storagePhase = StoragePhase.MINE_BOX;
-            storageTick = 0;
-            openRetry = 0;
-            boxOpenClickTick = -1;
-        }
-    }
-
-    // 把背包里除穿戴外的所有鞘翅存进当前潜影盒 (QUICK_MOVE shift 点击，服务器自动放入盒子，一次一组)
-    private void onFillBox() {
-        var sh = mc.player.currentScreenHandler;
-        int rows = currentRows();
-        if (sh == null || rows <= 0) {
-            // StorageRecovery：界面未同步/异常 → 重试重开潜影盒 (最多 3 次)，不直接停任务
-            if (storageTick < 15) return;
-            recoveryAttempts++;
-            if (recoveryAttempts > 3) {
-                stopTask("潜影盒界面连续异常 (已重试 3 次)，停止任务.");
-                return;
-            }
-            warning("潜影盒界面尚未同步，等待后重新打开 (" + recoveryAttempts + "/3)...");
-            storagePhase = StoragePhase.OPEN_BOX;
-            storageTick = 0;
-            openRetry = 0;
-            boxOpenClickTick = -1;
-            return;
-        }
-        if (storageTick < 3) return; // 等服务器同步潜影盒内容
-        if (!moveIdle()) return;     // 上一组搬运还没完成
-        if (fillIndex == -1) {
-            fillIndex = playerFirst(rows);
-            info("存储: 开始往潜影盒存鞘翅.");
-        }
-        // 上次 shift 点击的槽一直没变化 → 盒子满了 (点击被服务器忽略)，收尾
-        if (fillStuckSlot >= 0) {
-            if (sh.getSlot(fillStuckSlot).getStack().getItem() == Items.ELYTRA) {
-                fillStuckTicks++;
-                if (fillStuckTicks > 20) {
-                    fillIndex = -1;
-                    fillStuckSlot = -1;
-                    fillStuckTicks = 0;
-                    info("存储: 潜影盒已满.");
-                    afterClose = StoragePhase.MINE_BOX;
-                    storagePhase = StoragePhase.CLOSE_SCREEN;
-                    storageTick = 0;
-                }
-                return; // 点击生效需要等服务器同步，期间不重复点
-            }
-            fillStuckSlot = -1;
-            fillStuckTicks = 0;
-        }
-        int src = -1;
-        for (int s = fillIndex; s <= playerLast(rows); s++) {
-            if (sh.getSlot(s).getStack().getItem() == Items.ELYTRA) {
-                src = s;
-                break;
-            }
-        }
-        if (src == -1) {
-            fillIndex = -1;
-            info("存储: 鞘翅已全部存入潜影盒.");
-            afterClose = StoragePhase.MINE_BOX;
-            storagePhase = StoragePhase.CLOSE_SCREEN;
-            storageTick = 0;
-            return;
-        }
-        fillIndex = src + 1;
-        fillStuckSlot = src;
-        fillStuckTicks = 0;
-        click(SlotActionType.QUICK_MOVE, src);
-    }
-
-    // 从当前潜影盒补充物资：仿 SlimefunHelper AutoSteal — 遍历容器槽位 → 匹配物品 → QUICK_MOVE shift 点击，
-    // 服务器自动归位到背包空位/合并；每 tick 重新评估缺口，内容同步晚到也能拿到
-    private void onTakeSupplies() {
-        var sh = mc.player.currentScreenHandler;
-        int rows = currentRows();
-        if (sh == null || rows <= 0) {
-            // StorageRecovery：界面未同步/异常 → 重试重开潜影盒 (最多 3 次)，不直接停任务
-            if (storageTick < 15) return;
-            recoveryAttempts++;
-            if (recoveryAttempts > 3) {
-                stopTask("潜影盒界面连续异常 (已重试 3 次)，停止任务.");
-                return;
-            }
-            warning("潜影盒界面尚未同步，等待后重新打开 (" + recoveryAttempts + "/3)...");
-            storagePhase = StoragePhase.OPEN_BOX;
-            storageTick = 0;
-            openRetry = 0;
-            boxOpenClickTick = -1;
-            return;
-        }
-        if (storageTick < 3) return; // 等服务器同步潜影盒内容
-        if (!moveIdle()) return;     // 上一组搬运 (如腾杂物) 还没完成
-
-        // 找盒内实际存在且还有缺口的规则 (按配置顺序；缺口按"目标库存 batch"计算，拿到 batch 为止)
-        SupplyRule target = null;
-        List<SupplyRule> rules = parseSupplies();
-        for (SupplyRule rule : rules) {
-            if (takeFailedItems.contains(rule.item)) continue;
-            if (rule.batch - countItem(rule.item) <= 0) continue;
-            for (int c = 0; c <= containerLast(rows); c++) {
-                ItemStack st = sh.getSlot(c).getStack();
-                if (!st.isEmpty() && st.getItem() == rule.item) {
-                    target = rule;
-                    break;
-                }
-            }
-            if (target != null) break;
-        }
-
-        if (target != null) {
-            // 扫盒内该物品的堆叠 → shift 点击 (一次一个，防止发包过快)
-            for (int c = 0; c <= containerLast(rows); c++) {
-                ItemStack st = sh.getSlot(c).getStack();
-                if (st.isEmpty() || st.getItem() != target.item) continue;
-                if (takeStuckSlot == c) {
-                    takeStuckTicks++;
-                    if (takeStuckTicks > 30) {
-                        // 一直没动：背包满了 (shift 点击被服务器忽略) → 先把未穿戴的鞘翅放进盒子，再腾杂物，再试
-                        takeStuckSlot = -1;
-                        takeStuckTicks = 0;
-                        int boxFree = firstEmptyContainerSlot(sh, rows);
-                        if (boxFree != -1) {
-                            int elytra = findUnwornElytraSlot(sh, rows);
-                            if (elytra != -1) {
-                                moveQueue.add(new MoveOp(elytra, boxFree));
-                                info("存储: 背包空间不足，先把鞘翅放入盒子腾出空位.");
-                            } else {
-                                int junk = findJunkSlotInPlayer(sh, rows, rules);
-                                if (junk != -1) {
-                                    moveQueue.add(new MoveOp(junk, boxFree));
-                                    info("存储: 背包已满，先把杂物放入盒子腾出空位.");
-                                } else {
-                                    // 无杂物可腾：本会话内不再尝试该物品，避免每 tick 重复点击死循环
-                                    takeFailedItems.add(target.item);
-                                    info("存储: 背包无空位且无杂物可腾，补货 " + target.item.getName().getString() + " 跳过.");
-                                }
-                            }
-                        } else {
-                            takeFailedItems.add(target.item);
-                            info("存储: 盒子已满无法腾位，补货 " + target.item.getName().getString() + " 跳过.");
-                        }
-                    }
-                    return; // 等上一次点击生效
-                }
-                takeStuckSlot = c;
-                takeStuckTicks = 0;
-                click(SlotActionType.QUICK_MOVE, c);
-                return;
-            }
-            // 盒内没有该物品了
-            takeStuckSlot = -1;
-            takeStuckTicks = 0;
-        }
-
-        // 没有缺口，或盒内已无可拿：连续确认 N tick 才收尾 (防屏幕内容同步延迟误判)
-        takeEmptyTicks++;
-        if (takeEmptyTicks < 10) return;
-        takeEmptyTicks = 0;
-        takeStuckSlot = -1;
-        takeStuckTicks = 0;
-        info("存储: 本盒物资已拿取完毕 (所有能拿且需要的).");
-        afterClose = StoragePhase.MINE_BOX;
-        storagePhase = StoragePhase.CLOSE_SCREEN;
-        storageTick = 0;
-    }
-
-    private void onMineBox() {
-        BlockState s = mc.world.getBlockState(boxPos);
-        if (isShulkerBlock(s)) {
-            if (storageTick == 1) {
-                pickupWaitStart = -1;
-                PathManagers.get().stop();
-                // 必须带精准采集工具，否则盒子消失、内容物散落 (baritone 会优先用精准采集工具)
-                if (findSilkTouchSlot() == -1) {
-                    stopTask("需要精准采集工具才能回收潜影盒，停止任务.");
-                    return;
-                }
-                PathManagers.get().mine(s.getBlock());
-                info("用 baritone (精准采集) 挖掘潜影盒.");
-            } else if (storageTick > 600) {
-                stopTask("baritone 挖掘潜影盒超时，停止任务.");
-            }
-            return;
-        }
-        // 挖完：等拾取 (用 baritone 走位到掉落物，走过去自然拾取；手动走路会被 releaseForward 每 tick 取消)
-        if (pickupWaitStart == -1) {
-            pickupWaitStart = storageTick;
-            PathManagers.get().stop(); // 停止挖掘路径，改走去拾取 (只停一次，避免每 tick 杀 baritone 导致走不动)
-        }
-        if (countBoxes() >= boxBaseline) {
-            // 优先恢复到取盒时的玩家槽位 (拾取通常落到取盒时的空槽)，避免背包有多个潜影盒时还错盒子
-            if (pickInvSlot >= 0 && pickInvSlot < 36 && isShulkerBox(mc.player.getInventory().getMainStacks().get(pickInvSlot))) {
-                boxInventorySlot = pickInvSlot;
-            } else {
-                boxInventorySlot = findBackpackShulkerBox();
-            }
-            if (ecPos == null) {
-                // 快捷路径 (未放末影箱)：会话直接结束，无需挖末影箱
-                afterStorageSession();
-                return;
-            }
-            storagePhase = (dumpNeeded || resupplyNeeded) ? StoragePhase.OPEN_EC : StoragePhase.MINE_EC;
-            storageTick = 0;
-            pickupWaitStart = -1;
-            return;
-        }
-        if (storageTick > pickupWaitStart + 200) {
-            warning("潜影盒掉落未拾取，继续任务.");
-            boxInventorySlot = -1;
-            boxFromInventory = false;
-            if (ecPos == null) {
-                // 快捷路径：未放末影箱，直接结束会话
-                afterStorageSession();
-                return;
-            }
-            storagePhase = (dumpNeeded || resupplyNeeded) ? StoragePhase.OPEN_EC : StoragePhase.MINE_EC;
-            storageTick = 0;
-            pickupWaitStart = -1;
-            return;
-        }
-        ItemEntity it = findItemEntityNear(boxPos, 8);
-        if (it != null && !PathManagers.get().isPathing()) {
-            PathManagers.get().moveTo(it.getBlockPos(), false);
-        }
-    }
-
-    private void onMineEc() {
-        BlockState s = mc.world.getBlockState(ecPos);
-        if (isEnderChestBlock(s)) {
-            if (storageTick == 1) {
-                pickupWaitStart = -1;
-                PathManagers.get().stop();
-                // 必须带精准采集工具，否则只会掉黑曜石
-                if (findSilkTouchSlot() == -1) {
-                    stopTask("需要精准采集工具才能回收末影箱，停止任务.");
-                    return;
-                }
-                PathManagers.get().mine(Blocks.ENDER_CHEST);
-                info("用 baritone (精准采集) 挖掘末影箱.");
-            } else if (storageTick > 600) {
-                stopTask("baritone 挖掘末影箱超时，停止任务.");
-            }
-            return;
-        }
-        // 挖完：等拾取 (用 baritone 走位到掉落物，走过去自然拾取)
-        if (pickupWaitStart == -1) {
-            pickupWaitStart = storageTick;
-            PathManagers.get().stop(); // 停止挖掘路径，改走去拾取 (只停一次，避免每 tick 杀 baritone 导致走不动)
-        }
-        if (countItem(Items.ENDER_CHEST) >= ecBaseline) {
-            afterStorageSession();
-            return;
-        }
-        if (storageTick > pickupWaitStart + 400) {
-            warning("末影箱掉落未拾取 (挖末影箱需要精准采集)，继续任务.");
-            afterStorageSession();
-            return;
-        }
-        ItemEntity it = findItemEntityNear(ecPos, 8);
-        if (it != null && !PathManagers.get().isPathing()) {
-            PathManagers.get().moveTo(it.getBlockPos(), false);
-        }
-    }
-
-    // 存储会话结束后的去向：
-    // 船旁 (捡到鞘翅时) 触发的会话 → 先走回降落点，由 finishShip 复查后再起飞，绝不原地起飞撞船；
-    // 降落点/起飞前触发的会话 → 原地起飞 (旧行为，起飞方向已修正)
-    private void afterStorageSession() {
-        storagePhase = StoragePhase.NONE;
-        storageTick = 0;
-        pickupWaitStart = -1;
-        if (state == State.COLLECTING && collectStep == CollectStep.EQUIP) {
-            info("船旁存储会话结束，先走回降落点再起飞.");
-            advance(CollectStep.EXIT_P1);
-        } else {
-            relaunchAfterShip();
-        }
-    }
-
-    // ========== 存储会话工具 ==========
-    private void click(SlotActionType type, int slotId) {
-        var sh = mc.player.currentScreenHandler;
-        if (sh == null) return;
-        mc.interactionManager.clickSlot(sh.syncId, slotId, 0, type, mc.player);
-    }
-
-    private void interactAt(BlockPos pos) {
-        interactAt(pos, Direction.UP);
-    }
-
-    private void interactAt(BlockPos pos, Direction face) {
-        var hit = new BlockHitResult(Vec3d.ofCenter(pos), face, pos, false);
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
-    }
-
-    // 面 ID（FacingLogic.bestFaceIndex 返回值，与 Direction.ID 顺序一致）→ Direction
-    private static Direction faceById(int id) {
-        return switch (id) {
-            case 0 -> Direction.DOWN;
-            case 1 -> Direction.UP;
-            case 2 -> Direction.NORTH;
-            case 3 -> Direction.SOUTH;
-            case 4 -> Direction.WEST;
-            default -> Direction.EAST;
-        };
-    }
-
-    // 把视角转向目标方块面并同步给服务器 (反作弊要求视线与交互点一致，否则放置会被拦截)
-    private void faceBlockForPlace(BlockPos target, Direction face) {
-        double cx = target.getX() + 0.5 + face.getOffsetX() * 0.5;
-        double cy = target.getY() + 0.5 + face.getOffsetY() * 0.5;
-        double cz = target.getZ() + 0.5 + face.getOffsetZ() * 0.5;
-        double dx = cx - mc.player.getX();
-        double dy = cy - (mc.player.getY() + mc.player.getStandingEyeHeight());
-        double dz = cz - mc.player.getZ();
-        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
-        mc.player.setYaw(yaw);
-        mc.player.setPitch(pitch);
-        // 显式发送视角包，让服务器在处理交互包前先看到新视角
-        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
-    }
-
-    // 对准潜影盒中心：交互点不手工指定，交给客户端准星射线 (mc.hitResult) 生成，
-    // 保证与视线完全一致 (反作弊要求视线与交互点一致，顶面被盖住时准星会命中盒子侧面，同样能打开)
-    private void lookAtBoxCenter() {
-        double cx = boxPos.getX() + 0.5;
-        double cy = boxPos.getY() + 0.5;
-        double cz = boxPos.getZ() + 0.5;
-        double dx = cx - mc.player.getX();
-        double dy = cy - (mc.player.getY() + mc.player.getStandingEyeHeight());
-        double dz = cz - mc.player.getZ();
-        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
-        mc.player.setYaw(yaw);
-        mc.player.setPitch(pitch);
-        // 显式发送视角包，让服务器在处理交互包前先看到新视角
-        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
-    }
-
-    // 客户端准星 (crosshair) 是否已命中潜影盒 (盒子需要在玩家视线内且未被遮挡)
-    private boolean isLookingAtBox() {
-        return mc.crosshairTarget instanceof BlockHitResult bhr && bhr.getBlockPos().equals(boxPos);
-    }
-
-    // 玩家是否正站在容器方块上 (脚所在位置上方就是该方块，即人踩在容器顶面)
-    private boolean isStandingOnBlock(BlockPos pos) {
-        if (pos == null) return false;
-        BlockPos feet = mc.player.getBlockPos();
-        return feet.getX() == pos.getX() && feet.getY() == pos.getY() + 1 && feet.getZ() == pos.getZ();
-    }
-
-    // 找一个离开容器方块后的落脚点 (容器四周 3x3 范围内、非容器所在格的空气格)
-    private BlockPos findStandOffSpot(BlockPos pos) {
-        if (pos == null) return null;
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (dx == 0 && dz == 0) continue; // 跳过容器所在格
-                m.set(pos.getX() + dx, pos.getY() + 1, pos.getZ() + dz);
-                if (mc.world.getBlockState(m).isReplaceable()
-                    && !mc.world.getBlockState(m.down()).isReplaceable()) {
+                    if (!this.isEnderChestBlock(this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)m))) continue;
                     return m.toImmutable();
                 }
             }
@@ -2343,444 +1377,1099 @@ supplyScanStart = 0;
         return null;
     }
 
-    private boolean isContainerOpen() {
-        // 按状态判断：当前开的不是玩家自己的物品栏界面，就是打开了某个容器 (末影箱/潜影盒)
-        var sh = mc.player.currentScreenHandler;
-        return sh != null && !(sh instanceof PlayerScreenHandler);
-    }
-
-    // 当前容器界面行数：末影箱 3 行 (GenericContainerScreenHandler)，潜影盒也是 3 行 27 格 (ShulkerBoxScreenHandler)
-    private int currentRows() {
-        var sh = mc.player.currentScreenHandler;
-        if (sh instanceof GenericContainerScreenHandler g) return g.getRows();
-        if (sh instanceof ShulkerBoxScreenHandler) return 3;
-        return -1;
-    }
-
-    // ===== 容器屏幕槽位换算 (行数感知)：容器 0..rows*9-1，玩家主栏 rows*9..rows*9+26，热栏 rows*9+27..rows*9+35 =====
-    private int containerLast(int rows) { return rows * 9 - 1; }
-    private int playerFirst(int rows) { return rows * 9; }
-    private int playerLast(int rows) { return rows * 9 + 35; }
-    private int mainLast(int rows) { return rows * 9 + 26; }
-    private int hotbarScreen(int rows, int invSlot) { return rows * 9 + 27 + invSlot; }
-
-    // 把物品移到热栏并选中，同时把选中槽同步给服务器 (不同步的话服务器放置时用错物品)
-    private int ensureItemSelected(int invSlot) {
-        if (invSlot <= 8) {
-            InvUtils.swap(invSlot, false); // 已在热栏：直接选中并同步
-            return invSlot;
+    private void onOpenEc() {
+        if (this.storageTick == 1) {
+            if (this.ecPos == null || !this.isEnderChestBlock(this.mc.world.getBlockState(this.ecPos))) {
+                this.info("\u672b\u5f71\u7bb1\u4e0d\u5728\u539f\u4f4d\uff0c\u91cd\u65b0\u653e\u7f6e.", new Object[0]);
+                this.storagePhase = StoragePhase.PLACE_EC;
+                this.storageTick = 0;
+                return;
+            }
+            this.standingMovedOff = false;
         }
-        InvUtils.move().from(invSlot).toHotbar(0); // 在背包：移到热栏 0
-        InvUtils.swap(0, false);
-        return 0;
+        if (!this.standingMovedOff && this.isStandingOnBlock(this.ecPos)) {
+            net.minecraft.util.math.BlockPos off = this.findStandOffSpot(this.ecPos);
+            if (off != null && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveTo(off, false);
+                this.info("\u5b58\u50a8: \u73a9\u5bb6\u7ad9\u5728\u672b\u5f71\u7bb1\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u6253\u5f00.", new Object[0]);
+            }
+            if (this.isStandingOnBlock(this.ecPos)) {
+                return;
+            }
+            this.standingMovedOff = true;
+        }
+        if (this.openRetry < 5 && this.storageTick == 1 + this.openRetry * 20) {
+            this.faceBlockForPlace(this.ecPos, net.minecraft.util.math.Direction.UP);
+            this.interactAt(this.ecPos);
+            ++this.openRetry;
+        }
+        if (this.isContainerOpen()) {
+            if (this.storageTick < 3) {
+                return;
+            }
+            this.ecOpenFailCount = 0;
+            this.storagePhase = StoragePhase.PICK_BOX;
+            this.storageTick = 0;
+        } else if (this.storageTick > 93) {
+            if (this.isStandingOnBlock(this.ecPos)) {
+                this.standingMovedOff = false;
+                this.storageTick = 0;
+                this.info("\u6253\u5f00\u672b\u5f71\u7bb1\u5931\u8d25\u4e14\u73a9\u5bb6\u7ad9\u5728\u672b\u5f71\u7bb1\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u91cd\u8bd5.", new Object[0]);
+                return;
+            }
+            this.warning("\u6253\u5f00\u672b\u5f71\u7bb1\u5931\u8d25 (\u5df2\u5c1d\u8bd5 5 \u6b21)\uff0c\u653e\u7f6e\u65b0\u7684\u672b\u5f71\u7bb1\u518d\u8bd5.", new Object[0]);
+            ++this.ecOpenFailCount;
+            this.storagePhase = StoragePhase.PLACE_EC;
+            this.storageTick = 0;
+            this.ecPos = null;
+            this.openRetry = 0;
+        }
     }
 
-    // ===== 点击握手执行器 =====
-    // 客户端 clickSlot 只发包，界面槽位/光标状态要等服务器回包 (1~5 tick) 才更新；
-    // 因此所有搬运点击都进入队列，等光标满足条件后再发下一步，杜绝"读过期状态"导致的误判。
-    private void execMoves() {
-        if (moveState == 0) {
-            if (moveQueue.isEmpty()) return;
-            MoveOp op = moveQueue.poll();
-            moveSrc = op.source;
-            moveDst = op.target;
-            if (moveSrc == -1) {
-                click(PICKUP, moveDst);        // 直接把光标放下到目标槽
-                moveState = 2;
+    private void onPickBox() {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        int rows = this.currentRows();
+        if (sh == null || rows <= 0) {
+            this.stopTask("\u672b\u5f71\u7bb1\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            return;
+        }
+        if (this.storageTick < 3) {
+            return;
+        }
+        if (this.pickStep == 1) {
+            if (!this.moveIdle()) {
+                return;
+            }
+            int emptyScreen = this.firstEmptyPlayerScreenSlot(sh, rows);
+            if (emptyScreen != -1) {
+                this.pickInvSlot = emptyScreen - rows * 9 + 9;
+                this.moveQueue.add(new MoveOp(-1, emptyScreen));
+                this.pickStep = 2;
             } else {
-                click(PICKUP, moveSrc);        // 先拾取
-                moveState = moveDst == -1 ? 3 : 1;
+                this.moveQueue.add(new MoveOp(-1, this.pickEcSlot));
+                this.pickStep = 3;
             }
             return;
         }
-        var sh = mc.player.currentScreenHandler;
-        if (sh == null) return;
-        ItemStack cursor = sh.getCursorStack();
-        if (moveState == 3) {
-            if (!cursor.isEmpty()) moveState = 0;          // 拾取保留完成 (光标持有物品)
-        } else if (moveState == 1) {
-            if (!cursor.isEmpty()) {                       // 光标拿到物品 → 放下到目标槽
-                click(PICKUP, moveDst);
-                moveState = 2;
+        if (this.pickStep == 2) {
+            if (!this.moveIdle()) {
+                return;
             }
-        } else if (moveState == 2) {
-            if (cursor.isEmpty()) moveState = 0;           // 放下完成
+            this.boxInventorySlot = this.pickInvSlot;
+            this.boxFromInventory = false;
+            this.pickStep = 0;
+            this.afterClose = StoragePhase.PLACE_BOX;
+            this.storagePhase = StoragePhase.CLOSE_SCREEN;
+            this.storageTick = 0;
+            return;
+        }
+        if (this.pickStep == 3) {
+            if (!this.moveIdle()) {
+                return;
+            }
+            this.pickStep = 0;
+            if (this.boxPurposeSupply) {
+                this.stopTask("\u80cc\u5305\u65e0\u7a7a\u4f4d\u653e\u6f5c\u5f71\u76d2\uff0c\u65e0\u6cd5\u8865\u8d27\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.stopTask("\u80cc\u5305\u65e0\u7a7a\u4f4d\u653e\u6f5c\u5f71\u76d2\uff0c\u65e0\u6cd5\u5b58\u9798\u7fc5\uff0c\u505c\u6b62\u4efb\u52a1.");
+            return;
+        }
+        if (!this.moveIdle()) {
+            return;
+        }
+        if (this.boxInventorySlot != -1) {
+            int screenSlot = this.invSlotToScreen(rows, this.boxInventorySlot);
+            if (this.firstEmptyContainerSlot(sh, rows) == -1) {
+                this.stopTask("\u672b\u5f71\u7bb1\u5df2\u6ee1\uff0c\u65e0\u6cd5\u5f52\u8fd8\u6f5c\u5f71\u76d2\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, screenSlot);
+            this.boxInventorySlot = -1;
+            return;
+        }
+        int nonEmpty = 0;
+        StringBuilder items = new StringBuilder();
+        for (int i = 0; i <= this.containerLast(rows); ++i) {
+            net.minecraft.item.ItemStack st = sh.getSlot(i).getStack();
+            if (st.isEmpty()) continue;
+            ++nonEmpty;
+            if (items.length() >= 80) continue;
+            items.append(st.getItem().getName().getString()).append("(").append(st.getCount()).append(") ");
+        }
+        this.info("\u5b58\u50a8: \u672b\u5f71\u7bb1\u884c\u6570=" + rows + " \u975e\u7a7a\u69fd=" + nonEmpty + " [" + String.valueOf(items) + "]", new Object[0]);
+        if (this.dumpNeeded) {
+            boolean bl = this.dumpNeeded = this.countElytraMain() > 0;
+        }
+        if (!this.dumpNeeded && !this.resupplyNeeded) {
+            this.storagePhase = StoragePhase.MINE_EC;
+            this.storageTick = 0;
+            return;
+        }
+        if (this.dumpNeeded) {
+            int bpBox = this.findBackpackBoxWithSpace();
+            if (bpBox != -1) {
+                this.boxInventorySlot = bpBox;
+                this.boxFromInventory = true;
+                this.pickInvSlot = bpBox;
+                this.boxPurposeSupply = false;
+                this.afterClose = StoragePhase.PLACE_BOX;
+                this.storagePhase = StoragePhase.CLOSE_SCREEN;
+                this.storageTick = 0;
+                return;
+            }
+            int ecBox = this.findEcBoxWithSpace(sh, rows);
+            if (ecBox != -1) {
+                this.pickEcSlot = ecBox;
+                this.boxPurposeSupply = false;
+                this.pickStep = 1;
+                this.moveQueue.add(new MoveOp(ecBox, -1));
+                return;
+            }
+            if (this.freeSlots() == 0) {
+                this.completeTask("\u80cc\u5305\u4e0e\u672b\u5f71\u7bb1\u5168\u90e8\u653e\u6ee1\uff0c\u4efb\u52a1\u5b8c\u6210.");
+                return;
+            }
+            this.info("\u6ca1\u6709\u7a7a\u4f4d\u6f5c\u5f71\u76d2\uff0c\u9798\u7fc5\u7559\u5728\u80cc\u5305.", new Object[0]);
+            this.dumpNeeded = false;
+        }
+        if (this.resupplyNeeded) {
+            if (this.resupplyRescan) {
+                this.resupplyRescan = false;
+                this.supplyScanStart = 0;
+                this.info("\u5b58\u50a8: \u5b58\u9798\u7fc5\u817e\u51fa\u7a7a\u95f4\uff0c\u4ece\u672b\u5f71\u7bb1\u5f00\u5934\u91cd\u65b0\u626b\u63cf\u8865\u7ed9.", new Object[0]);
+            }
+            if (this.supplyScanStart > this.containerLast(rows)) {
+                if (this.anyDeficit()) {
+                    this.stopTask("\u7269\u8d44\u4e0d\u8db3 (\u672b\u5f71\u7bb1\u5185\u5df2\u904d\u5386\u5b8c\u6240\u6709\u6f5c\u5f71\u76d2)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    return;
+                }
+                this.info("\u5b58\u50a8: \u8865\u8d27\u904d\u5386\u5b8c\u6210.", new Object[0]);
+                this.resupplyNeeded = false;
+                this.storagePhase = StoragePhase.MINE_EC;
+                this.storageTick = 0;
+                return;
+            }
+            List<SupplyRule> rules = this.parseSupplies();
+            for (int i = this.supplyScanStart; i <= this.containerLast(rows); ++i) {
+                net.minecraft.item.ItemStack st = sh.getSlot(i).getStack();
+                if (!st.isEmpty()) {
+                    if (!this.isShulkerBox(st)) {
+                        if (!this.takeFailedItems.contains(st.getItem()) && this.needsItem(st.getItem())) {
+                            this.supplyScanStart = i + 1;
+                            this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, i);
+                            this.info("\u5b58\u50a8: \u4ece\u672b\u5f71\u7bb1\u76f4\u63a5\u62ff\u53d6\u6563\u653e\u7269\u8d44 " + st.getItem().getName().getString() + ".", new Object[0]);
+                        } else {
+                            this.supplyScanStart = i + 1;
+                        }
+                        return;
+                    }
+                    boolean hasSupply = false;
+                    for (SupplyRule r : rules) {
+                        if (this.takeFailedItems.contains(r.item) || !this.needsItem(r.item) || !this.shulkerItems(st).contains(r.item)) continue;
+                        hasSupply = true;
+                        break;
+                    }
+                    if (hasSupply) {
+                        this.supplyScanStart = i + 1;
+                        this.pickEcSlot = i;
+                        this.boxPurposeSupply = true;
+                        this.pickStep = 1;
+                        this.moveQueue.add(new MoveOp(i, -1));
+                        return;
+                    }
+                    this.supplyScanStart = i + 1;
+                    return;
+                }
+                this.supplyScanStart = i + 1;
+            }
+            this.supplyScanStart = this.containerLast(rows) + 1;
+            return;
+        }
+        this.storagePhase = StoragePhase.MINE_EC;
+        this.storageTick = 0;
+    }
+
+    private void onCloseScreen() {
+        if (this.isContainerOpen()) {
+            if (this.storageTick == 1) {
+                this.mc.player.closeHandledScreen();
+            }
+            if (this.storageTick > 40) {
+                this.stopTask("\u5173\u95ed\u5bb9\u5668\u754c\u9762\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            return;
+        }
+        if (this.storageTick < 4) {
+            return;
+        }
+        this.storagePhase = this.afterClose;
+        this.afterClose = StoragePhase.NONE;
+        this.storageTick = 0;
+    }
+
+    private void onPlaceBox() {
+        if (this.storageTick == 1) {
+            if (this.boxInventorySlot == -1) {
+                this.stopTask("\u6f5c\u5f71\u76d2\u69fd\u4f4d\u4e22\u5931\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.boxInventorySlot = this.ensureItemSelected(this.boxInventorySlot);
+            this.placeCandidates = this.findBoxPlaceSpots(this.ecPos);
+            this.boxPlaceFloorFallback = false;
+            if (this.placeCandidates.isEmpty()) {
+                this.info("\u9644\u8fd1\u6ca1\u6709\u6302\u653e\u4f4d\u7f6e (\u7a7a\u6c14+\u4e0a\u65b9\u5b9e\u5fc3)\uff0c\u6539\u7528\u5730\u677f\u653e\u7f6e.", new Object[0]);
+                this.placeCandidates = this.findBoxFloorSpots(this.ecPos);
+                this.boxPlaceFloorFallback = true;
+            }
+            if (this.placeCandidates.isEmpty()) {
+                this.stopTask("\u627e\u4e0d\u5230\u653e\u7f6e\u6f5c\u5f71\u76d2\u7684\u4f4d\u7f6e (\u9700\u8981\u7a7a\u6c14\u683c\u4e14\u4e0a\u65b9\u6709\u65b9\u5757)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                return;
+            }
+            this.placeIndex = 0;
+            this.lastPlaceClick = -100;
+            this.placeClickAttempts = 0;
+        }
+        if (this.storageTick >= 4 && this.storageTick - this.lastPlaceClick >= 8) {
+            net.minecraft.util.math.BlockPos spot;
+            if (this.placeIndex >= this.placeCandidates.size()) {
+                if (!this.boxPlaceFloorFallback) {
+                    this.info("\u6302\u653e\u4f4d\u7f6e\u5168\u90e8\u653e\u7f6e\u5931\u8d25\uff0c\u6539\u7528\u5730\u677f\u653e\u7f6e.", new Object[0]);
+                    this.placeCandidates = this.findBoxFloorSpots(this.ecPos);
+                    this.boxPlaceFloorFallback = true;
+                    this.placeIndex = 0;
+                    this.placeClickAttempts = 0;
+                    if (this.placeCandidates.isEmpty()) {
+                        this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u627e\u4e0d\u5230\u5730\u677f\u653e\u7f6e\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                        return;
+                    }
+                } else {
+                    this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u5df2\u5c1d\u8bd5\u6240\u6709\u5019\u9009\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    return;
+                }
+            }
+            if (this.mc.player.squaredDistanceTo((double)(spot = this.placeCandidates.get(this.placeIndex)).getX() + 0.5, (double)spot.getY() + 0.5, (double)spot.getZ() + 0.5) > 16.0) {
+                if (!PathManagers.get().isPathing()) {
+                    PathManagers.get().moveTo(spot, false);
+                }
+                return;
+            }
+            this.lastPlaceClick = this.storageTick;
+            ++this.placeClickAttempts;
+            this.boxPos = spot;
+            this.boxBaseline = this.countBoxes();
+            if (this.boxPlaceFloorFallback) {
+                this.faceBlockForPlace(spot.down(), net.minecraft.util.math.Direction.UP);
+                this.interactAt(spot.down(), net.minecraft.util.math.Direction.UP);
+            } else {
+                this.faceBlockForPlace(spot.up(), net.minecraft.util.math.Direction.DOWN);
+                this.interactAt(spot.up(), net.minecraft.util.math.Direction.DOWN);
+            }
+            if (this.placeClickAttempts >= 2) {
+                ++this.placeIndex;
+                this.placeClickAttempts = 0;
+            }
+        }
+        if (this.boxPos != null && this.isShulkerBlock(this.mc.world.getBlockState(this.boxPos))) {
+            PathManagers.get().stop();
+            this.storagePhase = StoragePhase.OPEN_BOX;
+            this.storageTick = 0;
+            return;
+        }
+        if (this.storageTick > 160) {
+            this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u8d85\u65f6)\uff0c\u505c\u6b62\u4efb\u52a1.");
+        }
+    }
+
+    private void onOpenBox() {
+        if (this.storageTick == 1) {
+            if (this.boxPos == null || !this.isShulkerBlock(this.mc.world.getBlockState(this.boxPos))) {
+                this.warning("\u6f5c\u5f71\u76d2\u4e0d\u5728\u539f\u4f4d\uff0c\u6316\u6389\u91cd\u6765.", new Object[0]);
+                this.storagePhase = StoragePhase.MINE_BOX;
+                this.storageTick = 0;
+                return;
+            }
+            this.standingMovedOff = false;
+        }
+        if (!this.standingMovedOff && this.isStandingOnBlock(this.boxPos)) {
+            net.minecraft.util.math.BlockPos off = this.findStandOffSpot(this.boxPos);
+            if (off != null && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveTo(off, false);
+                this.info("\u5b58\u50a8: \u73a9\u5bb6\u7ad9\u5728\u6f5c\u5f71\u76d2\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u6253\u5f00.", new Object[0]);
+            }
+            if (this.isStandingOnBlock(this.boxPos)) {
+                return;
+            }
+            this.standingMovedOff = true;
+        }
+        if (this.openRetry < 5 && this.storageTick == 1 + this.openRetry * 20) {
+            this.lookAtBoxCenter();
+            ++this.openRetry;
+        }
+        if (this.openRetry > 0 && this.boxOpenClickTick == -1 && this.isLookingAtBox()) {
+            this.boxOpenClickTick = this.storageTick;
+            Utils.rightClick();
+        } else if (this.boxOpenClickTick != -1 && !this.isContainerOpen() && this.storageTick - this.boxOpenClickTick > 8) {
+            this.boxOpenClickTick = -1;
+        }
+        if (this.isContainerOpen()) {
+            if (this.storageTick < 3) {
+                return;
+            }
+            this.storagePhase = this.boxPurposeSupply ? StoragePhase.TAKE_SUPPLIES : StoragePhase.FILL_BOX;
+            this.storageTick = 0;
+            this.openRetry = 0;
+            this.boxOpenClickTick = -1;
+        } else if (this.storageTick > 93) {
+            if (this.isStandingOnBlock(this.boxPos)) {
+                this.standingMovedOff = false;
+                this.storageTick = 0;
+                this.openRetry = 0;
+                this.boxOpenClickTick = -1;
+                this.info("\u6253\u5f00\u6f5c\u5f71\u76d2\u5931\u8d25\u4e14\u73a9\u5bb6\u7ad9\u5728\u6f5c\u5f71\u76d2\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u91cd\u8bd5.", new Object[0]);
+                return;
+            }
+            this.warning("\u6253\u5f00\u6f5c\u5f71\u76d2\u5931\u8d25 (\u5df2\u5c1d\u8bd5 5 \u6b21)\uff0c\u6316\u6389\u91cd\u6765.", new Object[0]);
+            this.storagePhase = StoragePhase.MINE_BOX;
+            this.storageTick = 0;
+            this.openRetry = 0;
+            this.boxOpenClickTick = -1;
+        }
+    }
+
+    private void onFillBox() {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        int rows = this.currentRows();
+        if (sh == null || rows <= 0) {
+            this.stopTask("\u6f5c\u5f71\u76d2\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            return;
+        }
+        if (this.storageTick < 3) {
+            return;
+        }
+        if (!this.moveIdle()) {
+            return;
+        }
+        if (this.fillIndex == -1) {
+            this.fillIndex = this.playerFirst(rows);
+            this.info("\u5b58\u50a8: \u5f00\u59cb\u5f80\u6f5c\u5f71\u76d2\u5b58\u9798\u7fc5.", new Object[0]);
+        }
+        if (this.fillStuckSlot >= 0) {
+            if (sh.getSlot(this.fillStuckSlot).getStack().getItem() == net.minecraft.item.Items.ELYTRA) {
+                ++this.fillStuckTicks;
+                if (this.fillStuckTicks > 20) {
+                    this.fillIndex = -1;
+                    this.fillStuckSlot = -1;
+                    this.fillStuckTicks = 0;
+                    this.info("\u5b58\u50a8: \u6f5c\u5f71\u76d2\u5df2\u6ee1.", new Object[0]);
+                    this.afterClose = StoragePhase.MINE_BOX;
+                    this.storagePhase = StoragePhase.CLOSE_SCREEN;
+                    this.storageTick = 0;
+                }
+                return;
+            }
+            this.fillStuckSlot = -1;
+            this.fillStuckTicks = 0;
+        }
+        int src = -1;
+        for (int s = this.fillIndex; s <= this.playerLast(rows); ++s) {
+            if (sh.getSlot(s).getStack().getItem() != net.minecraft.item.Items.ELYTRA) continue;
+            src = s;
+            break;
+        }
+        if (src == -1) {
+            this.fillIndex = -1;
+            this.info("\u5b58\u50a8: \u9798\u7fc5\u5df2\u5168\u90e8\u5b58\u5165\u6f5c\u5f71\u76d2.", new Object[0]);
+            this.afterClose = StoragePhase.MINE_BOX;
+            this.storagePhase = StoragePhase.CLOSE_SCREEN;
+            this.storageTick = 0;
+            return;
+        }
+        this.fillIndex = src + 1;
+        this.fillStuckSlot = src;
+        this.fillStuckTicks = 0;
+        this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, src);
+    }
+
+    private void onTakeSupplies() {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        int rows = this.currentRows();
+        if (sh == null || rows <= 0) {
+            this.stopTask("\u6f5c\u5f71\u76d2\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            return;
+        }
+        if (this.storageTick < 3) {
+            return;
+        }
+        if (!this.moveIdle()) {
+            return;
+        }
+        SupplyRule target = null;
+        List<SupplyRule> rules = this.parseSupplies();
+        for (SupplyRule rule : rules) {
+            if (this.takeFailedItems.contains(rule.item) || rule.batch - this.countItem(rule.item) <= 0) continue;
+            for (int c = 0; c <= this.containerLast(rows); ++c) {
+                net.minecraft.item.ItemStack st = sh.getSlot(c).getStack();
+                if (st.isEmpty() || st.getItem() != rule.item) continue;
+                target = rule;
+                break;
+            }
+            if (target == null) continue;
+            break;
+        }
+        if (target != null) {
+            for (int c = 0; c <= this.containerLast(rows); ++c) {
+                net.minecraft.item.ItemStack st = sh.getSlot(c).getStack();
+                if (st.isEmpty() || st.getItem() != target.item) continue;
+                if (this.takeStuckSlot == c) {
+                    ++this.takeStuckTicks;
+                    if (this.takeStuckTicks > 30) {
+                        this.takeStuckSlot = -1;
+                        this.takeStuckTicks = 0;
+                        int boxFree = this.firstEmptyContainerSlot(sh, rows);
+                        if (boxFree != -1) {
+                            int elytra = this.findUnwornElytraSlot(sh, rows);
+                            if (elytra != -1) {
+                                this.moveQueue.add(new MoveOp(elytra, boxFree));
+                                this.info("\u5b58\u50a8: \u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u5148\u628a\u9798\u7fc5\u653e\u5165\u76d2\u5b50\u817e\u51fa\u7a7a\u4f4d.", new Object[0]);
+                            } else {
+                                int junk = this.findJunkSlotInPlayer(sh, rows, rules);
+                                if (junk != -1) {
+                                    this.moveQueue.add(new MoveOp(junk, boxFree));
+                                    this.info("\u5b58\u50a8: \u80cc\u5305\u5df2\u6ee1\uff0c\u5148\u628a\u6742\u7269\u653e\u5165\u76d2\u5b50\u817e\u51fa\u7a7a\u4f4d.", new Object[0]);
+                                } else {
+                                    this.takeFailedItems.add(target.item);
+                                    this.info("\u5b58\u50a8: \u80cc\u5305\u65e0\u7a7a\u4f4d\u4e14\u65e0\u6742\u7269\u53ef\u817e\uff0c\u8865\u8d27 " + target.item.getName().getString() + " \u8df3\u8fc7.", new Object[0]);
+                                }
+                            }
+                        } else {
+                            this.takeFailedItems.add(target.item);
+                            this.info("\u5b58\u50a8: \u76d2\u5b50\u5df2\u6ee1\u65e0\u6cd5\u817e\u4f4d\uff0c\u8865\u8d27 " + target.item.getName().getString() + " \u8df3\u8fc7.", new Object[0]);
+                        }
+                    }
+                    return;
+                }
+                this.takeStuckSlot = c;
+                this.takeStuckTicks = 0;
+                this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, c);
+                return;
+            }
+            this.takeStuckSlot = -1;
+            this.takeStuckTicks = 0;
+        }
+        ++this.takeEmptyTicks;
+        if (this.takeEmptyTicks < 10) {
+            return;
+        }
+        this.takeEmptyTicks = 0;
+        this.takeStuckSlot = -1;
+        this.takeStuckTicks = 0;
+        this.info("\u5b58\u50a8: \u672c\u76d2\u7269\u8d44\u5df2\u62ff\u53d6\u5b8c\u6bd5 (\u6240\u6709\u80fd\u62ff\u4e14\u9700\u8981\u7684).", new Object[0]);
+        this.afterClose = StoragePhase.MINE_BOX;
+        this.storagePhase = StoragePhase.CLOSE_SCREEN;
+        this.storageTick = 0;
+    }
+
+    private void onMineBox() {
+        net.minecraft.block.BlockState s = this.mc.world.getBlockState(this.boxPos);
+        if (this.isShulkerBlock(s)) {
+            if (this.storageTick == 1) {
+                this.pickupWaitStart = -1;
+                PathManagers.get().stop();
+                if (this.findSilkTouchSlot() == -1) {
+                    this.stopTask("\u9700\u8981\u7cbe\u51c6\u91c7\u96c6\u5de5\u5177\u624d\u80fd\u56de\u6536\u6f5c\u5f71\u76d2\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    return;
+                }
+                PathManagers.get().mine(s.getBlock());
+                this.info("\u7528 baritone (\u7cbe\u51c6\u91c7\u96c6) \u6316\u6398\u6f5c\u5f71\u76d2.", new Object[0]);
+            } else if (this.storageTick > 600) {
+                this.stopTask("baritone \u6316\u6398\u6f5c\u5f71\u76d2\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+            }
+            return;
+        }
+        if (this.pickupWaitStart == -1) {
+            this.pickupWaitStart = this.storageTick;
+            PathManagers.get().stop();
+        }
+        if (this.countBoxes() >= this.boxBaseline) {
+            this.boxInventorySlot = this.pickInvSlot >= 0 && this.pickInvSlot < 36 && this.isShulkerBox((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(this.pickInvSlot)) ? this.pickInvSlot : this.findBackpackShulkerBox();
+            this.storagePhase = this.dumpNeeded || this.resupplyNeeded ? StoragePhase.OPEN_EC : StoragePhase.MINE_EC;
+            this.storageTick = 0;
+            this.pickupWaitStart = -1;
+            return;
+        }
+        if (this.storageTick > this.pickupWaitStart + 200) {
+            this.warning("\u6f5c\u5f71\u76d2\u6389\u843d\u672a\u62fe\u53d6\uff0c\u7ee7\u7eed\u4efb\u52a1.", new Object[0]);
+            this.boxInventorySlot = -1;
+            this.boxFromInventory = false;
+            this.storagePhase = this.dumpNeeded || this.resupplyNeeded ? StoragePhase.OPEN_EC : StoragePhase.MINE_EC;
+            this.storageTick = 0;
+            this.pickupWaitStart = -1;
+            return;
+        }
+        net.minecraft.entity.ItemEntity it = this.findItemEntityNear(this.boxPos, 8.0);
+        if (it != null && !PathManagers.get().isPathing()) {
+            PathManagers.get().moveTo(it.getBlockPos(), false);
+        }
+    }
+
+    private void onMineEc() {
+        net.minecraft.block.BlockState s = this.mc.world.getBlockState(this.ecPos);
+        if (this.isEnderChestBlock(s)) {
+            if (this.storageTick == 1) {
+                this.pickupWaitStart = -1;
+                PathManagers.get().stop();
+                if (this.findSilkTouchSlot() == -1) {
+                    this.stopTask("\u9700\u8981\u7cbe\u51c6\u91c7\u96c6\u5de5\u5177\u624d\u80fd\u56de\u6536\u672b\u5f71\u7bb1\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    return;
+                }
+                PathManagers.get().mine(net.minecraft.block.Blocks.ENDER_CHEST);
+                this.info("\u7528 baritone (\u7cbe\u51c6\u91c7\u96c6) \u6316\u6398\u672b\u5f71\u7bb1.", new Object[0]);
+            } else if (this.storageTick > 600) {
+                this.stopTask("baritone \u6316\u6398\u672b\u5f71\u7bb1\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+            }
+            return;
+        }
+        if (this.pickupWaitStart == -1) {
+            this.pickupWaitStart = this.storageTick;
+            PathManagers.get().stop();
+        }
+        if (this.countItem(net.minecraft.item.Items.ENDER_CHEST) >= this.ecBaseline) {
+            this.afterStorageSession();
+            return;
+        }
+        if (this.storageTick > this.pickupWaitStart + 400) {
+            this.warning("\u672b\u5f71\u7bb1\u6389\u843d\u672a\u62fe\u53d6 (\u6316\u672b\u5f71\u7bb1\u9700\u8981\u7cbe\u51c6\u91c7\u96c6)\uff0c\u7ee7\u7eed\u4efb\u52a1.", new Object[0]);
+            this.afterStorageSession();
+            return;
+        }
+        net.minecraft.entity.ItemEntity it = this.findItemEntityNear(this.ecPos, 8.0);
+        if (it != null && !PathManagers.get().isPathing()) {
+            PathManagers.get().moveTo(it.getBlockPos(), false);
+        }
+    }
+
+    private void afterStorageSession() {
+        this.storagePhase = StoragePhase.NONE;
+        this.storageTick = 0;
+        this.pickupWaitStart = -1;
+        if (this.state == State.COLLECTING && this.collectStep == CollectStep.EQUIP) {
+            this.info("\u8239\u65c1\u5b58\u50a8\u4f1a\u8bdd\u7ed3\u675f\uff0c\u5148\u8d70\u56de\u964d\u843d\u70b9\u518d\u8d77\u98de.", new Object[0]);
+            this.advance(CollectStep.EXIT_P1);
+        } else {
+            this.relaunchAfterShip();
+        }
+    }
+
+    private void click(net.minecraft.screen.slot.SlotActionType type, int slotId) {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        if (sh == null) {
+            return;
+        }
+        this.mc.interactionManager.clickSlot(sh.syncId, slotId, 0, type, (net.minecraft.entity.player.PlayerEntity)this.mc.player);
+    }
+
+    private void interactAt(net.minecraft.util.math.BlockPos pos) {
+        this.interactAt(pos, net.minecraft.util.math.Direction.UP);
+    }
+
+    private void interactAt(net.minecraft.util.math.BlockPos pos, net.minecraft.util.math.Direction face) {
+        net.minecraft.util.hit.BlockHitResult hit = new net.minecraft.util.hit.BlockHitResult(net.minecraft.util.math.Vec3d.ofCenter((net.minecraft.util.math.Vec3i)pos), face, pos, false);
+        this.mc.interactionManager.interactBlock(this.mc.player, net.minecraft.util.Hand.MAIN_HAND, hit);
+    }
+
+    private void faceBlockForPlace(net.minecraft.util.math.BlockPos target, net.minecraft.util.math.Direction face) {
+        double cx = (double)target.getX() + 0.5 + (double)face.getOffsetX() * 0.5;
+        double cy = (double)target.getY() + 0.5 + (double)face.getOffsetY() * 0.5;
+        double cz = (double)target.getZ() + 0.5 + (double)face.getOffsetZ() * 0.5;
+        double dx = cx - this.mc.player.getX();
+        double dy = cy - (this.mc.player.getY() + (double)this.mc.player.getStandingEyeHeight());
+        double dz = cz - this.mc.player.getZ();
+        float yaw = (float)Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float)(-Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz))));
+        this.mc.player.setYaw(yaw);
+        this.mc.player.setPitch(pitch);
+        this.mc.player.networkHandler.sendPacket((net.minecraft.network.packet.Packet)new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, this.mc.player.isOnGround(), false));
+    }
+
+    private void lookAtBoxCenter() {
+        double cx = (double)this.boxPos.getX() + 0.5;
+        double cy = (double)this.boxPos.getY() + 0.5;
+        double cz = (double)this.boxPos.getZ() + 0.5;
+        double dx = cx - this.mc.player.getX();
+        double dy = cy - (this.mc.player.getY() + (double)this.mc.player.getStandingEyeHeight());
+        double dz = cz - this.mc.player.getZ();
+        float yaw = (float)Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float)(-Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz))));
+        this.mc.player.setYaw(yaw);
+        this.mc.player.setPitch(pitch);
+        this.mc.player.networkHandler.sendPacket((net.minecraft.network.packet.Packet)new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, this.mc.player.isOnGround(), false));
+    }
+
+    private boolean isLookingAtBox() {
+        net.minecraft.util.hit.BlockHitResult bhr;
+        net.minecraft.util.hit.HitResult hit = this.mc.crosshairTarget;
+        return hit instanceof net.minecraft.util.hit.BlockHitResult && (bhr = (net.minecraft.util.hit.BlockHitResult)hit).getBlockPos().equals(this.boxPos);
+    }
+
+    private boolean isStandingOnBlock(net.minecraft.util.math.BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        net.minecraft.util.math.BlockPos feet = this.mc.player.getBlockPos();
+        return feet.getX() == pos.getX() && feet.getY() == pos.getY() + 1 && feet.getZ() == pos.getZ();
+    }
+
+    private net.minecraft.util.math.BlockPos findStandOffSpot(net.minecraft.util.math.BlockPos pos) {
+        if (pos == null) {
+            return null;
+        }
+        net.minecraft.util.math.BlockPos.Mutable m = new net.minecraft.util.math.BlockPos.Mutable();
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dz = -2; dz <= 2; ++dz) {
+                if (dx == 0 && dz == 0) continue;
+                m.set(pos.getX() + dx, pos.getY() + 1, pos.getZ() + dz);
+                if (!this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)m).isReplaceable() || this.mc.world.getBlockState(m.down()).isReplaceable()) continue;
+                return m.toImmutable();
+            }
+        }
+        return null;
+    }
+
+    private boolean isContainerOpen() {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        return sh != null && !(sh instanceof net.minecraft.screen.PlayerScreenHandler);
+    }
+
+    private int currentRows() {
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        if (sh instanceof net.minecraft.screen.GenericContainerScreenHandler) {
+            net.minecraft.screen.GenericContainerScreenHandler g = (net.minecraft.screen.GenericContainerScreenHandler)sh;
+            return g.getRows();
+        }
+        if (sh instanceof net.minecraft.screen.ShulkerBoxScreenHandler) {
+            return 3;
+        }
+        return -1;
+    }
+
+    private int containerLast(int rows) {
+        return rows * 9 - 1;
+    }
+
+    private int playerFirst(int rows) {
+        return rows * 9;
+    }
+
+    private int playerLast(int rows) {
+        return rows * 9 + 35;
+    }
+
+    private int mainLast(int rows) {
+        return rows * 9 + 26;
+    }
+
+    private int hotbarScreen(int rows, int invSlot) {
+        return rows * 9 + 27 + invSlot;
+    }
+
+    private int ensureItemSelected(int invSlot) {
+        if (invSlot <= 8) {
+            InvUtils.swap((int)invSlot, (boolean)false);
+            return invSlot;
+        }
+        InvUtils.move().from(invSlot).toHotbar(0);
+        InvUtils.swap((int)0, (boolean)false);
+        return 0;
+    }
+
+    private void execMoves() {
+        if (this.moveState == 0) {
+            if (this.moveQueue.isEmpty()) {
+                return;
+            }
+            MoveOp op = this.moveQueue.poll();
+            this.moveSrc = op.source;
+            this.moveDst = op.target;
+            if (this.moveSrc == -1) {
+                this.click(net.minecraft.screen.slot.SlotActionType.PICKUP, this.moveDst);
+                this.moveState = 2;
+            } else {
+                this.click(net.minecraft.screen.slot.SlotActionType.PICKUP, this.moveSrc);
+                this.moveState = this.moveDst == -1 ? 3 : 1;
+            }
+            return;
+        }
+        net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
+        if (sh == null) {
+            return;
+        }
+        net.minecraft.item.ItemStack cursor = sh.getCursorStack();
+        if (this.moveState == 3) {
+            if (!cursor.isEmpty()) {
+                this.moveState = 0;
+            }
+        } else if (this.moveState == 1) {
+            if (!cursor.isEmpty()) {
+                this.click(net.minecraft.screen.slot.SlotActionType.PICKUP, this.moveDst);
+                this.moveState = 2;
+            }
+        } else if (this.moveState == 2 && cursor.isEmpty()) {
+            this.moveState = 0;
         }
     }
 
     private boolean moveIdle() {
-        return moveState == 0 && moveQueue.isEmpty();
+        return this.moveState == 0 && this.moveQueue.isEmpty();
     }
 
     private int invSlotToScreen(int rows, int invSlot) {
-        return invSlot <= 8 ? hotbarScreen(rows, invSlot) : rows * 9 + (invSlot - 9);
+        return invSlot <= 8 ? this.hotbarScreen(rows, invSlot) : rows * 9 + (invSlot - 9);
     }
 
-    private int firstEmptyContainerSlot(ScreenHandler sh, int rows) {
-        for (int i = 0; i <= containerLast(rows); i++) {
-            if (sh.getSlot(i).getStack().isEmpty()) return i;
-        }
-        return -1;
-    }
-
-    private int firstEmptyPlayerScreenSlot(ScreenHandler sh, int rows) {
-        for (int i = playerFirst(rows); i <= playerLast(rows); i++) {
-            if (sh.getSlot(i).getStack().isEmpty()) return i;
-        }
-        return -1;
-    }
-
-    private int findMergeSlotInPlayer(ScreenHandler sh, int rows, Item item) {
-        for (int i = playerFirst(rows); i <= playerLast(rows); i++) {
-            ItemStack st = sh.getSlot(i).getStack();
-            if (st.getItem() == item && st.getCount() < st.getMaxCount()) return i;
-        }
-        return -1;
-    }
-
-    private int findEcBoxWithSpace(ScreenHandler sh, int rows) {
-        for (int i = 0; i <= containerLast(rows); i++) {
-            ItemStack st = sh.getSlot(i).getStack();
-            if (isShulkerBox(st) && shulkerUsedSlots(st) < 27) return i;
-        }
-        return -1;
-    }
-
-    private int findBackpackBoxWithSpace() {
-        for (int i = 0; i < 36; i++) {
-            ItemStack st = mc.player.getInventory().getMainStacks().get(i);
-            if (isShulkerBox(st) && shulkerUsedSlots(st) < 27) return i;
-        }
-        return -1;
-    }
-
-    // 找背包中可用于"存鞘翅"的盒 (修复: 绝不用补给盒)：
-    // ① 优先选盒内已有鞘翅且有空间 ② 其次选完全空的盒 ③ 跳过装其他物资的盒 (烟花/食物/图腾 = 补给盒)
-    private int findBackpackElytraBox() {
-        int emptyBox = -1;
-        for (int i = 0; i < 36; i++) {
-            ItemStack st = mc.player.getInventory().getMainStacks().get(i);
-            if (!isShulkerBox(st)) continue;
-            Set<Item> items = shulkerItems(st);
-            if (items.contains(Items.ELYTRA)) {
-                if (shulkerUsedSlots(st) < 27) return i; // 鞘翅盒有空间 → 直接用
-                continue;                                // 鞘翅满盒 → 不能用
-            }
-            if (items.isEmpty() && emptyBox == -1) emptyBox = i; // 完全空盒 → 备用
-            // 含其他物资(烟花/食物/图腾等) = 补给盒 → 跳过，绝不把鞘翅塞进补给盒
-        }
-        return emptyBox;
-    }
-
-    // 找背包里未穿戴的鞘翅槽位 (屏幕坐标)
-    private int findUnwornElytraSlot(ScreenHandler sh, int rows) {
-        for (int i = playerFirst(rows); i <= playerLast(rows); i++) {
-            if (sh.getSlot(i).getStack().getItem() == Items.ELYTRA) return i;
-        }
-        return -1;
-    }
-
-    // 找可腾进盒子的杂物槽位 (非物资/非鞘翅/非潜影盒/非末影箱/非精准采集工具)
-    private int findJunkSlotInPlayer(ScreenHandler sh, int rows, List<SupplyRule> rules) {
-        Set<Item> keep = new HashSet<>();
-        for (SupplyRule r : rules) keep.add(r.item);
-        keep.add(Items.ELYTRA);
-        keep.add(Items.ENDER_CHEST);
-        int silkSlot = findSilkTouchSlot();
-        for (int i = playerFirst(rows); i <= playerLast(rows); i++) {
-            ItemStack st = sh.getSlot(i).getStack();
-            if (st.isEmpty()) continue;
-            if (isShulkerBox(st)) continue;
-            if (keep.contains(st.getItem())) continue;
-            if (silkSlot != -1 && i == invSlotToScreen(rows, silkSlot)) continue;
+    private int firstEmptyContainerSlot(net.minecraft.screen.ScreenHandler sh, int rows) {
+        for (int i = 0; i <= this.containerLast(rows); ++i) {
+            if (!sh.getSlot(i).getStack().isEmpty()) continue;
             return i;
         }
         return -1;
     }
 
-    private boolean isShulkerBox(ItemStack stack) {
-        return stack.getItem() instanceof BlockItem bi && bi.getBlock() instanceof ShulkerBoxBlock;
+    private int firstEmptyPlayerScreenSlot(net.minecraft.screen.ScreenHandler sh, int rows) {
+        for (int i = this.playerFirst(rows); i <= this.playerLast(rows); ++i) {
+            if (!sh.getSlot(i).getStack().isEmpty()) continue;
+            return i;
+        }
+        return -1;
     }
 
-    private boolean isShulkerBlock(BlockState state) {
-        return state.getBlock() instanceof ShulkerBoxBlock;
+    private int findMergeSlotInPlayer(net.minecraft.screen.ScreenHandler sh, int rows, net.minecraft.item.Item item) {
+        for (int i = this.playerFirst(rows); i <= this.playerLast(rows); ++i) {
+            net.minecraft.item.ItemStack st = sh.getSlot(i).getStack();
+            if (st.getItem() != item || st.getCount() >= st.getMaxCount()) continue;
+            return i;
+        }
+        return -1;
     }
 
-    private boolean isEnderChestBlock(BlockState state) {
-        return state.getBlock() == Blocks.ENDER_CHEST;
+    private int findEcBoxWithSpace(net.minecraft.screen.ScreenHandler sh, int rows) {
+        for (int i = 0; i <= this.containerLast(rows); ++i) {
+            net.minecraft.item.ItemStack st = sh.getSlot(i).getStack();
+            if (!this.isShulkerBox(st) || this.shulkerUsedSlots(st) >= 27) continue;
+            return i;
+        }
+        return -1;
     }
 
-    private int shulkerUsedSlots(ItemStack box) {
-        var container = box.get(DataComponentTypes.CONTAINER);
-        if (container == null) return 0;
-        return (int) container.streamNonEmpty().count();
+    private int findBackpackBoxWithSpace() {
+        for (int i = 0; i < 36; ++i) {
+            net.minecraft.item.ItemStack st = (net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i);
+            if (!this.isShulkerBox(st) || this.shulkerUsedSlots(st) >= 27) continue;
+            return i;
+        }
+        return -1;
     }
 
-    private Set<Item> shulkerItems(ItemStack box) {
-        Set<Item> out = new HashSet<>();
-        var container = box.get(DataComponentTypes.CONTAINER);
-        if (container == null) return out;
-        for (ItemStack st : (Iterable<ItemStack>) container.streamNonEmpty()::iterator) {
+    private int findUnwornElytraSlot(net.minecraft.screen.ScreenHandler sh, int rows) {
+        for (int i = this.playerFirst(rows); i <= this.playerLast(rows); ++i) {
+            if (sh.getSlot(i).getStack().getItem() != net.minecraft.item.Items.ELYTRA) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private int findJunkSlotInPlayer(net.minecraft.screen.ScreenHandler sh, int rows, List<SupplyRule> rules) {
+        HashSet<net.minecraft.item.Item> keep = new HashSet<net.minecraft.item.Item>();
+        for (SupplyRule r : rules) {
+            keep.add(r.item);
+        }
+        keep.add(net.minecraft.item.Items.ELYTRA);
+        keep.add(net.minecraft.item.Items.ENDER_CHEST);
+        int silkSlot = this.findSilkTouchSlot();
+        for (int i = this.playerFirst(rows); i <= this.playerLast(rows); ++i) {
+            net.minecraft.item.ItemStack st = sh.getSlot(i).getStack();
+            if (st.isEmpty() || this.isShulkerBox(st) || keep.contains(st.getItem()) || silkSlot != -1 && i == this.invSlotToScreen(rows, silkSlot)) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    private boolean isShulkerBox(net.minecraft.item.ItemStack stack) {
+        net.minecraft.item.BlockItem bi;
+        net.minecraft.item.Item v17922 = stack.getItem();
+        return v17922 instanceof net.minecraft.item.BlockItem && (bi = (net.minecraft.item.BlockItem)v17922).getBlock() instanceof net.minecraft.block.ShulkerBoxBlock;
+    }
+
+    private boolean isShulkerBlock(net.minecraft.block.BlockState state) {
+        return state.getBlock() instanceof net.minecraft.block.ShulkerBoxBlock;
+    }
+
+    private boolean isEnderChestBlock(net.minecraft.block.BlockState state) {
+        return state.getBlock() == net.minecraft.block.Blocks.ENDER_CHEST;
+    }
+
+    private int shulkerUsedSlots(net.minecraft.item.ItemStack box) {
+        net.minecraft.component.type.ContainerComponent container = (net.minecraft.component.type.ContainerComponent)box.get(net.minecraft.component.DataComponentTypes.CONTAINER);
+        if (container == null) {
+            return 0;
+        }
+        return (int)container.streamNonEmpty().count();
+    }
+
+    private Set<net.minecraft.item.Item> shulkerItems(net.minecraft.item.ItemStack box) {
+        HashSet<net.minecraft.item.Item> out = new HashSet<net.minecraft.item.Item>();
+        net.minecraft.component.type.ContainerComponent container = (net.minecraft.component.type.ContainerComponent)box.get(net.minecraft.component.DataComponentTypes.CONTAINER);
+        if (container == null) {
+            return out;
+        }
+        for (net.minecraft.item.ItemStack st : container.streamNonEmpty().toList()) {
             out.add(st.getItem());
         }
         return out;
     }
 
-    // 找可放置方块的位置列表 (按距离排序)：格子可替换(空气) + 下方实心 → 对着下方方块上方放置 (末影箱用)
-    private List<BlockPos> findPlaceSpots(BlockPos exclude) {
-        return findPlaceSpotsAt(mc.player.getBlockPos(), exclude);
+    private List<net.minecraft.util.math.BlockPos> findPlaceSpots(net.minecraft.util.math.BlockPos exclude) {
+        return this.findPlaceSpotsAt(this.mc.player.getBlockPos(), exclude);
     }
 
-    private List<BlockPos> findPlaceSpotsAt(BlockPos center, BlockPos exclude) {
-        List<BlockPos> out = new ArrayList<>();
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                for (int dy = 0; dy <= 2; dy++) {
+    private List<net.minecraft.util.math.BlockPos> findPlaceSpotsAt(net.minecraft.util.math.BlockPos center, net.minecraft.util.math.BlockPos exclude) {
+        ArrayList<net.minecraft.util.math.BlockPos> out = new ArrayList<net.minecraft.util.math.BlockPos>();
+        net.minecraft.util.math.BlockPos.Mutable m = new net.minecraft.util.math.BlockPos.Mutable();
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dz = -2; dz <= 2; ++dz) {
+                for (int dy = 0; dy <= 2; ++dy) {
+                    net.minecraft.block.BlockState s;
                     m.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1
-                        && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1) {
-                        continue;
-                    }
-                    BlockState s = mc.world.getBlockState(m);
-                    if (!s.isReplaceable()) continue;
-                    if (!mc.world.getBlockState(m.down()).isSolidBlock(mc.world, m.down())) continue;
+                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1 && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1 || !(s = this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)m)).isReplaceable() || !this.mc.world.getBlockState(m.down()).isSolidBlock((net.minecraft.world.BlockView)this.mc.world, m.down())) continue;
                     out.add(m.toImmutable());
                 }
             }
         }
-        out.sort(Comparator.comparingDouble(p -> mc.player.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
+        out.sort(Comparator.comparingDouble(p -> this.mc.player.squaredDistanceTo((double)p.getX() + 0.5, (double)p.getY() + 0.5, (double)p.getZ() + 0.5)));
         return out;
     }
 
-    // 潜影盒放置位置：格子是空气 + 上方有实心方块 → 对着上方方块放置 (挂在它下方)
-    private List<BlockPos> findBoxPlaceSpots(BlockPos exclude) {
-        List<BlockPos> out = new ArrayList<>();
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        BlockPos center = mc.player.getBlockPos();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                for (int dy = 0; dy <= 2; dy++) {
+    private List<net.minecraft.util.math.BlockPos> findBoxPlaceSpots(net.minecraft.util.math.BlockPos exclude) {
+        ArrayList<net.minecraft.util.math.BlockPos> out = new ArrayList<net.minecraft.util.math.BlockPos>();
+        net.minecraft.util.math.BlockPos.Mutable m = new net.minecraft.util.math.BlockPos.Mutable();
+        net.minecraft.util.math.BlockPos center = this.mc.player.getBlockPos();
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dz = -2; dz <= 2; ++dz) {
+                for (int dy = 0; dy <= 2; ++dy) {
                     m.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1
-                        && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1) {
-                        continue;
-                    }
-                    if (!mc.world.getBlockState(m).isReplaceable()) continue;                // 该格必须是空气
-                    if (!mc.world.getBlockState(m.up()).isSolidBlock(mc.world, m.up())) continue; // 上方必须有实心方块
+                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1 && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1 || !this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)m).isReplaceable() || !this.mc.world.getBlockState(m.up()).isSolidBlock((net.minecraft.world.BlockView)this.mc.world, m.up())) continue;
                     out.add(m.toImmutable());
                 }
             }
         }
-        out.sort(Comparator.comparingDouble(p -> mc.player.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
+        out.sort(Comparator.comparingDouble(p -> this.mc.player.squaredDistanceTo((double)p.getX() + 0.5, (double)p.getY() + 0.5, (double)p.getZ() + 0.5)));
         return out;
     }
 
-    // 潜影盒地板放置位置 (后备)：格子是空气 + 下方有实心方块 + 顶面敞开 → 对着下方方块顶面放置 (盒子放在它上面，顶面不被盖住)
-    private List<BlockPos> findBoxFloorSpots(BlockPos exclude) {
-        List<BlockPos> out = new ArrayList<>();
-        BlockPos.Mutable m = new BlockPos.Mutable();
-        BlockPos center = mc.player.getBlockPos();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                for (int dy = 0; dy <= 2; dy++) {
+    private List<net.minecraft.util.math.BlockPos> findBoxFloorSpots(net.minecraft.util.math.BlockPos exclude) {
+        ArrayList<net.minecraft.util.math.BlockPos> out = new ArrayList<net.minecraft.util.math.BlockPos>();
+        net.minecraft.util.math.BlockPos.Mutable m = new net.minecraft.util.math.BlockPos.Mutable();
+        net.minecraft.util.math.BlockPos center = this.mc.player.getBlockPos();
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dz = -2; dz <= 2; ++dz) {
+                for (int dy = 0; dy <= 2; ++dy) {
                     m.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1
-                        && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1) {
-                        continue;
-                    }
-                    if (!mc.world.getBlockState(m).isReplaceable()) continue;                // 该格必须是空气
-                    if (!mc.world.getBlockState(m.down()).isSolidBlock(mc.world, m.down())) continue; // 下方必须有实心方块 (放在它上面)
-                    if (!mc.world.getBlockState(m.up()).isReplaceable()) continue;            // 顶面必须敞开 (不被盖住，好打开)
+                    if (exclude != null && Math.abs(m.getX() - exclude.getX()) <= 1 && Math.abs(m.getZ() - exclude.getZ()) <= 1 && Math.abs(m.getY() - exclude.getY()) <= 1 || !this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)m).isReplaceable() || !this.mc.world.getBlockState(m.down()).isSolidBlock((net.minecraft.world.BlockView)this.mc.world, m.down()) || !this.mc.world.getBlockState(m.up()).isReplaceable()) continue;
                     out.add(m.toImmutable());
                 }
             }
         }
-        out.sort(Comparator.comparingDouble(p -> mc.player.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
+        out.sort(Comparator.comparingDouble(p -> this.mc.player.squaredDistanceTo((double)p.getX() + 0.5, (double)p.getY() + 0.5, (double)p.getZ() + 0.5)));
         return out;
     }
 
-    private ItemEntity findItemEntityNear(BlockPos pos, double radius) {
-        Box box = new Box(pos).expand(radius);
-        ItemEntity best = null;
+    private net.minecraft.entity.ItemEntity findItemEntityNear(net.minecraft.util.math.BlockPos pos, double radius) {
+        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos).expand(radius);
+        net.minecraft.entity.ItemEntity best = null;
         double bestD = Double.MAX_VALUE;
-        for (var entity : mc.world.getOtherEntities(null, box, e -> true)) {
-            if (entity instanceof ItemEntity item) {
-                double d = item.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
-                if (d < bestD) {
-                    bestD = d;
-                    best = item;
-                }
-            }
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities(null, box, e -> true)) {
+            net.minecraft.entity.ItemEntity item;
+            double d;
+            if (!(entity instanceof net.minecraft.entity.ItemEntity) || !((d = (item = (net.minecraft.entity.ItemEntity)entity).squaredDistanceTo((double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5)) < bestD)) continue;
+            bestD = d;
+            best = item;
         }
         return best;
     }
 
-    // ========== 物资 / 背包统计 ==========
-    private record SupplyRule(Item item, int min, int batch) {}
-
     private List<SupplyRule> parseSupplies() {
-        List<SupplyRule> out = new ArrayList<>();
-        for (String entry : supplies.get()) {
+        ArrayList<SupplyRule> out = new ArrayList<SupplyRule>();
+        for (String entry : (List<String>)this.supplies.get()) {
             String[] p = entry.split(";");
             if (p.length < 3) {
-                warning("物资配置格式错误: " + entry);
+                this.warning("\u7269\u8d44\u914d\u7f6e\u683c\u5f0f\u9519\u8bef: " + entry, new Object[0]);
                 continue;
             }
-            Identifier id = Identifier.tryParse(p[0].trim());
-            if (id == null || Registries.ITEM.get(id) == Items.AIR) {
-                warning("未知物品: " + p[0]);
+            net.minecraft.util.Identifier id = net.minecraft.util.Identifier.tryParse((String)p[0].trim());
+            if (id == null) {
+                this.warning("未知物品: " + p[0], new Object[0]);
+                continue;
+            }
+            net.minecraft.item.Item supplyItem = net.minecraft.registry.Registries.ITEM.get(id);
+            if (supplyItem == net.minecraft.item.Items.AIR) {
+                this.warning("未知物品: " + p[0], new Object[0]);
                 continue;
             }
             try {
-                out.add(new SupplyRule(Registries.ITEM.get(id),
-                    Integer.parseInt(p[1].trim()), Integer.parseInt(p[2].trim())));
-            } catch (NumberFormatException e) {
-                warning("物资数量格式错误: " + entry);
+                out.add(new SupplyRule(supplyItem, Integer.parseInt(p[1].trim()), Integer.parseInt(p[2].trim())));
+            }
+            catch (NumberFormatException e) {
+                this.warning("\u7269\u8d44\u6570\u91cf\u683c\u5f0f\u9519\u8bef: " + entry, new Object[0]);
             }
         }
         return out;
     }
 
     private boolean anyDeficit() {
-        for (SupplyRule r : parseSupplies()) {
-            if (countItem(r.item) < r.min) return true;
+        for (SupplyRule r : this.parseSupplies()) {
+            if (this.countItem(r.item) >= r.min) continue;
+            return true;
         }
         return false;
     }
 
-    // 该物品是否还有缺口 (散放物资/盒子内容判定用；按目标库存 batch 计算，拿到 batch 为止)
-    private boolean needsItem(Item item) {
-        for (SupplyRule r : parseSupplies()) {
-            if (r.item == item && countItem(item) < r.batch) return true;
+    private boolean needsItem(net.minecraft.item.Item item) {
+        for (SupplyRule r : this.parseSupplies()) {
+            if (r.item != item || this.countItem(item) >= r.batch) continue;
+            return true;
         }
         return false;
     }
 
-    private int countItem(Item item) {
+    private int countItem(net.minecraft.item.Item item) {
         int n = 0;
-        for (int i = 0; i < 36; i++) {
-            ItemStack st = mc.player.getInventory().getMainStacks().get(i);
-            if (st.getItem() == item) n += st.getCount();
+        for (int i = 0; i < 36; ++i) {
+            net.minecraft.item.ItemStack st = (net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i);
+            if (st.getItem() != item) continue;
+            n += st.getCount();
         }
         return n;
     }
 
     private int countElytraMain() {
-        return countItem(Items.ELYTRA);
+        return this.countItem(net.minecraft.item.Items.ELYTRA);
     }
 
     private int countBoxes() {
         int n = 0;
-        for (int i = 0; i < 36; i++) {
-            if (isShulkerBox(mc.player.getInventory().getMainStacks().get(i))) n++;
+        for (int i = 0; i < 36; ++i) {
+            if (!this.isShulkerBox((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i))) continue;
+            ++n;
         }
         return n;
     }
 
-    private int findItemSlot(Item item) {
-        for (int i = 0; i < 36; i++) {
-            if (mc.player.getInventory().getMainStacks().get(i).getItem() == item) return i;
+    private int findItemSlot(net.minecraft.item.Item item) {
+        for (int i = 0; i < 36; ++i) {
+            if (((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i)).getItem() != item) continue;
+            return i;
         }
         return -1;
     }
 
-    // 找带精准采集的工具槽位 (回收潜影盒/末影箱必须用，否则盒子消失/只掉黑曜石)
     private int findSilkTouchSlot() {
-        var reg = mc.world.getRegistryManager().getOrThrow(RegistryKeys.ENCHANTMENT);
-        var entry = reg.getEntry(reg.get(Enchantments.SILK_TOUCH));
-        for (int i = 0; i < 36; i++) {
-            ItemStack st = mc.player.getInventory().getMainStacks().get(i);
-            if (EnchantmentHelper.getLevel(entry, st) > 0) return i;
+        net.minecraft.registry.Registry reg = this.mc.world.getRegistryManager().getOrThrow(net.minecraft.registry.RegistryKeys.ENCHANTMENT);
+        net.minecraft.registry.entry.RegistryEntry entry = reg.getEntry(((net.minecraft.enchantment.Enchantment)reg.get(net.minecraft.enchantment.Enchantments.SILK_TOUCH)));
+        for (int i = 0; i < 36; ++i) {
+            net.minecraft.item.ItemStack st = (net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i);
+            if (net.minecraft.enchantment.EnchantmentHelper.getLevel((net.minecraft.registry.entry.RegistryEntry)entry, (net.minecraft.item.ItemStack)st) <= 0) continue;
+            return i;
         }
         return -1;
     }
 
-    // 找背包里的潜影盒槽位 (挖回盒子后重新定位，拾取槽位不一定等于原槽位)
     private int findBackpackShulkerBox() {
-        for (int i = 0; i < 36; i++) {
-            if (isShulkerBox(mc.player.getInventory().getMainStacks().get(i))) return i;
+        for (int i = 0; i < 36; ++i) {
+            if (!this.isShulkerBox((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i))) continue;
+            return i;
         }
         return -1;
     }
 
     private int freeSlots() {
         int n = 0;
-        for (int i = 0; i < 36; i++) {
-            if (mc.player.getInventory().getMainStacks().get(i).isEmpty()) n++;
+        for (int i = 0; i < 36; ++i) {
+            if (!((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i)).isEmpty()) continue;
+            ++n;
         }
         return n;
     }
 
-    private boolean reached(BlockPos pos, double tolerance) {
-        if (stateTick < 6) return false;
-        if (PathManagers.get().isPathing()) return false;
-        double dx = mc.player.getX() - (pos.getX() + 0.5);
-        double dz = mc.player.getZ() - (pos.getZ() + 0.5);
-        return dx * dx + dz * dz <= tolerance * tolerance;
+    private boolean reached(net.minecraft.util.math.BlockPos pos, double tolerance) {
+        double dz;
+        if (this.stateTick < 6) {
+            return false;
+        }
+        if (PathManagers.get().isPathing()) {
+            return false;
+        }
+        double dx = this.mc.player.getX() - ((double)pos.getX() + 0.5);
+        return dx * dx + (dz = this.mc.player.getZ() - ((double)pos.getZ() + 0.5)) * dz <= tolerance * tolerance;
     }
-    // ========== 原版 1.21.4 末地高度 / 生物群系 (精确复刻) ==========
-    // DensityFunctionTypes.EndIslands.getHeightValue，输入为 blockX/8、blockZ/8
+
     private float endIslandHeightValue(int x, int z) {
         int i = x / 2;
         int j = z / 2;
         int k = x % 2;
         int l = z % 2;
-        // 原版用 int 平方会溢出 (MC-159283)，用 double 修复
-        float f = 100.0F - (float) Math.sqrt((double) x * x + (double) z * z) * 8.0F;
-        f = clampIsland(f);
-
-        for (int rx = -12; rx <= 12; rx++) {
-            for (int rz = -12; rz <= 12; rz++) {
-                long k1 = (long) (i + rx);
-                long l1 = (long) (j + rz);
-                if (islandNoise != null && k1 * k1 + l1 * l1 > 4096L && islandNoise.sample2D((double) k1, (double) l1) < -0.9F) {
-                    float f1 = (Math.abs((float) k1) * 3439.0F + Math.abs((float) l1) * 147.0F) % 13.0F + 9.0F;
-                    float f2 = (float) (k - rx * 2);
-                    float f3 = (float) (l - rz * 2);
-                    float f4 = 100.0F - (float) Math.sqrt(f2 * f2 + f3 * f3) * f1;
-                    f4 = clampIsland(f4);
-                    f = Math.max(f, f4);
-                }
+        float f = 100.0f - (float)Math.sqrt((double)x * (double)x + (double)z * (double)z) * 8.0f;
+        f = ElytraCollector.clampIsland(f);
+        for (int rx = -12; rx <= 12; ++rx) {
+            for (int rz = -12; rz <= 12; ++rz) {
+                long k1 = i + rx;
+                long l1 = j + rz;
+                if (this.islandNoise == null || k1 * k1 + l1 * l1 <= 4096L || !(this.islandNoise.sample2D(k1, l1) < (double)-0.9f)) continue;
+                float f1 = (Math.abs((float)k1) * 3439.0f + Math.abs((float)l1) * 147.0f) % 13.0f + 9.0f;
+                float f2 = k - rx * 2;
+                float f3 = l - rz * 2;
+                float f4 = 100.0f - (float)Math.sqrt(f2 * f2 + f3 * f3) * f1;
+                f4 = ElytraCollector.clampIsland(f4);
+                f = Math.max(f, f4);
             }
         }
         return f;
     }
 
     private static float clampIsland(float value) {
-        if (value < -100.0F) return -100.0F;
-        return Math.min(value, 80.0F);
+        if (value < -100.0f) {
+            return -100.0f;
+        }
+        return Math.min(value, 80.0f);
     }
 
-    // end_islands 密度值 (与 erosion 相同，2D 且与 Y 无关)
     private double endIslandDensity(int blockX, int blockZ) {
-        return (endIslandHeightValue(blockX / 8, blockZ / 8) - 8.0) / 128.0;
+        return ((double)this.endIslandHeightValue(blockX / 8, blockZ / 8) - 8.0) / 128.0;
     }
 
-    // 原版 TheEndBiomeSource.getNoiseBiome: 中心 64 section 内是 the_end (无末地城)，
-    // 其余 erosion ≥ -0.0625 为 highlands/midlands (可生成末地城)
     private boolean isEndCityBiome(int chunkX, int chunkZ) {
         int blockX = chunkX * 16 + 8;
-        int blockZ = chunkZ * 16 + 8;
         long sx = blockX >> 4;
+        int blockZ = chunkZ * 16 + 8;
         long sz = blockZ >> 4;
-        if (sx * sx + sz * sz <= 4096L) return false;
-        return endIslandDensity(blockX, blockZ) >= -0.0625;
+        if (sx * sx + sz * sz <= 4096L) {
+            return false;
+        }
+        return this.endIslandDensity(blockX, blockZ) >= -0.0625;
     }
 
-    // 原版高度判定：用游戏里的真实高度图 (区块已加载) 检查城市 5x5 区域最低高度 ≥ 60
     private boolean cityTerrainHigh() {
-        int chunkX = current.chunk.getX();
-        int chunkZ = current.chunk.getZ();
-
+        int[][] cols;
+        int chunkX = this.current.chunk.getX();
+        int chunkZ = this.current.chunk.getZ();
         ChunkRand r = new ChunkRand();
-        r.setSeed(worldSeed);
+        r.setSeed(this.worldSeed);
         long a = r.nextLong();
         long b = r.nextLong();
-        r.setSeed((long) chunkX * a ^ (long) chunkZ * b ^ worldSeed);
+        r.setSeed((long)chunkX * a ^ (long)chunkZ * b ^ this.worldSeed);
         BlockRotation rotation = BlockRotation.getRandom(r);
-
-        int xOff = 5, zOff = 5;
+        int xOff = 5;
+        int zOff = 5;
         if (rotation == BlockRotation.CLOCKWISE_90) {
             xOff = -5;
         } else if (rotation == BlockRotation.CLOCKWISE_180) {
@@ -2789,114 +2478,104 @@ supplyScanStart = 0;
         } else if (rotation == BlockRotation.COUNTERCLOCKWISE_90) {
             zOff = -5;
         }
-
         int posX = (chunkX << 4) + 7;
         int posZ = (chunkZ << 4) + 7;
-
-        // 4 根采样柱的区块必须全部加载，否则 getTopY 返回 0 会误杀真城
-        int[][] cols = {
-            {posX, posZ}, {posX, posZ + zOff}, {posX + xOff, posZ}, {posX + xOff, posZ + zOff}
-        };
-        for (int[] c : cols) {
-            if (!mc.world.isChunkLoaded(c[0] >> 4, c[1] >> 4)) {
-                return true; // 未加载：不判，交给龙头扫描
-            }
+        for (int[] c : cols = new int[][]{{posX, posZ}, {posX, posZ + zOff}, {posX + xOff, posZ}, {posX + xOff, posZ + zOff}}) {
+            if (this.mc.world.getChunkManager().isChunkLoaded(c[0] >> 4, c[1] >> 4)) continue;
+            return true;
         }
-
-        int h1 = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, cols[0][0], cols[0][1]);
-        int h2 = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, cols[1][0], cols[1][1]);
-        int h3 = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, cols[2][0], cols[2][1]);
-        int h4 = mc.world.getTopY(Heightmap.Type.WORLD_SURFACE, cols[3][0], cols[3][1]);
+        int h1 = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, cols[0][0], cols[0][1]);
+        int h2 = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, cols[1][0], cols[1][1]);
+        int h3 = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, cols[2][0], cols[2][1]);
+        int h4 = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, cols[3][0], cols[3][1]);
         int min = Math.min(Math.min(h1, h2), Math.min(h3, h4));
-
-        if (debugSetting.get()) {
-            debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + rotation + " min=" + min);
-            debugColumn(posX, posZ, h1);
-            debugColumn(posX, posZ + zOff, h2);
-            debugColumn(posX + xOff, posZ, h3);
-            debugColumn(posX + xOff, posZ + zOff, h4);
+        if ((this.debugSetting.get()).booleanValue()) {
+            this.debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + String.valueOf(rotation) + " min=" + min);
+            this.debugColumn(posX, posZ, h1);
+            this.debugColumn(posX, posZ + zOff, h2);
+            this.debugColumn(posX + xOff, posZ, h3);
+            this.debugColumn(posX + xOff, posZ + zOff, h4);
         }
-
         return min >= 60;
     }
 
-    // 调试日志: 输出某列的真实高度 + 离线公式计算值 (用于校准)
     private void debugColumn(int x, int z, int realHeight) {
-        float rawF = endIslandHeightValue(x / 8, z / 8);
-        double e = (rawF - 8.0) / 128.0;
-        int vanilla = vanillaWorldSurfaceWg(x, z);
-        debugLog("col(" + x + "," + z + ") real=" + realHeight + " vanilla=" + vanilla + " E=" + String.format("%.4f", e) + " rawF=" + String.format("%.1f", rawF));
+        float rawF = this.endIslandHeightValue(x / 8, z / 8);
+        double e = ((double)rawF - 8.0) / 128.0;
+        int vanilla = this.vanillaWorldSurfaceWg(x, z);
+        this.debugLog("col(" + x + "," + z + ") real=" + realHeight + " vanilla=" + vanilla + " E=" + String.format("%.4f", e) + " rawF=" + String.format("%.1f", Float.valueOf(rawF)));
     }
 
-    // ========== 原版 1.21.4 末地高度链精确复刻 (离线预测 WORLD_SURFACE_WG) ==========
-    // finalDensity = squeeze(0.64 * interpolated(blendDensity(slideEnd(endIslands + base3d))))
-    // 与 NoiseChunkGenerator.sampleHeightmap 一致: 4x4x4 单元角点采样 + 三线性插值
-
-    // 与 vanilla getHeight(x,z,WORLD_SURFACE_WG) 一致: 从 y=255 向下找第一个实心块, 返回 y+1
     private int vanillaWorldSurfaceWg(int x, int z) {
-        if (base3dNoise == null) return 0;
+        if (this.base3dNoise == null) {
+            return 0;
+        }
         int x0 = Math.floorDiv(x, 4) * 4;
         int z0 = Math.floorDiv(z, 4) * 4;
-        double xf = (x - x0) / 4.0;
-        double zf = (z - z0) / 4.0;
-        double e00 = (endIslandHeightValue(x0 / 8, z0 / 8) - 8.0) / 128.0;
-        double e10 = (endIslandHeightValue((x0 + 4) / 8, z0 / 8) - 8.0) / 128.0;
-        double e01 = (endIslandHeightValue(x0 / 8, (z0 + 4) / 8) - 8.0) / 128.0;
-        double e11 = (endIslandHeightValue((x0 + 4) / 8, (z0 + 4) / 8) - 8.0) / 128.0;
-        double n00 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0, 256, z0));
-        double n10 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0 + 4, 256, z0));
-        double n01 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0, 256, z0 + 4));
-        double n11 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0 + 4, 256, z0 + 4));
-        for (int cell = 63; cell >= 0; cell--) {
+        double xf = (double)(x - x0) / 4.0;
+        double zf = (double)(z - z0) / 4.0;
+        double e00 = ((double)this.endIslandHeightValue(x0 / 8, z0 / 8) - 8.0) / 128.0;
+        double e10 = ((double)this.endIslandHeightValue((x0 + 4) / 8, z0 / 8) - 8.0) / 128.0;
+        double e01 = ((double)this.endIslandHeightValue(x0 / 8, (z0 + 4) / 8) - 8.0) / 128.0;
+        double e11 = ((double)this.endIslandHeightValue((x0 + 4) / 8, (z0 + 4) / 8) - 8.0) / 128.0;
+        double n00 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0, 256, z0));
+        double n10 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0 + 4, 256, z0));
+        double n01 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0, 256, z0 + 4));
+        double n11 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0 + 4, 256, z0 + 4));
+        for (int cell = 63; cell >= 0; --cell) {
             int yb = cell * 4;
-            double b00 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0, yb, z0));
-            double b10 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0 + 4, yb, z0));
-            double b01 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0, yb, z0 + 4));
-            double b11 = base3dNoise.sample(new DensityFunction.UnblendedNoisePos(x0 + 4, yb, z0 + 4));
-            double c000 = endSlide(e00 + b00, yb);
-            double c010 = endSlide(e00 + n00, yb + 4);
-            double c100 = endSlide(e10 + b10, yb);
-            double c110 = endSlide(e10 + n10, yb + 4);
-            double c001 = endSlide(e01 + b01, yb);
-            double c011 = endSlide(e01 + n01, yb + 4);
-            double c101 = endSlide(e11 + b11, yb);
-            double c111 = endSlide(e11 + n11, yb + 4);
-            for (int y = yb + 3; y >= yb; y--) {
-                double yf = (y - yb) / 4.0;
+            double b00 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0, yb, z0));
+            double b10 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0 + 4, yb, z0));
+            double b01 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0, yb, z0 + 4));
+            double b11 = this.base3dNoise.sample((net.minecraft.world.gen.densityfunction.DensityFunction.NoisePos)new net.minecraft.world.gen.densityfunction.DensityFunction.UnblendedNoisePos(x0 + 4, yb, z0 + 4));
+            double c000 = ElytraCollector.endSlide(e00 + b00, yb);
+            double c010 = ElytraCollector.endSlide(e00 + n00, yb + 4);
+            double c100 = ElytraCollector.endSlide(e10 + b10, yb);
+            double c110 = ElytraCollector.endSlide(e10 + n10, yb + 4);
+            double c001 = ElytraCollector.endSlide(e01 + b01, yb);
+            double c011 = ElytraCollector.endSlide(e01 + n01, yb + 4);
+            double c101 = ElytraCollector.endSlide(e11 + b11, yb);
+            double c111 = ElytraCollector.endSlide(e11 + n11, yb + 4);
+            for (int y = yb + 3; y >= yb; --y) {
+                double c;
+                double yf = (double)(y - yb) / 4.0;
                 double x0z0 = c000 + yf * (c010 - c000);
                 double x1z0 = c100 + yf * (c110 - c100);
+                double z0v = x0z0 + xf * (x1z0 - x0z0);
                 double x0z1 = c001 + yf * (c011 - c001);
                 double x1z1 = c101 + yf * (c111 - c101);
-                double z0v = x0z0 + xf * (x1z0 - x0z0);
                 double z1v = x0z1 + xf * (x1z1 - x0z1);
                 double v = z0v + zf * (z1v - z0v);
                 double d = 0.64 * v;
-                double c = d < -1.0 ? -1.0 : (d > 1.0 ? 1.0 : d);
-                if (c / 2.0 - c * c * c / 24.0 > 0.0) return y + 1;
+                c = d < -1.0 ? -1.0 : (d > 1.0 ? 1.0 : d);
+                double d2 = c;
+                if (!(c / 2.0 - c * c * c / 24.0 > 0.0)) continue;
+                return y + 1;
             }
-            n00 = b00; n10 = b10; n01 = b01; n11 = b11;
+            n00 = b00;
+            n10 = b10;
+            n01 = b01;
+            n11 = b11;
         }
         return 0;
     }
 
     private static double endSlide(double f, int y) {
-        double top = y <= 56 ? 1.0 : (y >= 312 ? 0.0 : (312.0 - y) / 256.0);
+        double top = y <= 56 ? 1.0 : (y >= 312 ? 0.0 : (312.0 - (double)y) / 256.0);
         double middle = -23.4375 + top * (f + 23.4375);
-        double bottom = y <= 4 ? 0.0 : (y >= 32 ? 1.0 : (y - 4.0) / 28.0);
+        double bottom = y <= 4 ? 0.0 : (y >= 32 ? 1.0 : ((double)y - 4.0) / 28.0);
         return -0.234375 + bottom * (middle + 0.234375);
     }
 
-    // 原版 EndCityStructure 判定: 按 rotation 偏移的 4 根柱子 WORLD_SURFACE_WG 最低 < 60 就不生成
-    // 原版精确阈值为 getHeightInGround(=getHeight-1) >= 60 即 getHeight >= 61;
-    // 实测离线预测在边界有 ±1 格误差, 阈值取 60 (低 1 格) 保证不漏真城, 误报假城由龙头扫描兜底
     private boolean vanillaCityTerrainOk(int chunkX, int chunkZ) {
         ChunkRand r = new ChunkRand();
-        r.setSeed(worldSeed);
+        r.setSeed(this.worldSeed);
         long a = r.nextLong();
         long b = r.nextLong();
-        r.setSeed((long) chunkX * a ^ (long) chunkZ * b ^ worldSeed);
+        r.setSeed((long)chunkX * a ^ (long)chunkZ * b ^ this.worldSeed);
         BlockRotation rotation = BlockRotation.getRandom(r);
-        int xOff = 5, zOff = 5;
+        int xOff = 5;
+        int zOff = 5;
         if (rotation == BlockRotation.CLOCKWISE_90) {
             xOff = -5;
         } else if (rotation == BlockRotation.CLOCKWISE_180) {
@@ -2907,362 +2586,456 @@ supplyScanStart = 0;
         }
         int posX = (chunkX << 4) + 7;
         int posZ = (chunkZ << 4) + 7;
-        int min = vanillaWorldSurfaceWg(posX, posZ);
-        min = Math.min(min, vanillaWorldSurfaceWg(posX, posZ + zOff));
-        min = Math.min(min, vanillaWorldSurfaceWg(posX + xOff, posZ));
-        min = Math.min(min, vanillaWorldSurfaceWg(posX + xOff, posZ + zOff));
-        if (debugSetting.get()) {
-            debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + rotation + " predMin=" + min);
+        int min = this.vanillaWorldSurfaceWg(posX, posZ);
+        min = Math.min(min, this.vanillaWorldSurfaceWg(posX, posZ + zOff));
+        min = Math.min(min, this.vanillaWorldSurfaceWg(posX + xOff, posZ));
+        min = Math.min(min, this.vanillaWorldSurfaceWg(posX + xOff, posZ + zOff));
+        if ((this.debugSetting.get()).booleanValue()) {
+            this.debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + String.valueOf(rotation) + " predMin=" + min);
         }
         return min >= 60;
     }
 
-    // ========== 调试日志 (写入 .minecraft/elytra-collector-debug.log) ==========
-    private final Object debugLock = new Object();
-
-    private java.nio.file.Path debugFilePath() {
-        return mc.runDirectory.toPath().resolve("elytra-collector-debug.log");
+    private Path debugFilePath() {
+        return this.mc.runDirectory.toPath().resolve("elytra-collector-debug.log");
     }
 
+    /*
+     * WARNING - Removed try catching itself - possible behaviour change.
+     */
     private void debugLog(String msg) {
-        if (!debugSetting.get()) return;
+        if (!(this.debugSetting.get()).booleanValue()) {
+            return;
+        }
         try {
-            String line = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"))
-                + " " + msg + System.lineSeparator();
-            synchronized (debugLock) {
-                java.nio.file.Files.writeString(debugFilePath(), line,
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            String line = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + " " + msg + System.lineSeparator();
+            Object object = this.debugLock;
+            synchronized (object) {
+                Files.writeString(this.debugFilePath(), (CharSequence)line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
-        } catch (Exception e) {
-            error("调试日志写入失败: " + e.getMessage());
+        }
+        catch (Exception e) {
+            this.error("\u8c03\u8bd5\u65e5\u5fd7\u5199\u5165\u5931\u8d25: " + e.getMessage(), new Object[0]);
         }
     }
 
-    // ========== 黑名单 ==========
-    private String blacklistKey(BlockPos head) {
+    private String blacklistKey(net.minecraft.util.math.BlockPos head) {
         return head.getX() + "," + head.getZ();
     }
 
-    private boolean isBlacklisted(BlockPos head) {
-        synchronized (blacklist.get()) {
-            for (String entry : blacklist.get()) {
+    /*
+     * WARNING - Removed try catching itself - possible behaviour change.
+     */
+    private boolean isBlacklisted(net.minecraft.util.math.BlockPos head) {
+        List list = (List)this.blacklist.get();
+        synchronized (list) {
+            for (String entry : (List<String>)this.blacklist.get()) {
                 String[] parts = entry.split(",");
                 if (parts.length < 2) continue;
                 try {
+                    int dz;
                     int x = Integer.parseInt(parts[0].trim());
                     int z = Integer.parseInt(parts[1].trim());
                     int dx = x - head.getX();
-                    int dz = z - head.getZ();
-                    // 种子坐标有 ±1 误差，用 2 格容差匹配
-                    if (dx * dx + dz * dz <= 4) return true;
-                } catch (NumberFormatException ignored) {}
+                    if (dx * dx + (dz = z - head.getZ()) * dz > 4) continue;
+                    return true;
+                }
+                catch (NumberFormatException numberFormatException) {
+                }
             }
         }
         return false;
     }
 
-    private void addBlacklist(BlockPos head) {
-        synchronized (blacklist.get()) {
-            String key = blacklistKey(head);
-            if (!blacklist.get().contains(key)) blacklist.get().add(key);
+    /*
+     * WARNING - Removed try catching itself - possible behaviour change.
+     */
+    private void addBlacklist(net.minecraft.util.math.BlockPos head) {
+        List list = (List)this.blacklist.get();
+        synchronized (list) {
+            String key = this.blacklistKey(head);
+            if (!((List)this.blacklist.get()).contains(key)) {
+                ((List)this.blacklist.get()).add(key);
+            }
         }
     }
 
-    // ========== 打展示框 / 捡鞘翅 / 穿鞘翅 ==========
     private void hitItemFrame() {
-        ItemFrameEntity frame = getNearestItemFrame(killAuraReach.get());
+        net.minecraft.entity.decoration.ItemFrameEntity frame = this.getNearestItemFrame(this.killAuraReach.get());
         if (frame == null) {
-            if (waypoints != null) faceDirection(waypoints.facing);
-            frame = getNearestItemFrame(killAuraReach.get() + 2);
+            if (this.waypoints != null) {
+                this.faceDirection(this.waypoints.facing);
+            }
+            frame = this.getNearestItemFrame(this.killAuraReach.get() + 2.0);
         }
         if (frame != null) {
-            mc.interactionManager.attackEntity(mc.player, frame);
-            info("攻击展示框.");
+            this.mc.interactionManager.attackEntity((net.minecraft.entity.player.PlayerEntity)this.mc.player, (net.minecraft.entity.Entity)frame);
+            this.info("\u653b\u51fb\u5c55\u793a\u6846.", new Object[0]);
         } else {
-            info("未找到展示框.");
+            this.info("\u672a\u627e\u5230\u5c55\u793a\u6846.", new Object[0]);
         }
     }
 
     private void pickUpElytra() {
-        ItemEntity item = findDroppedElytra();
+        net.minecraft.entity.ItemEntity item = this.findDroppedElytra();
         if (item != null) {
             PathManagers.get().moveTo(item.getBlockPos(), false);
         }
     }
 
     private void equipElytra() {
-        if (isWearingFullDurabilityElytra()) return;
-        int slot = findFullDurabilityElytraSlot();
-        if (slot == -1) return;
-
-        // 用 InvUtils 发点击包换装 (直接改客户端列表会被服务器同步覆盖)
+        if (this.isWearingFullDurabilityElytra()) {
+            return;
+        }
+        int slot = this.findFullDurabilityElytraSlot();
+        if (slot == -1) {
+            return;
+        }
         InvUtils.move().from(slot).toArmor(2);
-        info("已穿上鞘翅.");
+        this.info("\u5df2\u7a7f\u4e0a\u9798\u7fc5.", new Object[0]);
     }
 
     private boolean isWearingFullDurabilityElytra() {
-        ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
-        return chest.getItem() == Items.ELYTRA && chest.getDamage() == 0;
+        net.minecraft.item.ItemStack chest = (net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(38);
+        return chest.getItem() == net.minecraft.item.Items.ELYTRA && chest.getDamage() == 0;
     }
 
     private void walkTowards(double x, double z) {
-        double dx = x - mc.player.getX();
-        double dz = z - mc.player.getZ();
-        mc.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
-        mc.options.forwardKey.setPressed(true);
+        double dx = x - this.mc.player.getX();
+        double dz = z - this.mc.player.getZ();
+        this.mc.player.setYaw((float)Math.toDegrees(Math.atan2(-dx, dz)));
+        this.mc.options.forwardKey.setPressed(true);
     }
 
     private void useFirework() {
-        FindItemResult fw = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
+        FindItemResult fw = InvUtils.findInHotbar((net.minecraft.item.Item[])new net.minecraft.item.Item[]{net.minecraft.item.Items.FIREWORK_ROCKET});
         if (!fw.found()) {
-            // 物品栏没有烟花：从背包拿一个放到第 2 个槽位 (下次使用)
-            FindItemResult inv = InvUtils.find(Items.FIREWORK_ROCKET);
+            FindItemResult inv = InvUtils.find((net.minecraft.item.Item[])new net.minecraft.item.Item[]{net.minecraft.item.Items.FIREWORK_ROCKET});
             if (inv.found()) {
                 InvUtils.move().from(inv.slot()).toHotbar(1);
-                info("物品栏没有烟花，从背包调取放到第 2 个槽位.");
+                this.info("\u7269\u54c1\u680f\u6ca1\u6709\u70df\u82b1\uff0c\u4ece\u80cc\u5305\u8c03\u53d6\u653e\u5230\u7b2c 2 \u4e2a\u69fd\u4f4d.", new Object[0]);
             }
             return;
         }
         if (fw.isOffhand()) {
-            mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
+            this.mc.interactionManager.interactItem((net.minecraft.entity.player.PlayerEntity)this.mc.player, net.minecraft.util.Hand.OFF_HAND);
         } else {
-            InvUtils.swap(fw.slot(), true);
-            mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+            InvUtils.swap((int)fw.slot(), (boolean)true);
+            this.mc.interactionManager.interactItem((net.minecraft.entity.player.PlayerEntity)this.mc.player, net.minecraft.util.Hand.MAIN_HAND);
             InvUtils.swapBack();
         }
     }
 
-    // ========== Helpers ==========
     private void releaseForward() {
-        mc.options.forwardKey.setPressed(false);
+        this.mc.options.forwardKey.setPressed(false);
     }
 
-    private void faceDirection(Direction d) {
+    private void faceDirection(net.minecraft.util.math.Direction d) {
         float yaw = switch (d) {
-            case SOUTH -> 0f;
-            case WEST -> 90f;
-            case NORTH -> 180f;
-            case EAST -> -90f;
-            default -> 0f;
+            case net.minecraft.util.math.Direction.SOUTH -> 0.0f;
+            case net.minecraft.util.math.Direction.WEST -> 90.0f;
+            case net.minecraft.util.math.Direction.NORTH -> 180.0f;
+            case net.minecraft.util.math.Direction.EAST -> -90.0f;
+            default -> 0.0f;
         };
-        rotateFastTo(yaw, mc.player.getPitch());
+        this.rotateFastTo(yaw, this.mc.player.getPitch());
     }
 
-    private float yawTowards(BlockPos pos) {
-        double dx = pos.getX() + 0.5 - mc.player.getX();
-        double dz = pos.getZ() + 0.5 - mc.player.getZ();
-        return (float) Math.toDegrees(Math.atan2(-dx, dz));
+    private float yawTowards(net.minecraft.util.math.BlockPos pos) {
+        double dx = (double)pos.getX() + 0.5 - this.mc.player.getX();
+        double dz = (double)pos.getZ() + 0.5 - this.mc.player.getZ();
+        return (float)Math.toDegrees(Math.atan2(-dx, dz));
     }
 
-    private double horizontalDistance(BlockPos pos) {
-        double dx = pos.getX() + 0.5 - mc.player.getX();
-        double dz = pos.getZ() + 0.5 - mc.player.getZ();
+    private double horizontalDistance(net.minecraft.util.math.BlockPos pos) {
+        double dx = (double)pos.getX() + 0.5 - this.mc.player.getX();
+        double dz = (double)pos.getZ() + 0.5 - this.mc.player.getZ();
         return Math.sqrt(dx * dx + dz * dz);
     }
 
-    // ========== 防卡区块 (内嵌自 Ying 0.7.2 Pitch40Fly，单模块生效) ==========
+    // ===== 防卡区块 + 俯仰平滑（内嵌自 Ying 0.7.2 Pitch40Fly）=====
 
     /** 面向方向上前方最近未加载区块的距离；-1 表示前方全部已加载 */
     private double distanceToUnloadedAhead() {
-        float yaw = mc.player.getYaw();
+        float yaw = this.mc.player.getYaw();
         double rad = Math.toRadians(yaw);
         double dirX = -Math.sin(rad);
         double dirZ = Math.cos(rad);
-        double px = mc.player.getX();
-        double pz = mc.player.getZ();
-        int max = Math.max(chunkLookahead.get() + 32, 192);
+        double px = this.mc.player.getX();
+        double pz = this.mc.player.getZ();
+        int max = Math.max(this.chunkLookahead.get() + 32, 192);
         for (int d = 0; d <= max; d++) {
             int bx = (int) Math.floor(px + dirX * d);
             int bz = (int) Math.floor(pz + dirZ * d);
-            if (!mc.world.isChunkLoaded(bx >> 4, bz >> 4)) return d;
+            if (!this.mc.world.getChunkManager().isChunkLoaded(bx >> 4, bz >> 4)) return d;
         }
         return -1;
     }
 
-    /** 防卡区块状态机：前方未加载区块太近就强制爬升，满足最短时长 + 连续 3 tick 余量才恢复 */
-    private void updateAntiChunkClimb() {
-        if (!antiChunkClimb.get()) {
-            antiClimbActive = false;
-            antiClimbTicks = 0;
-            antiClearStreak = 0;
+    /** 防卡状态机：前方未加载区块太近就强制爬升，满足最短时长 + 连续 3 tick 余量才恢复 */
+    private void updateAntiChunkClimb(net.minecraft.util.math.BlockPos lp) {
+        if (!this.antiChunkClimb.get()) {
+            this.antiClimbActive = false;
+            this.antiClimbTicks = 0;
+            this.antiClearStreak = 0;
             return;
         }
-        double ahead = distanceToUnloadedAhead();
-        if (antiClimbActive) {
-            antiClimbTicks++;
-            boolean clear = AntiChunkLogic.isClear(ahead, chunkLookahead.get(), resumeMargin.get());
-            antiClearStreak = clear ? antiClearStreak + 1 : 0;
-            climbing = true; // 防卡期间强制保持爬升，不被高度滞回提前打断
-            if (AntiChunkLogic.canEndClimb(antiClimbTicks, antiClearStreak, minClimbTicks.get())) {
-                antiClimbActive = false;
-                antiClimbTicks = 0;
-                antiClearStreak = 0;
-                debugLog("前方区块已加载，结束防卡拉升，恢复 pitch40 飞行.");
+        // 接近降落点 (48 格内) 不做防卡，否则会被迫拉升导致无法降落
+        if (this.horizontalDistance(lp) <= 48.0) {
+            this.antiClimbActive = false;
+            this.antiClimbTicks = 0;
+            this.antiClearStreak = 0;
+            return;
+        }
+        double ahead = this.distanceToUnloadedAhead();
+        if (this.antiClimbActive) {
+            ++this.antiClimbTicks;
+            boolean clear = ahead < 0.0 || ahead > (double)(this.chunkLookahead.get() + this.resumeMargin.get());
+            this.antiClearStreak = clear ? this.antiClearStreak + 1 : 0;
+            this.climbing = true;
+            if (this.antiClimbTicks >= this.minClimbTicks.get() && this.antiClearStreak >= 3) {
+                this.antiClimbActive = false;
+                this.antiClimbTicks = 0;
+                this.antiClearStreak = 0;
+                this.debugLog("前方区块已加载，结束防卡拉升，恢复 pitch40 飞行.");
             }
-        } else if (AntiChunkLogic.shouldTrigger(ahead, chunkLookahead.get())) {
-            antiClimbActive = true;
-            antiClimbTicks = 0;
-            antiClearStreak = 0;
-            climbing = true;
-            debugLog("前方 " + String.format("%.0f", ahead) + " 格有未加载区块 (阈值 " + chunkLookahead.get() + ")，触发拉升.");
+        } else if (ahead >= 0.0 && ahead <= (double)this.chunkLookahead.get()) {
+            this.antiClimbActive = true;
+            this.antiClimbTicks = 0;
+            this.antiClearStreak = 0;
+            this.climbing = true;
+            this.debugLog("前方 " + String.format("%.0f", ahead) + " 格有未加载区块 (阈值 " + this.chunkLookahead.get() + ")，触发拉升.");
         }
     }
 
-    private void rotateTo(float targetYaw, float targetPitch) {
-        mc.player.setYaw(stepAngle(mc.player.getYaw(), targetYaw, yawSpeed.get().floatValue()));
-        mc.player.setPitch(stepAngle(mc.player.getPitch(), targetPitch, pitchSpeed.get().floatValue()));
+    /** 绕圈扫图 yaw：视角垂直于「中心点→当前位置」连线（内嵌自 Ying 0.7.2 ScanSweep） */
+    private float sweepYaw() {
+        double dx = this.mc.player.getX() - ((double)this.sweepCenterX.get() + 0.5);
+        double dz = this.mc.player.getZ() - ((double)this.sweepCenterZ.get() + 0.5);
+        if (dx * dx + dz * dz < 1.0E-6) {
+            return this.mc.player.getYaw();
+        }
+        float lineYaw = (float)Math.toDegrees(Math.atan2(-dx, dz));
+        float perpYaw = lineYaw + (this.sweepSide.get() == SweepSide.LEFT ? -90.0f : 90.0f);
+        return perpYaw + this.sweepOffset.get().floatValue();
     }
 
-    private void rotateFastTo(float targetYaw, float targetPitch) {
-        float speed = yawSpeed.get().floatValue();
-        mc.player.setYaw(stepAngle(mc.player.getYaw(), targetYaw, speed));
-        mc.player.setPitch(stepAngle(mc.player.getPitch(), targetPitch, speed));
-    }
-
-    private static float stepAngle(float current, float target, float speed) {
+    /** 角速度限幅逼近目标角 */
+    private static float stepToward(float current, float target, float speed) {
         float d = target - current;
-        while (d > 180) d -= 360;
-        while (d < -180) d += 360;
         if (Math.abs(d) <= speed) return target;
         return current + Math.signum(d) * speed;
     }
 
-    private static boolean isDragonHead(BlockState state) {
-        String id = Registries.BLOCK.getId(state.getBlock()).getPath();
+    private void rotateTo(float targetYaw, float targetPitch) {
+        this.mc.player.setYaw(ElytraCollector.stepAngle(this.mc.player.getYaw(), targetYaw, (this.yawSpeed.get()).floatValue()));
+        this.mc.player.setPitch(ElytraCollector.stepAngle(this.mc.player.getPitch(), targetPitch, (this.pitchSpeed.get()).floatValue()));
+    }
+
+    private void rotateFastTo(float targetYaw, float targetPitch) {
+        float speed = (this.yawSpeed.get()).floatValue();
+        this.mc.player.setYaw(ElytraCollector.stepAngle(this.mc.player.getYaw(), targetYaw, speed));
+        this.mc.player.setPitch(ElytraCollector.stepAngle(this.mc.player.getPitch(), targetPitch, speed));
+    }
+
+    private static float stepAngle(float current, float target, float speed) {
+        float d;
+        for (d = target - current; d > 180.0f; d -= 360.0f) {
+        }
+        while (d < -180.0f) {
+            d += 360.0f;
+        }
+        if (Math.abs(d) <= speed) {
+            return target;
+        }
+        return current + Math.signum(d) * speed;
+    }
+
+    private static boolean isDragonHead(net.minecraft.block.BlockState state) {
+        String id = net.minecraft.registry.Registries.BLOCK.getId(state.getBlock()).getPath();
         return id.equals("dragon_head") || id.equals("dragon_wall_head");
     }
 
-    private DragonHead findDragonHead(BlockPos center, int radius, int yRange) {
-        BlockPos.Mutable pos = new BlockPos.Mutable();
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -yRange; dy <= yRange; dy++) {
+    private DragonHead findDragonHead(net.minecraft.util.math.BlockPos center, int radius, int yRange) {
+        net.minecraft.util.math.BlockPos.Mutable pos = new net.minecraft.util.math.BlockPos.Mutable();
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                for (int dy = -yRange; dy <= yRange; ++dy) {
                     pos.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    BlockState s = mc.world.getBlockState(pos);
-                    if (isDragonHead(s)) {
-                        Direction facing = s.contains(Properties.FACING) ? s.get(Properties.FACING) : Direction.NORTH;
-                        return new DragonHead(pos.toImmutable(), facing);
-                    }
+                    net.minecraft.block.BlockState s = this.mc.world.getBlockState((net.minecraft.util.math.BlockPos)pos);
+                    if (!ElytraCollector.isDragonHead(s)) continue;
+                    net.minecraft.util.math.Direction facing = s.contains((net.minecraft.state.property.Property)net.minecraft.state.property.Properties.FACING) ? (net.minecraft.util.math.Direction)s.get((net.minecraft.state.property.Property)net.minecraft.state.property.Properties.FACING) : net.minecraft.util.math.Direction.NORTH;
+                    return new DragonHead(pos.toImmutable(), facing);
                 }
             }
         }
         return null;
     }
 
-    private ItemFrameEntity getNearestItemFrame(double reach) {
-        Box box = mc.player.getBoundingBox().expand(reach);
-        ItemFrameEntity best = null;
+    private net.minecraft.entity.decoration.ItemFrameEntity getNearestItemFrame(double reach) {
+        net.minecraft.util.math.Box box = this.mc.player.getBoundingBox().expand(reach);
+        net.minecraft.entity.decoration.ItemFrameEntity best = null;
         double bestD = Double.MAX_VALUE;
-        for (var entity : mc.world.getOtherEntities(mc.player, box, e -> true)) {
-            if (entity instanceof ItemFrameEntity frame) {
-                double d = frame.squaredDistanceTo(mc.player);
-                if (d < bestD) { bestD = d; best = frame; }
-            }
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities((net.minecraft.entity.Entity)this.mc.player, box, e -> true)) {
+            net.minecraft.entity.decoration.ItemFrameEntity frame;
+            double d;
+            if (!(entity instanceof net.minecraft.entity.decoration.ItemFrameEntity) || !((d = (frame = (net.minecraft.entity.decoration.ItemFrameEntity)entity).squaredDistanceTo((net.minecraft.entity.Entity)this.mc.player)) < bestD)) continue;
+            bestD = d;
+            best = frame;
         }
         return best;
     }
 
-    // 空中龙头确认后：只查 p3 这个精确坐标上有没有"挂在墙上的"展示框实体 (不扫周边范围，防相邻船误判)
-    private ItemFrameEntity findFrameAt(BlockPos pos) {
-        for (var entity : mc.world.getOtherEntities(null, new Box(pos), e -> e instanceof ItemFrameEntity)) {
-            if (entity instanceof ItemFrameEntity frame) {
-                return frame;
-            }
+    private net.minecraft.entity.decoration.ItemFrameEntity findFrameAt(net.minecraft.util.math.BlockPos pos) {
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities(null, new net.minecraft.util.math.Box(pos), e -> e instanceof net.minecraft.entity.decoration.ItemFrameEntity)) {
+            if (!(entity instanceof net.minecraft.entity.decoration.ItemFrameEntity)) continue;
+            net.minecraft.entity.decoration.ItemFrameEntity frame = (net.minecraft.entity.decoration.ItemFrameEntity)entity;
+            return frame;
         }
         return null;
     }
 
-    // 只检测鞘翅正前方固定一格有没有潜影贝 (不扫范围)：潜影贝传走到别处就不再威胁，直接推进
     private boolean hasShulkerAtGuard() {
-        if (waypoints == null) return false;
-        Box box = new Box(waypoints.guard);
-        for (var entity : mc.world.getOtherEntities(null, box, e -> e.getType() == EntityType.SHULKER)) {
-            if (entity.getBlockPos().equals(waypoints.guard)) return true;
+        if (this.waypoints == null) {
+            return false;
+        }
+        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(this.waypoints.guard);
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities(null, box, e -> e.getType() == net.minecraft.entity.EntityType.SHULKER)) {
+            if (!entity.getBlockPos().equals(this.waypoints.guard)) continue;
+            return true;
         }
         return false;
     }
 
-    private ItemEntity findDroppedElytra() {
-        Box box = mc.player.getBoundingBox().expand(32);
-        ItemEntity best = null;
+    private net.minecraft.entity.ItemEntity findDroppedElytra() {
+        net.minecraft.util.math.Box box = this.mc.player.getBoundingBox().expand(32.0);
+        net.minecraft.entity.ItemEntity best = null;
         double bestD = Double.MAX_VALUE;
-        for (var entity : mc.world.getOtherEntities(mc.player, box, e -> true)) {
-            if (entity instanceof ItemEntity item && item.getStack().getItem() == Items.ELYTRA) {
-                double d = item.squaredDistanceTo(mc.player);
-                if (d < bestD) { bestD = d; best = item; }
-            }
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities((net.minecraft.entity.Entity)this.mc.player, box, e -> true)) {
+            double d;
+            net.minecraft.entity.ItemEntity item;
+            if (!(entity instanceof net.minecraft.entity.ItemEntity) || (item = (net.minecraft.entity.ItemEntity)entity).getStack().getItem() != net.minecraft.item.Items.ELYTRA || !((d = item.squaredDistanceTo((net.minecraft.entity.Entity)this.mc.player)) < bestD)) continue;
+            bestD = d;
+            best = item;
         }
         return best;
     }
 
     private boolean hasElytraInInventory() {
-        return findFullDurabilityElytraSlot() != -1 || findAnyElytraSlot() != -1;
+        return this.findFullDurabilityElytraSlot() != -1 || this.findAnyElytraSlot() != -1;
     }
 
     private boolean hasElytraEquipped() {
-        return mc.player.getEquippedStack(EquipmentSlot.CHEST).getItem() == Items.ELYTRA;
+        return this.mc.player.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).getItem() == net.minecraft.item.Items.ELYTRA;
     }
 
     private int findAnyElytraSlot() {
-        for (int i = 0; i < mc.player.getInventory().size(); i++) {
-            if (mc.player.getInventory().getMainStacks().get(i).getItem() == Items.ELYTRA) return i;
+        for (int i = 0; i < this.mc.player.getInventory().size(); ++i) {
+            if (((net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i)).getItem() != net.minecraft.item.Items.ELYTRA) continue;
+            return i;
         }
         return -1;
     }
 
     private int findFullDurabilityElytraSlot() {
-        for (int i = 0; i < mc.player.getInventory().size(); i++) {
-            ItemStack s = mc.player.getInventory().getMainStacks().get(i);
-            if (s.getItem() == Items.ELYTRA && s.getDamage() == 0) return i;
+        for (int i = 0; i < this.mc.player.getInventory().size(); ++i) {
+            net.minecraft.item.ItemStack s = (net.minecraft.item.ItemStack)this.mc.player.getInventory().getStack(i);
+            if (s.getItem() != net.minecraft.item.Items.ELYTRA || s.getDamage() != 0) continue;
+            return i;
         }
         return -1;
     }
 
     private long parseSeed(String s) {
         if (s == null || s.equals("0") || s.isEmpty()) {
-            if (mc.getServer() != null) return mc.getServer().getOverworld().getSeed();
+            if (this.mc.getServer() != null) {
+                return this.mc.getServer().getOverworld().getSeed();
+            }
             return 0L;
         }
         try {
             return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            return (long) s.hashCode();
+        }
+        catch (NumberFormatException e) {
+            return s.hashCode();
         }
     }
 
-    /** V4.24: 方向英文枚举 → 中文（前端全汉化） */
-    private static String directionLabel(Direction d) {
-        return switch (d) {
-            case NORTH -> "北";
-            case SOUTH -> "南";
-            case EAST -> "东";
-            case WEST -> "西";
-            default -> d.toString();
-        };
+    private static enum SweepSide {
+        LEFT("左边"),
+        RIGHT("右边");
+
+        private final String label;
+
+        private SweepSide(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return this.label;
+        }
     }
 
-    // ========== 数据类 ==========
-    private record DragonHead(BlockPos pos, Direction facing) {}
+    private static enum State {
+        IDLE,
+        SEARCHING,
+        RISING,
+        FLYING,
+        LANDING,
+        COLLECTING,
+        DONE;
 
-    private record ShipTarget(CPos chunk, BlockPos headPos, Direction facing) {}
+    }
 
-    private record ShipWaypoints(BlockPos landing, BlockPos p1, BlockPos p2, BlockPos p3, BlockPos guard, Direction facing) {
-        static ShipWaypoints from(BlockPos head, Direction facing) {
-            return new ShipWaypoints(
-                waypoint(head, facing, 7, 0, 4),
-                waypoint(head, facing, 23, -1, -1),
-                waypoint(head, facing, 9, -1, -4),
-                waypoint(head, facing, 7, 0, -3),
-                // 潜影贝固定坐标 = 展示框 (p3) 正前方 1 格、低 1 格 (结构 SHIP_SENTRY_1)
-                waypoint(head, facing, 8, 0, -4),
-                facing
-            );
+    private static enum CollectStep {
+        TO_P1,
+        TO_P2,
+        WAIT_SHULKER,
+        TO_P3,
+        HIT_FRAME,
+        PICK_UP,
+        EQUIP,
+        EXIT_P1,
+        EXIT_LANDING,
+        LEAVE_SHIP;
+
+    }
+
+    private static enum StoragePhase {
+        NONE,
+        PLACE_EC,
+        OPEN_EC,
+        PICK_BOX,
+        CLOSE_SCREEN,
+        PLACE_BOX,
+        OPEN_BOX,
+        FILL_BOX,
+        TAKE_SUPPLIES,
+        MINE_BOX,
+        MINE_EC;
+
+    }
+
+    private record ShipTarget(CPos chunk, net.minecraft.util.math.BlockPos headPos, net.minecraft.util.math.Direction facing) {
+    }
+
+    private record ShipWaypoints(net.minecraft.util.math.BlockPos landing, net.minecraft.util.math.BlockPos p1, net.minecraft.util.math.BlockPos p2, net.minecraft.util.math.BlockPos p3, net.minecraft.util.math.BlockPos guard, net.minecraft.util.math.Direction facing) {
+        static ShipWaypoints from(net.minecraft.util.math.BlockPos head, net.minecraft.util.math.Direction facing) {
+            return new ShipWaypoints(ShipWaypoints.waypoint(head, facing, 7, 0, 4), ShipWaypoints.waypoint(head, facing, 23, -1, -1), ShipWaypoints.waypoint(head, facing, 9, -1, -4), ShipWaypoints.waypoint(head, facing, 7, 0, -3), ShipWaypoints.waypoint(head, facing, 8, 0, -4), facing);
         }
 
-        static BlockPos waypoint(BlockPos head, Direction facing, int behind, int left, int dy) {
-            return head.offset(facing.getOpposite(), behind)
-                       .offset(facing.rotateYCounterclockwise(), left)
-                       .offset(Direction.UP, dy);
+        static net.minecraft.util.math.BlockPos waypoint(net.minecraft.util.math.BlockPos head, net.minecraft.util.math.Direction facing, int behind, int left, int dy) {
+            return head.offset(facing.getOpposite(), behind).offset(facing.rotateYCounterclockwise(), left).offset(net.minecraft.util.math.Direction.UP, dy);
         }
+    }
+
+    private record DragonHead(net.minecraft.util.math.BlockPos pos, net.minecraft.util.math.Direction facing) {
+    }
+
+    private record MoveOp(int source, int target) {
+    }
+
+    private record SupplyRule(net.minecraft.item.Item item, int min, int batch) {
     }
 }
