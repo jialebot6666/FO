@@ -242,7 +242,7 @@ extends Module {
         this.sgGeneral = this.settings.createGroup("通用");
         this.sgFlight = this.settings.createGroup("飞行");
         this.sgAntiChunk = this.settings.createGroup("防卡区块");
-        this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("世界种子")).description("世界种子 (0 = 当前世界).")).defaultValue("0")).build());
+        this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("世界种子")).description("世界种子 (0 = 当前世界). 默认 -7346913998703726680 为本服种子.")).defaultValue("-7346913998703726680")).build());
         this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("搜索半径")).description("搜索半径，单位方块 (从玩家位置).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
         this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("最低高度")).description("飞行中低于此高度时触发爬升.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
         this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("最高高度")).description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 最低高度 组成滞回区间).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
