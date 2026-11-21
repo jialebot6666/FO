@@ -184,6 +184,14 @@ extends Module {
     private int glideFailTicks;
     private int glideRecoverTicks;
     private boolean glideRecovering;
+    /** 烟花耗尽（剩余 ≤ FUEL_EMPTY_THRESHOLD）后进入补给降落 */
+    private boolean fuelEmpty;
+    /** 补给落地后补货完，回到原目标继续飞（不重搜列表） */
+    private boolean supplyLandingResume;
+    /** 补给降落选中的陆地落点 */
+    private net.minecraft.util.math.BlockPos supplySpot;
+    /** 连续补给仍无烟花的次数，防死循环 */
+    private int supplyFailCount;
     private boolean headFound;
     private net.minecraft.util.math.BlockPos exactHead;
     private int nearTicks;
@@ -266,7 +274,7 @@ extends Module {
         this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("世界种子")).description("世界种子 (0 = 当前世界). 默认 -7346913998703726680 为本服种子.")).defaultValue("-7346913998703726680")).build());
         this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("搜索半径")).description("搜索半径，单位方块 (从玩家位置).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
         this.ringSearch = this.sgGeneral.add((((new BoolSetting.Builder().name("搜索末地环内鞘翅")).description("用 26.3 修复版 cubiomes 原生定位器搜索末地城，末地环 (外岛) 的船也能定位；适配 Folia 等已修复末地环的服务端。关闭则用旧版 1.21 种子推算.")).defaultValue(true)).build());
-        this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("最低高度")).description("飞行中低于此高度时触发爬升.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
+        this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("最低高度")).description("飞行中低于此高度时触发爬升；低于此高度才补烟花.")).defaultValue(160)).range(100, 300).sliderRange(120, 260).build());
         this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("最高高度")).description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 最低高度 组成滞回区间).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
         this.riseHeight = this.sgFlight.add((((new IntSetting.Builder().name("拉升高度")).description("起飞后抬头爬升到的目标高度 (需高于 最高高度).")).defaultValue(230)).range(200, 320).sliderRange(200, 300).build());
         this.pitchSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("俯仰速度")).description("飞行 (俯冲巡航) 时上下转动视角 (俯仰角) 的速度 (度/游戏刻).")).defaultValue(10.0).min(1.0).sliderMax(45.0).build());
@@ -283,7 +291,7 @@ extends Module {
         this.debugSetting = this.sgGeneral.add((((new BoolSetting.Builder().name("调试日志")).description("输出调试日志 (用于校准高度公式).")).defaultValue(false)).build());
         this.sgStorage = this.settings.createGroup("存储");
         this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("存盒空格阈值")).description("背包可用空格 ≤ 此值时，拿到鞘翅后自动去末影箱存鞘翅.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
-        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:golden_carrot;8;32")))).build());
+        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;256", "minecraft:golden_carrot;8;32")))).build());
         this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("低Y自动退出")).description("Y 低于阈值时自动退出游戏 (断开服务器，防虚空掉物).")).defaultValue(true)).build());
         this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("低Y阈值")).description("低于此 Y 自动退出游戏.")).defaultValue(20)).range(-64, 100).sliderRange(-64, 100).build());
         // 防卡区块（内嵌自 Ying 0.7.2 Pitch40Fly）
@@ -315,9 +323,9 @@ extends Module {
         this.pullUpPitch = this.sgHelpers.add((((new DoubleSetting.Builder().name("拉升俯仰")).description("拉升时抬头俯仰角 (负值=抬头)。")).defaultValue(-37.72)).min(-90.0).max(-10.0).sliderRange(-80.0, -20.0).build());
         // 自动补烟花（内嵌自 Jeff Mod Pitch40Util）+ 滑翔失效恢复
         this.autoFireworkBoost = this.sgHelpers.add((((new BoolSetting.Builder().name("自动补烟花")).description("抬头速度不足或高度过低时自动补一发烟花 (借鉴 Jeff Mod Pitch40Util)。")).defaultValue(true)).build());
-        this.fireworkVelocityThreshold = this.sgHelpers.add((((new DoubleSetting.Builder().name("补烟花速度阈值")).description("抬头阶段垂直速度低于此值就补烟花 (负值=已在下坠)。")).defaultValue(-0.05)).range(-0.5, 1.0).sliderRange(-0.5, 0.5).build());
+        this.fireworkVelocityThreshold = this.sgHelpers.add((((new DoubleSetting.Builder().name("补烟花速度阈值")).description("抬头阶段垂直速度低于此值就补烟花 (负值=已在下坠)。")).defaultValue(-0.35)).range(-0.5, 1.0).sliderRange(-0.5, 0.5).build());
         this.fireworkBoostCooldownTicks = this.sgHelpers.add((((new IntSetting.Builder().name("补烟花冷却")).description("两发补烟花之间至少间隔多少 游戏刻。")).defaultValue(10)).range(0, 100).sliderRange(0, 100).build());
-        this.lowHeightRocketGap = this.sgHelpers.add((((new IntSetting.Builder().name("低空补烟花高度差")).description("Y 低于「最低高度+该值」时无条件补烟花。")).defaultValue(20)).range(0, 100).sliderRange(0, 100).build());
+        this.lowHeightRocketGap = this.sgHelpers.add((((new IntSetting.Builder().name("低空补烟花高度差")).description("(保留项) 低空补烟花高度差；当前以「最低高度」为界，此值暂不参与。")).defaultValue(20)).range(0, 100).sliderRange(0, 100).build());
         this.state = State.IDLE;
         this.collectStep = CollectStep.TO_P1;
         this.ships = Collections.synchronizedList(new ArrayList());
@@ -339,6 +347,10 @@ extends Module {
         this.glideFailTicks = 0;
         this.glideRecoverTicks = 0;
         this.glideRecovering = false;
+        this.fuelEmpty = false;
+        this.supplyLandingResume = false;
+        this.supplySpot = null;
+        this.supplyFailCount = 0;
         this.sessionSkip = Collections.synchronizedSet(new HashSet());
         this.searchExtends = 0;
         this.takeoffFacing = null;
@@ -426,6 +438,10 @@ extends Module {
         this.glideFailTicks = 0;
         this.glideRecoverTicks = 0;
         this.glideRecovering = false;
+        this.fuelEmpty = false;
+        this.supplyLandingResume = false;
+        this.supplySpot = null;
+        this.supplyFailCount = 0;
         this.landingRecover = false;
         this.recoveryYaw = 0.0f;
         this.recoverStageTick = 0;
@@ -760,6 +776,10 @@ extends Module {
         this.glideFailTicks = 0;
         this.glideRecoverTicks = 0;
         this.glideRecovering = false;
+        this.fuelEmpty = false;
+        this.supplyLandingResume = false;
+        this.supplySpot = null;
+        this.supplyFailCount = 0;
         this.exactHead = null;
         this.nearTicks = 0;
         this.scanAttempts = 0;
@@ -811,6 +831,10 @@ extends Module {
                 }
                 case 5: {
                     this.onCollecting();
+                    break;
+                }
+                case 7: {
+                    this.onSupplyLanding();
                     break;
                 }
             }
@@ -940,6 +964,12 @@ extends Module {
         this.glideFailTicks = 0;
         this.glideRecoverTicks = 0;
         this.glideRecovering = false;
+
+        // 烟花燃料耗尽：中止 p40 巡航，改为缓降寻找陆地补给
+        if (this.autoFireworkBoost.get() && this.countFireworks() <= 4) {
+            this.enterSupplyLanding();
+            return;
+        }
 
         net.minecraft.util.math.BlockPos lp = this.waypoints.landing;
 
@@ -1074,7 +1104,7 @@ extends Module {
                 && this.horizontalDistance(lp) > 20.0
                 && this.mc.player.getY() < (double)this.maxHeight.get()) {
             boolean tooSlow = this.climbing && this.mc.player.getVelocity().y < this.fireworkVelocityThreshold.get();
-            boolean tooLow = this.mc.player.getY() < (double)(this.minHeight.get() + this.lowHeightRocketGap.get());
+            boolean tooLow = this.mc.player.getY() < (double)this.minHeight.get();
             if (tooSlow || tooLow) {
                 this.useFirework();
                 this.fireworkBoostCooldown = Math.max(this.fireworkBoostCooldownTicks.get(), (int)Math.max(1L, Math.round(this.fireworkInterval.get() * 20.0)));
@@ -1155,7 +1185,7 @@ extends Module {
     }
 
     boolean isLandingOrRecovering() {
-        return this.state == State.LANDING || this.landingRecover;
+        return this.state == State.LANDING || this.state == State.SUPPLY_LANDING || this.landingRecover;
     }
 
     boolean isPullUpSuppressed() {
@@ -2311,6 +2341,18 @@ extends Module {
         this.storagePhase = StoragePhase.NONE;
         this.storageTick = 0;
         this.pickupWaitStart = -1;
+        if (this.supplyLandingResume) {
+            this.supplyLandingResume = false;
+            if (this.countFireworks() > 4) {
+                this.supplyFailCount = 0;
+            }
+            this.info("燃料补给完成，继续飞向当前目标.", new Object[0]);
+            this.firstFireworkDone = false;
+            this.landingRecover = false;
+            this.state = State.RISING;
+            this.stateTick = 0;
+            return;
+        }
         if (this.state == State.COLLECTING && this.collectStep == CollectStep.EQUIP) {
             this.info("船旁存储会话结束，先走回降落点再起飞.", new Object[0]);
             this.advance(CollectStep.EXIT_P1);
@@ -3064,7 +3106,7 @@ extends Module {
         this.mc.options.forwardKey.setPressed(true);
     }
 
-    private void useFirework() {
+    private boolean useFirework() {
         FindItemResult fw = InvUtils.findInHotbar((net.minecraft.item.Item[])new net.minecraft.item.Item[]{net.minecraft.item.Items.FIREWORK_ROCKET});
         if (!fw.found()) {
             FindItemResult inv = InvUtils.find((net.minecraft.item.Item[])new net.minecraft.item.Item[]{net.minecraft.item.Items.FIREWORK_ROCKET});
@@ -3072,7 +3114,7 @@ extends Module {
                 InvUtils.move().from(inv.slot()).toHotbar(1);
                 this.info("物品栏没有烟花，从背包调取放到第 2 个槽位.", new Object[0]);
             }
-            return;
+            return false;
         }
         if (fw.isOffhand()) {
             this.mc.interactionManager.interactItem((net.minecraft.entity.player.PlayerEntity)this.mc.player, net.minecraft.util.Hand.OFF_HAND);
@@ -3081,6 +3123,94 @@ extends Module {
             this.mc.interactionManager.interactItem((net.minecraft.entity.player.PlayerEntity)this.mc.player, net.minecraft.util.Hand.MAIN_HAND);
             InvUtils.swapBack();
         }
+        return true;
+    }
+
+    /** 统计烟花总数（背包 36 格 + 副手）。 */
+    private int countFireworks() {
+        int n = this.countItem(net.minecraft.item.Items.FIREWORK_ROCKET);
+        net.minecraft.item.ItemStack off = this.mc.player.getOffHandStack();
+        if (off.getItem() == net.minecraft.item.Items.FIREWORK_ROCKET) {
+            n += off.getCount();
+        }
+        return n;
+    }
+
+    /** 烟花耗尽：中止巡航，切到补给降落。 */
+    private void enterSupplyLanding() {
+        if (this.state == State.SUPPLY_LANDING) {
+            return;
+        }
+        if (++this.supplyFailCount > 2) {
+            this.warning("烟花多次补给后仍不足，停止任务 (请检查末影箱烟花库存).", new Object[0]);
+            this.stopTask("烟花补给失败，停止任务.");
+            return;
+        }
+        this.fuelEmpty = true;
+        this.pullUpActive = false;
+        this.pullUpTick = 0;
+        this.supplySpot = null;
+        this.landingRecover = false;
+        this.state = State.SUPPLY_LANDING;
+        this.stateTick = 0;
+        this.info("烟花剩余 " + this.countFireworks() + " 发，判定燃料耗尽，改为缓降寻找陆地补给.", new Object[0]);
+        PathManagers.get().stop();
+    }
+
+    /** 补给降落：缓降找最近已加载的陆地，落地后走存储会话补货。 */
+    private void onSupplyLanding() {
+        if (this.mc.player.isOnGround()) {
+            this.info("燃料耗尽: 已落地，开始从末影箱补给.", new Object[0]);
+            this.fuelEmpty = false;
+            this.supplyLandingResume = true;
+            this.supplySpot = null;
+            this.releaseForward();
+            PathManagers.get().stop();
+            this.dumpNeeded = false;
+            this.resupplyNeeded = true;
+            this.storagePhase = StoragePhase.PLACE_EC;
+            this.storageTick = 0;
+            this.ecPos = null;
+            this.boxPos = null;
+            this.boxInventorySlot = -1;
+            this.boxFromInventory = false;
+            this.supplyScanStart = 0;
+            this.supplyPauseDump = false;
+            this.resupplyRescan = false;
+            return;
+        }
+        if (!this.mc.player.isGliding()) {
+            this.mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket(this.mc.player, net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+            return;
+        }
+        if (this.stateTick % 40 == 0 || this.supplySpot == null) {
+            this.supplySpot = this.findLandingSpotAhead();
+        }
+        if (this.supplySpot != null) {
+            this.rotateTo(this.yawTowards(this.supplySpot), 30.0f);
+        } else {
+            this.rotateTo(this.mc.player.getYaw(), 20.0f);
+        }
+        this.mc.options.forwardKey.setPressed(true);
+    }
+
+    /** 沿当前朝向向前扫 160 格，找第一处已加载且有地表的落点。 */
+    private net.minecraft.util.math.BlockPos findLandingSpotAhead() {
+        double yawRad = Math.toRadians((double)this.mc.player.getYaw());
+        double dx = -Math.sin(yawRad);
+        double dz = Math.cos(yawRad);
+        for (int d = 0; d <= 160; d += 8) {
+            int x = (int)Math.floor(this.mc.player.getX() + dx * (double)d);
+            int z = (int)Math.floor(this.mc.player.getZ() + dz * (double)d);
+            if (!this.mc.world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) {
+                continue;
+            }
+            int top = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, x, z);
+            if (top >= 30) {
+                return new net.minecraft.util.math.BlockPos(x, top, z);
+            }
+        }
+        return null;
     }
 
     private void releaseForward() {
@@ -3365,7 +3495,8 @@ extends Module {
         FLYING("飞行"),
         LANDING("降落"),
         COLLECTING("采集"),
-        DONE("完成");
+        DONE("完成"),
+        SUPPLY_LANDING("补给降落");
 
         private final String label;
 
