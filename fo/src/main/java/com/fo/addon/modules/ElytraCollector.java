@@ -238,54 +238,54 @@ extends Module {
     }
 
     public ElytraCollector() {
-        super(AddonTemplate.CATEGORY, "FO 鞘翅采集", "\u5168\u81ea\u52a8\u627e\u672b\u5730\u57ce\u9798\u7fc5\uff1a\u79cd\u5b50\u5b9a\u4f4d + \u9f99\u5934\u7cbe\u786e\u5b9a\u4f4d + \u9ad8\u5ea6\u4fdd\u6301\u98de\u884c + \u7f13\u964d + Baritone \u5bfb\u8def + \u6253\u5c55\u793a\u6846\u6361\u9798\u7fc5.");
-        this.sgGeneral = this.settings.getDefaultGroup();
+        super(AddonTemplate.CATEGORY, "FO 鞘翅采集", "全自动找末地城鞘翅：种子定位 + 龙头精确定位 + 高度保持飞行 + 缓降 + 寻路 + 打展示框捡鞘翅.");
+        this.sgGeneral = this.settings.createGroup("通用");
         this.sgFlight = this.settings.createGroup("飞行");
         this.sgAntiChunk = this.settings.createGroup("防卡区块");
-        this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("seed")).description("\u4e16\u754c\u79cd\u5b50 (0 = \u5f53\u524d\u4e16\u754c).")).defaultValue("0")).build());
-        this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("search-range")).description("\u641c\u7d22\u534a\u5f84\uff0c\u5355\u4f4d\u65b9\u5757 (\u4ece\u73a9\u5bb6\u4f4d\u7f6e).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
-        this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("min-height")).description("\u98de\u884c\u4e2d\u4f4e\u4e8e\u6b64\u9ad8\u5ea6\u65f6\u89e6\u53d1\u722c\u5347.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
-        this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("max-height")).description("\u98de\u884c\u4e2d\u9ad8\u4e8e\u6b64\u9ad8\u5ea6\u65f6\u505c\u6b62\u722c\u5347\u3001\u8f6c\u4e3a\u5e73\u7f13\u4e0b\u6ed1 (\u4e0e min-height \u7ec4\u6210\u6ede\u56de\u533a\u95f4).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
-        this.riseHeight = this.sgFlight.add((((new IntSetting.Builder().name("rise-height")).description("\u8d77\u98de\u540e\u62ac\u5934\u722c\u5347\u5230\u7684\u76ee\u6807\u9ad8\u5ea6 (\u9700\u9ad8\u4e8e max-height).")).defaultValue(230)).range(200, 320).sliderRange(200, 300).build());
-        this.pitchSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("pitch-speed")).description("\u98de\u884c (pitch40) \u65f6\u4e0a\u4e0b\u8f6c\u52a8\u89c6\u89d2 (pitch) \u7684\u901f\u5ea6 (\u5ea6/tick).")).defaultValue(10.0).min(1.0).sliderMax(45.0).build());
-        this.yawSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("yaw-speed")).description("\u5de6\u53f3\u8f6c\u52a8\u89c6\u89d2 (yaw) \u53ca\u9798\u7fc5\u7f13\u964d\u7684\u8f6c\u5411\u901f\u5ea6 (\u5ea6/tick).")).defaultValue(30.0).min(1.0).sliderMax(90.0).build());
-        this.killAuraReach = this.sgFlight.add(((new DoubleSetting.Builder().name("kill-aura-reach")).description("\u653b\u51fb\u5c55\u793a\u6846 (item_frame) \u7684\u5224\u5b9a\u8ddd\u79bb.")).defaultValue(3.0).min(1.0).sliderMax(6.0).build());
-        this.fireworkInterval = this.sgFlight.add(((new DoubleSetting.Builder().name("firework-interval")).description("\u5c55\u5f00\u9798\u7fc5\u540e\u7acb\u5373\u4f7f\u7528\u7b2c\u4e00\u4e2a\u70df\u82b1\uff0c\u4e4b\u540e\u6bcf\u9694\u8fd9\u4e48\u591a\u79d2\u518d\u7528\u4e00\u4e2a (\u79d2).")).defaultValue(2.0).min(0.5).sliderRange(0.5, 10.0).build());
-        this.blacklist = this.sgGeneral.add(((((new StringListSetting.Builder().name("blacklist")).description("\u9ed1\u540d\u5355\uff1a\u5df2\u7ecf\u53bb\u8fc7\u7684\u8239 (x,z)\uff0c\u641c\u7d22\u65f6\u4f1a\u81ea\u52a8\u8df3\u8fc7. \u81ea\u52a8\u7ef4\u62a4.")).defaultValue(new ArrayList())).visible(() -> false)).build());
-        this.searchResults = this.sgGeneral.add((((new StringListSetting.Builder().name("search-results")).description("\u4e0a\u6b21\u641c\u7d22\u7ed3\u679c\u5217\u8868 (x,y,z,\u671d\u5411)\uff0c\u4e0b\u4e00\u6b21\u641c\u7d22\u5b8c\u6210\u540e\u8986\u76d6.")).defaultValue(new ArrayList())).build());
-        this.btnStart = this.sgGeneral.add(((((new BoolSetting.Builder().name("start")).description("\u5f00\u59cb\u81ea\u52a8\u91c7\u96c6.")).defaultValue(false)).onChanged(b -> {
+        this.seedSetting = this.sgGeneral.add((((new StringSetting.Builder().name("世界种子")).description("世界种子 (0 = 当前世界).")).defaultValue("0")).build());
+        this.searchRange = this.sgGeneral.add((((new IntSetting.Builder().name("搜索半径")).description("搜索半径，单位方块 (从玩家位置).")).defaultValue(5000)).range(320, 100000).sliderRange(320, 20000).build());
+        this.minHeight = this.sgFlight.add((((new IntSetting.Builder().name("最低高度")).description("飞行中低于此高度时触发爬升.")).defaultValue(180)).range(100, 300).sliderRange(120, 260).build());
+        this.maxHeight = this.sgFlight.add((((new IntSetting.Builder().name("最高高度")).description("飞行中高于此高度时停止爬升、转为平缓下滑 (与 最低高度 组成滞回区间).")).defaultValue(220)).range(120, 320).sliderRange(140, 300).build());
+        this.riseHeight = this.sgFlight.add((((new IntSetting.Builder().name("拉升高度")).description("起飞后抬头爬升到的目标高度 (需高于 最高高度).")).defaultValue(230)).range(200, 320).sliderRange(200, 300).build());
+        this.pitchSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("俯仰速度")).description("飞行 (俯冲巡航) 时上下转动视角 (俯仰角) 的速度 (度/游戏刻).")).defaultValue(10.0).min(1.0).sliderMax(45.0).build());
+        this.yawSpeed = this.sgFlight.add(((new DoubleSetting.Builder().name("转向速度")).description("左右转动视角 (偏航角) 及鞘翅缓降的转向速度 (度/游戏刻).")).defaultValue(30.0).min(1.0).sliderMax(90.0).build());
+        this.killAuraReach = this.sgFlight.add(((new DoubleSetting.Builder().name("攻击距离")).description("攻击展示框 (展示框) 的判定距离.")).defaultValue(3.0).min(1.0).sliderMax(6.0).build());
+        this.fireworkInterval = this.sgFlight.add(((new DoubleSetting.Builder().name("烟花间隔")).description("展开鞘翅后立即使用第一个烟花，之后每隔这么多秒再用一个 (秒).")).defaultValue(2.0).min(0.5).sliderRange(0.5, 10.0).build());
+        this.blacklist = this.sgGeneral.add(((((new StringListSetting.Builder().name("黑名单")).description("黑名单：已经去过的船 (x,z)，搜索时会自动跳过. 自动维护.")).defaultValue(new ArrayList())).visible(() -> false)).build());
+        this.searchResults = this.sgGeneral.add((((new StringListSetting.Builder().name("搜索结果")).description("上次搜索结果列表 (x,y,z,朝向)，下一次搜索完成后覆盖.")).defaultValue(new ArrayList())).build());
+        this.btnStart = this.sgGeneral.add(((((new BoolSetting.Builder().name("开始采集")).description("开始自动采集.")).defaultValue(false)).onChanged(b -> {
             if (b.booleanValue()) {
                 this.start();
             }
         })).build());
-        this.debugSetting = this.sgGeneral.add((((new BoolSetting.Builder().name("debug")).description("\u8f93\u51fa\u8c03\u8bd5\u65e5\u5fd7 (\u7528\u4e8e\u6821\u51c6\u9ad8\u5ea6\u516c\u5f0f).")).defaultValue(false)).build());
+        this.debugSetting = this.sgGeneral.add((((new BoolSetting.Builder().name("调试日志")).description("输出调试日志 (用于校准高度公式).")).defaultValue(false)).build());
         this.sgStorage = this.settings.createGroup("存储");
-        this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("dump-free-slots")).description("\u80cc\u5305\u53ef\u7528\u7a7a\u683c \u2264 \u6b64\u503c\u65f6\uff0c\u62ff\u5230\u9798\u7fc5\u540e\u81ea\u52a8\u53bb\u672b\u5f71\u7bb1\u5b58\u9798\u7fc5.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
-        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("supplies")).description("\u7269\u8d44\u5217\u8868\uff0c\u683c\u5f0f: \u7269\u54c1ID;\u6700\u4f4e\u503c;\u76ee\u6807\u5e93\u5b58 (\u5982 minecraft:firework_rocket;32;256). \u80cc\u5305\u7269\u8d44\u4f4e\u4e8e\u6700\u4f4e\u503c\u65f6\u81ea\u52a8\u4ece\u672b\u5f71\u7bb1\u8865\u8d27\uff0c\u62ff\u5230\u76ee\u6807\u5e93\u5b58\u4e3a\u6b62.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:cooked_beef;8;32")))).build());
-        this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("low-y-exit")).description("Y 低于阈值时自动停止任务 (防虚空掉物，不退游戏).")).defaultValue(true)).build());
-        this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("low-y-threshold")).description("低于此 Y 自动停止任务.")).defaultValue(-20)).range(-64, 100).sliderRange(-64, 64).build());
+        this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("存盒空格阈值")).description("背包可用空格 ≤ 此值时，拿到鞘翅后自动去末影箱存鞘翅.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
+        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:cooked_beef;8;32")))).build());
+        this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("低Y停止任务")).description("Y 低于阈值时自动停止任务 (防虚空掉物，不退游戏).")).defaultValue(true)).build());
+        this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("低Y阈值")).description("低于此 Y 自动停止任务.")).defaultValue(-20)).range(-64, 100).sliderRange(-64, 64).build());
         // 防卡区块（内嵌自 Ying 0.7.2 Pitch40Fly）
-        this.antiChunkClimb = this.sgAntiChunk.add((((new BoolSetting.Builder().name("anti-chunk-climb")).description("面向方向前方未加载区块太近时，强制抬头爬升，避免被服务端拉回。")).defaultValue(true)).build());
-        this.chunkLookahead = this.sgAntiChunk.add((((new IntSetting.Builder().name("chunk-lookahead")).description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")).defaultValue(32)).range(4, 128).sliderRange(4, 128).build());
-        this.minClimbTicks = this.sgAntiChunk.add((((new IntSetting.Builder().name("min-climb-ticks")).description("触发防卡拉升后至少保持多少 tick，防止一抖一抖。")).defaultValue(10)).range(0, 100).sliderRange(0, 100).build());
-        this.resumeMargin = this.sgAntiChunk.add((((new IntSetting.Builder().name("resume-margin")).description("未加载区块距离要大于 检测距离+该值 且连续 3 tick 满足，才结束拉升。")).defaultValue(16)).range(0, 64).sliderRange(0, 64).build());
+        this.antiChunkClimb = this.sgAntiChunk.add((((new BoolSetting.Builder().name("防卡区块")).description("面向方向前方未加载区块太近时，强制抬头爬升，避免被服务端拉回。")).defaultValue(true)).build());
+        this.chunkLookahead = this.sgAntiChunk.add((((new IntSetting.Builder().name("检测距离")).description("面向方向上前方多少格内出现未加载区块就触发爬升 (格).")).defaultValue(32)).range(4, 128).sliderRange(4, 128).build());
+        this.minClimbTicks = this.sgAntiChunk.add((((new IntSetting.Builder().name("最短爬升")).description("触发防卡拉升后至少保持多少 游戏刻，防止一抖一抖。")).defaultValue(10)).range(0, 100).sliderRange(0, 100).build());
+        this.resumeMargin = this.sgAntiChunk.add((((new IntSetting.Builder().name("恢复余量")).description("未加载区块距离要大于 检测距离+该值 且连续 3 游戏刻 满足，才结束拉升。")).defaultValue(16)).range(0, 64).sliderRange(0, 64).build());
         // 俯仰平滑（内嵌自 Ying 0.7.2 Pitch40Fly）
-        this.pitchSmooth = this.sgFlight.add((((new BoolSetting.Builder().name("pitch-smooth")).description("爬升/俯冲时按固定角速度平滑过渡，不硬切 37.72/-54.77。")).defaultValue(true)).build());
-        this.pitchRotateUp = this.sgFlight.add((((new DoubleSetting.Builder().name("pitch-rotate-up")).description("俯仰平滑开启时，爬升抬头速度 (度/tick).")).defaultValue(5.45)).min(1.0).sliderMax(20.0).build());
-        this.pitchRotateDown = this.sgFlight.add((((new DoubleSetting.Builder().name("pitch-rotate-down")).description("俯仰平滑开启时，俯冲低头速度 (度/tick).")).defaultValue(0.9)).min(0.5).sliderMax(2.0).build());
+        this.pitchSmooth = this.sgFlight.add((((new BoolSetting.Builder().name("俯仰平滑")).description("爬升/俯冲时按固定角速度平滑过渡，不硬切 37.72/-54.77。")).defaultValue(true)).build());
+        this.pitchRotateUp = this.sgFlight.add((((new DoubleSetting.Builder().name("抬头速度")).description("俯仰平滑开启时，爬升抬头速度 (度/游戏刻).")).defaultValue(5.45)).min(1.0).sliderMax(20.0).build());
+        this.pitchRotateDown = this.sgFlight.add((((new DoubleSetting.Builder().name("低头速度")).description("俯仰平滑开启时，俯冲低头速度 (度/游戏刻).")).defaultValue(0.9)).min(0.5).sliderMax(2.0).build());
         // 绕圈扫图（内嵌自 Ying 0.7.2 ScanSweep）
         this.sgHelpers = this.settings.createGroup("辅助");
-        this.sweepScan = this.sgHelpers.add((((new BoolSetting.Builder().name("sweep-scan")).description("未确认龙头时绕中心点扫图：视角始终垂直于「中心点→当前位置」连线。")).defaultValue(false)).build());
-        this.sweepCenterX = this.sgHelpers.add((((new IntSetting.Builder().name("sweep-center-x")).description("扫图中心点 X 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
-        this.sweepCenterZ = this.sgHelpers.add((((new IntSetting.Builder().name("sweep-center-z")).description("扫图中心点 Z 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
-        this.sweepSide = this.sgHelpers.add((((new EnumSetting.Builder<SweepSide>().name("sweep-side")).description("取垂线的哪个方向：直线的左边 / 右边。")).defaultValue(SweepSide.LEFT)).build());
-        this.sweepOffset = this.sgHelpers.add((((new DoubleSetting.Builder().name("sweep-offset")).description("偏移角 (度)：在垂线朝向上再转这么多度，范围 -30 ~ 30。")).defaultValue(0.0)).range(-30.0, 30.0).sliderRange(-30.0, 30.0).decimalPlaces(4).build());
-        this.slowFallBoost = this.sgHelpers.add((((new BoolSetting.Builder().name("slow-fall-boost")).description("缓降增强：平视 + 每 2 tick 翻转 yaw 180° 抵消水平速度。")).defaultValue(true)).build());
+        this.sweepScan = this.sgHelpers.add((((new BoolSetting.Builder().name("绕圈扫图")).description("未确认龙头时绕中心点扫图：视角始终垂直于「中心点→当前位置」连线。")).defaultValue(false)).build());
+        this.sweepCenterX = this.sgHelpers.add((((new IntSetting.Builder().name("扫图中心X")).description("扫图中心点 X 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
+        this.sweepCenterZ = this.sgHelpers.add((((new IntSetting.Builder().name("扫图中心Z")).description("扫图中心点 Z 坐标 (方块).")).defaultValue(0)).range(-30000000, 30000000).sliderRange(-10000, 10000).build());
+        this.sweepSide = this.sgHelpers.add((((new EnumSetting.Builder<SweepSide>().name("扫图方向")).description("取垂线的哪个方向：直线的左边 / 右边。")).defaultValue(SweepSide.LEFT)).build());
+        this.sweepOffset = this.sgHelpers.add((((new DoubleSetting.Builder().name("扫图偏移")).description("偏移角 (度)：在垂线朝向上再转这么多度，范围 -30 ~ 30。")).defaultValue(0.0)).range(-30.0, 30.0).sliderRange(-30.0, 30.0).decimalPlaces(4).build());
+        this.slowFallBoost = this.sgHelpers.add((((new BoolSetting.Builder().name("缓降增强")).description("缓降增强：平视 + 每 2 游戏刻 翻转 偏航角 180° 抵消水平速度。")).defaultValue(true)).build());
         // 起跳防卡（内嵌自 Ying 0.7.2 ElytraJump）
-        this.antiStuckJump = this.sgHelpers.add((((new BoolSetting.Builder().name("anti-stuck-jump")).description("起跳防卡：连续两次检测在同一位置时用 Baritone 寻路绕开。")).defaultValue(false)).build());
-        this.antiStuckInterval = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-interval")).description("防卡住检测间隔 (tick).")).defaultValue(20)).range(2, 200).build());
-        this.antiStuckOffset = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-offset")).description("防卡住目标点偏移 (沿运动方向，格).")).defaultValue(4)).range(1, 30).sliderRange(1, 30).build());
-        this.antiStuckResumeTicks = this.sgHelpers.add((((new IntSetting.Builder().name("anti-stuck-resume-tick")).description("触发后等待多少 tick 恢复鞘翅跳跃 (Baritone 寻路期间保持暂停)。")).defaultValue(80)).range(10, 600).build());
+        this.antiStuckJump = this.sgHelpers.add((((new BoolSetting.Builder().name("起跳防卡")).description("起跳防卡：连续两次检测在同一位置时用 寻路绕开。")).defaultValue(false)).build());
+        this.antiStuckInterval = this.sgHelpers.add((((new IntSetting.Builder().name("防卡检测间隔")).description("防卡住检测间隔 (游戏刻).")).defaultValue(20)).range(2, 200).build());
+        this.antiStuckOffset = this.sgHelpers.add((((new IntSetting.Builder().name("绕行偏移")).description("防卡住目标点偏移 (沿运动方向，格).")).defaultValue(4)).range(1, 30).sliderRange(1, 30).build());
+        this.antiStuckResumeTicks = this.sgHelpers.add((((new IntSetting.Builder().name("恢复等待")).description("触发后等待多少 游戏刻 恢复鞘翅跳跃 (寻路期间保持暂停)。")).defaultValue(80)).range(10, 600).build());
         this.state = State.IDLE;
         this.collectStep = CollectStep.TO_P1;
         this.ships = Collections.synchronizedList(new ArrayList());
@@ -363,14 +363,14 @@ extends Module {
     }
 
     public WWidget getWidget(GuiTheme theme) {
-        WSection section = theme.section("\u9ed1\u540d\u5355", true);
-        WButton clear = (WButton)section.add((WWidget)theme.button("\u6e05\u9664\u9ed1\u540d\u5355")).expandX().widget();
+        WSection section = theme.section("黑名单", true);
+        WButton clear = (WButton)section.add((WWidget)theme.button("清除黑名单")).expandX().widget();
         clear.action = () -> {
             List list = (List)this.blacklist.get();
             synchronized (list) {
                 ((List)this.blacklist.get()).clear();
             }
-            this.info("\u9ed1\u540d\u5355\u5df2\u6e05\u7a7a.", new Object[0]);
+            this.info("黑名单已清空.", new Object[0]);
         };
         return section;
     }
@@ -432,9 +432,9 @@ extends Module {
         this.storagePhase = StoragePhase.NONE;
         this.storageTick = 0;
         this.boxInventorySlot = -1;
-        this.info("\u5f00\u59cb\u641c\u7d22\u672b\u5730\u57ce (\u8303\u56f4=" + String.valueOf(this.searchRange.get()) + " \u65b9\u5757)...", new Object[0]);
+        this.info("开始搜索末地城 (范围=" + String.valueOf(this.searchRange.get()) + " 方块)...", new Object[0]);
         if ((this.debugSetting.get()).booleanValue()) {
-            this.info("\u8c03\u8bd5\u65e5\u5fd7\u6587\u4ef6: " + String.valueOf(this.debugFilePath().toAbsolutePath()), new Object[0]);
+            this.info("调试日志文件: " + String.valueOf(this.debugFilePath().toAbsolutePath()), new Object[0]);
         }
         this.launchSearch();
     }
@@ -488,7 +488,7 @@ extends Module {
                         if (hasShip && (t = this.extractShip(generator, city)) != null && !this.isBlacklisted(t.headPos) && !this.sessionSkip.contains(this.blacklistKey(t.headPos))) {
                             found.add(t);
                             if ((this.debugSetting.get()).booleanValue()) {
-                                this.debugLog("ship city=(" + city.getX() + "," + city.getZ() + ") head=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") facing=" + String.valueOf(t.facing) + " E=" + String.format("%.4f", this.endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
+                                this.debugLog("船 城=(" + city.getX() + "," + city.getZ() + ") 龙头=(" + t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + ") 朝向=" + String.valueOf(t.facing) + " E=" + String.format("%.4f", this.endIslandDensity(city.getX() * 16 + 8, city.getZ() * 16 + 8)));
                             }
                         }
                         generator.reset();
@@ -508,15 +508,15 @@ extends Module {
                         ((List)this.searchResults.get()).add(t.headPos.getX() + "," + t.headPos.getY() + "," + t.headPos.getZ() + "," + String.valueOf(t.facing));
                     }
                 }
-                this.info("\u627e\u5230 " + this.ships.size() + " \u8258\u5e26\u8239\u672b\u5730\u57ce (\u5df2\u6392\u9664\u9ed1\u540d\u5355, \u8303\u56f4=" + range + ").", new Object[0]);
+                this.info("找到 " + this.ships.size() + " 艘带船末地城 (已排除黑名单, 范围=" + range + ").", new Object[0]);
                 if (this.ships.isEmpty()) {
                     if (this.searchExtends < 10) {
                         ++this.searchExtends;
-                        this.info("\u8303\u56f4\u5185\u6ca1\u6709\u672b\u5730\u8239\uff0c\u6269\u5927\u8303\u56f4 +" + this.searchExtends * 500 + " \u683c\u91cd\u65b0\u641c\u7d22...", new Object[0]);
+                        this.info("范围内没有末地船，扩大范围 +" + this.searchExtends * 500 + " 格重新搜索...", new Object[0]);
                         this.launchSearch();
                     } else {
                         this.searchExtends = 0;
-                        this.completeTask("\u8303\u56f4\u5185\u6ca1\u6709\u672b\u5730\u8239\uff0c\u4efb\u52a1\u5b8c\u6210.");
+                        this.completeTask("范围内没有末地船，任务完成.");
                     }
                 } else {
                     this.searchExtends = 0;
@@ -529,7 +529,7 @@ extends Module {
             }
             catch (Exception e) {
                 if (this.searchCancelled || generation != this.searchGeneration) break block18;
-                this.error("\u641c\u7d22\u5931\u8d25: " + e.getMessage(), new Object[0]);
+                this.error("搜索失败: " + e.getMessage(), new Object[0]);
                 this.state = State.IDLE;
                 this.btnStart.set(false);
             }
@@ -571,7 +571,7 @@ extends Module {
 
     private void beginFlyToTarget() {
         if (this.targetIndex >= this.ships.size()) {
-            this.completeTask("\u5168\u90e8\u672b\u5730\u57ce\u5df2\u5904\u7406\uff0c\u4efb\u52a1\u5b8c\u6210.");
+            this.completeTask("全部末地城已处理，任务完成.");
             return;
         }
         this.current = this.ships.get(this.targetIndex);
@@ -588,7 +588,7 @@ extends Module {
         this.landingRecover = false;
         this.recoverCount = 0;
         this.stateTick = 0;
-        this.info("\u98de\u5411\u6700\u8fd1\u672a\u53bb\u8fc7\u7684\u8239 \u8fd1\u4f3c\u9f99\u5934=" + String.valueOf(this.current.headPos) + " \u671d\u5411=" + String.valueOf(this.current.facing), new Object[0]);
+        this.info("飞向最近未去过的船 近似龙头=" + String.valueOf(this.current.headPos) + " 朝向=" + String.valueOf(this.current.facing), new Object[0]);
         this.state = State.FLYING;
     }
 
@@ -600,8 +600,8 @@ extends Module {
             }
             ++this.stateTick;
             if (this.state != State.IDLE && this.state != State.DONE && (this.lowYExit.get()).booleanValue() && this.mc.player.getY() < (double)(this.lowYThreshold.get()).intValue()) {
-                this.warning("Y=" + String.format("%.1f", this.mc.player.getY()) + " \u4f4e\u4e8e\u9608\u503c " + String.valueOf(this.lowYThreshold.get()) + "\uff0c\u4efb\u52a1\u5df2\u505c\u6b62.", new Object[0]);
-                this.stopTask("\u4f4e\u9ad8\u5ea6\u4efb\u52a1\u505c\u6b62.");
+                this.warning("Y=" + String.format("%.1f", this.mc.player.getY()) + " 低于阈值 " + String.valueOf(this.lowYThreshold.get()) + "，任务已停止.", new Object[0]);
+                this.stopTask("低高度任务停止.");
                 return;
             }
             if (this.pullUpSuppressed) {
@@ -631,15 +631,15 @@ extends Module {
             }
         }
         catch (Throwable t) {
-            this.error("\u4efb\u52a1\u5f02\u5e38: " + String.valueOf(t), new Object[0]);
+            this.error("任务异常: " + String.valueOf(t), new Object[0]);
             t.printStackTrace();
-            this.stopTask("\u4efb\u52a1\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("任务异常，停止任务.");
         }
     }
 
     private void onRising() {
         if (!this.landingRecover && this.stateTick > 400) {
-            this.error("\u8d77\u98de\u8d85\u65f6 (\u53ef\u80fd\u6ca1\u7a7f\u9798\u7fc5\u6216\u6ca1\u6709\u70df\u82b1).", new Object[0]);
+            this.error("起飞超时 (可能没穿鞘翅或没有烟花).", new Object[0]);
             this.state = State.IDLE;
             this.btnStart.set(false);
             this.releaseForward();
@@ -714,14 +714,14 @@ extends Module {
                 if (this.mc.player.getY() >= (double)(lp.getY() + 25) || this.recoverStageTick > 600) {
                     this.recoverStage = 1;
                     this.recoverStageTick = 0;
-                    this.info("\u5df2\u62c9\u5347\u5230\u964d\u843d\u70b9\u4e0a\u65b9 25 \u683c\uff0c\u7528 pitch40 \u6a21\u5f0f\u98de\u5411\u964d\u843d\u70b9.", new Object[0]);
+                    this.info("已拉升到降落点上方 25 格，用 俯冲巡航 模式飞向降落点.", new Object[0]);
                 }
             } else if (this.horizontalDistance(lp) <= 3.0 || this.recoverStageTick > 600) {
                 this.releaseForward();
                 this.landingRecover = false;
                 this.recoverStage = 0;
                 this.recoverStageTick = 0;
-                this.info("\u5df2\u56de\u5230\u964d\u843d\u70b9\u4e0a\u65b9\uff0c\u8fdb\u5165\u7f13\u964d.", new Object[0]);
+                this.info("已回到降落点上方，进入缓降.", new Object[0]);
                 this.state = State.LANDING;
                 this.stateTick = 0;
             }
@@ -778,7 +778,7 @@ extends Module {
                             this.info("已确认龙头: " + this.exactHead + " 朝向=" + this.current.facing);
                             if (this.debugSetting.get()) {
                                 int realTop = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, this.exactHead.getX(), this.exactHead.getZ());
-                                this.debugLog("head=(" + this.exactHead.getX() + "," + this.exactHead.getY() + "," + this.exactHead.getZ() + ") 龙头下地表=" + realTop + " seedY=" + this.current.headPos.getY());
+                                this.debugLog("龙头=(" + this.exactHead.getX() + "," + this.exactHead.getY() + "," + this.exactHead.getZ() + ") 龙头下地表=" + realTop + " 种子Y=" + this.current.headPos.getY());
                             }
                         } else {
                             this.info("检测龙头第 " + this.scanAttempts + "/7 次未找到 (目标=" + this.current.headPos.getX() + "," + this.current.headPos.getZ() + ").");
@@ -822,7 +822,7 @@ extends Module {
                     this.frameAirChecked = true;
                     this.frameAirEmpty = airFrame.getHeldItemStack().getItem() != net.minecraft.item.Items.ELYTRA;
                     if (this.frameAirEmpty) {
-                        this.info("展示框里没有鞘翅，不降落：拉升到 max-height 以上后跳过该船.");
+                        this.info("展示框里没有鞘翅，不降落：拉升到 最高高度 以上后跳过该船.");
                         this.climbing = true;
                     } else {
                         this.info("展示框里有鞘翅，按原计划降落.");
@@ -897,7 +897,7 @@ extends Module {
         this.storagePhase = StoragePhase.NONE;
         this.storageTick = 0;
         this.resetStorageClick();
-        this.info("\u5371\u9669\u9ad8\u5ea6: \u4e2d\u6b62\u5b58\u50a8\u4f1a\u8bdd\uff0c\u5f3a\u5236\u62c9\u5347.", new Object[0]);
+        this.info("危险高度: 中止存储会话，强制拉升.", new Object[0]);
     }
 
     boolean isLandingOrRecovering() {
@@ -923,7 +923,7 @@ extends Module {
         if (!this.landingRecover && !this.mc.player.isOnGround() && this.mc.player.getY() < (double)(lp.getY() - 10)) {
             ++this.recoverCount;
             if (this.recoverCount > 3) {
-                this.stopTask("\u591a\u6b21\u504f\u79bb\u964d\u843d\u70b9\u65e0\u6cd5\u964d\u843d\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("多次偏离降落点无法降落，停止任务.");
                 return;
             }
             this.landingRecover = true;
@@ -931,7 +931,7 @@ extends Module {
             this.recoverStageTick = 0;
             this.recoveryYaw = this.yawTowards(lp) + 180.0f;
             this.firstFireworkDone = false;
-            this.info("\u4f4e\u4e8e\u964d\u843d\u70b9 10 \u683c\uff0c\u53cd\u5411\u62c9\u5347 (\u76ee\u6807\u964d\u843d\u70b9\u4e0a\u65b9 25 \u683c).", new Object[0]);
+            this.info("低于降落点 10 格，反向拉升 (目标降落点上方 25 格).", new Object[0]);
             this.state = State.RISING;
             this.stateTick = 0;
             return;
@@ -940,7 +940,7 @@ extends Module {
             if (hDist < 3.0) {
                 this.releaseForward();
                 this.recoverCount = 0;
-                this.info("\u5df2\u964d\u843d\u5728\u964d\u843d\u70b9.", new Object[0]);
+                this.info("已降落在降落点.", new Object[0]);
                 this.state = State.COLLECTING;
                 this.collectStep = CollectStep.TO_P1;
                 this.stateTick = 0;
@@ -1061,7 +1061,7 @@ extends Module {
                 if (frame != null && this.stateTick == 1) {
                     boolean bl = this.frameHadElytra = frame.getHeldItemStack().getItem() == net.minecraft.item.Items.ELYTRA;
                     if (!this.frameHadElytra) {
-                        this.info("\u5c55\u793a\u6846\u91cc\u6ca1\u6709\u9798\u7fc5\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                        this.info("展示框里没有鞘翅，直接离开该船.", new Object[0]);
                         this.leaveShipNow();
                         return;
                     }
@@ -1075,7 +1075,7 @@ extends Module {
                     break;
                 }
                 if (this.stateTick <= 80) break;
-                this.info("\u653b\u51fb\u5c55\u793a\u6846\u540e\u6ca1\u6709\u9798\u7fc5\u6389\u843d\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                this.info("攻击展示框后没有鞘翅掉落，直接离开该船.", new Object[0]);
                 this.leaveShipNow();
                 break;
             }
@@ -1093,7 +1093,7 @@ extends Module {
                     break;
                 }
                 if (this.stateTick <= 60) break;
-                this.info("\u9798\u7fc5\u6389\u843d\u6d88\u5931\u672a\u62fe\u53d6\uff0c\u76f4\u63a5\u79bb\u5f00\u8be5\u8239.", new Object[0]);
+                this.info("鞘翅掉落消失未拾取，直接离开该船.", new Object[0]);
                 this.leaveShipNow();
                 break;
             }
@@ -1120,14 +1120,14 @@ extends Module {
             case 8: {
                 if (!this.reached(this.waypoints.landing, 2.5)) break;
                 this.addBlacklist(this.current.headPos);
-                this.info("\u8be5\u8239\u5b8c\u6210\uff0c\u52a0\u5165\u9ed1\u540d\u5355.", new Object[0]);
+                this.info("该船完成，加入黑名单.", new Object[0]);
                 this.finishShip();
                 break;
             }
             case 9: {
                 if (!this.reached(this.waypoints.landing.down(4), 2.5)) break;
                 this.releaseForward();
-                this.info("\u5df2\u56de\u5230\u964d\u843d\u70b9\uff0c\u8d77\u98de\u79bb\u5f00.", new Object[0]);
+                this.info("已回到降落点，起飞离开.", new Object[0]);
                 this.state = State.RISING;
                 this.stateTick = 0;
             }
@@ -1179,7 +1179,7 @@ extends Module {
         this.dumpNeeded = this.freeSlots() <= this.freeSlotDump.get();
         this.resupplyNeeded = this.anyDeficit();
         if (this.dumpNeeded || this.resupplyNeeded) {
-            this.info("\u5b58\u50a8\u4f1a\u8bdd: \u5b58\u9798\u7fc5=" + this.dumpNeeded + ", \u8865\u8d27=" + this.resupplyNeeded, new Object[0]);
+            this.info("存储会话: 存鞘翅=" + this.dumpNeeded + ", 补货=" + this.resupplyNeeded, new Object[0]);
             this.storagePhase = StoragePhase.PLACE_EC;
             this.storageTick = 0;
             this.ecPos = null;
@@ -1208,7 +1208,7 @@ extends Module {
 
     private void leaveShipNow() {
         this.addBlacklist(this.current.headPos);
-        this.info("\u8be5\u8239\u8df3\u8fc7\u5e76\u52a0\u5165\u9ed1\u540d\u5355\uff0c\u91cd\u65b0\u641c\u7d22\u6700\u8fd1\u672a\u53bb\u8fc7\u7684\u8239.", new Object[0]);
+        this.info("该船跳过并加入黑名单，重新搜索最近未去过的船.", new Object[0]);
         this.ships.clear();
         this.targetIndex = 0;
         this.searchExtends = 0;
@@ -1218,7 +1218,7 @@ extends Module {
         this.releaseForward();
         this.launchSearch();
         if (this.mc.player.isOnGround() && this.waypoints != null && this.horizontalDistance(this.waypoints.landing) > 2.5) {
-            this.info("\u5df2\u964d\u843d\uff1a\u5148\u56de\u964d\u843d\u70b9\u4fee\u6b63\u8d77\u98de\u65b9\u5411\u540e\u518d\u79bb\u5f00.", new Object[0]);
+            this.info("已降落：先回降落点修正起飞方向后再离开.", new Object[0]);
             this.state = State.COLLECTING;
             this.collectStep = CollectStep.LEAVE_SHIP;
             this.stateTick = 0;
@@ -1233,7 +1233,7 @@ extends Module {
         try {
             ++this.storageTick;
             if (this.storageTick > 1200) {
-                this.stopTask("\u5b58\u50a8\u4f1a\u8bdd\u8d85\u65f6 (\u9636\u6bb5=" + String.valueOf(this.storagePhase) + ")\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("存储会话超时 (阶段=" + String.valueOf(this.storagePhase) + ")，停止任务.");
                 return;
             }
             this.releaseForward();
@@ -1272,7 +1272,7 @@ extends Module {
                         this.supplyPauseDump = true;
                         this.resupplyRescan = true;
                         this.dumpNeeded = true;
-                        this.info("\u8865\u7ed9\u6682\u505c: \u80cc\u5305\u5269\u4f59 " + this.freeSlots() + " \u69fd\uff0c\u5148\u56de\u6536\u8865\u7ed9\u76d2\u3001\u5b58\u9798\u7fc5\u817e\u80cc\u5305.", new Object[0]);
+                        this.info("补给暂停: 背包剩余 " + this.freeSlots() + " 槽，先回收补给盒、存鞘翅腾背包.", new Object[0]);
                         this.storagePhase = StoragePhase.MINE_BOX;
                         this.storageTick = 0;
                         break;
@@ -1291,9 +1291,9 @@ extends Module {
             }
         }
         catch (Throwable t) {
-            this.error("\u5b58\u50a8\u4f1a\u8bdd\u5f02\u5e38: " + String.valueOf(t), new Object[0]);
+            this.error("存储会话异常: " + String.valueOf(t), new Object[0]);
             t.printStackTrace();
-            this.stopTask("\u5b58\u50a8\u4f1a\u8bdd\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("存储会话异常，停止任务.");
         }
     }
 
@@ -1302,7 +1302,7 @@ extends Module {
             net.minecraft.util.math.BlockPos existing;
             if (this.ecOpenFailCount == 0 && (existing = this.findNearbyEnderChest(5)) != null) {
                 this.ecPos = existing;
-                this.info("\u5b58\u50a8: \u53d1\u73b0\u5468\u56f4\u5df2\u6709\u672b\u5f71\u7bb1 " + String.valueOf(existing) + "\uff0c\u76f4\u63a5\u6253\u5f00.", new Object[0]);
+                this.info("存储: 发现周围已有末影箱 " + String.valueOf(existing) + "，直接打开.", new Object[0]);
                 this.storagePhase = StoragePhase.OPEN_EC;
                 this.storageTick = 0;
                 this.openRetry = 0;
@@ -1310,18 +1310,18 @@ extends Module {
             }
             int ecSlot = this.findItemSlot(net.minecraft.item.Items.ENDER_CHEST);
             if (ecSlot == -1) {
-                this.stopTask("\u80cc\u5305\u91cc\u6ca1\u6709\u672b\u5f71\u7bb1\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("背包里没有末影箱，停止任务.");
                 return;
             }
             this.ecBaseline = this.countItem(net.minecraft.item.Items.ENDER_CHEST);
             this.ensureItemSelected(ecSlot);
             this.placeCandidates = this.findPlaceSpots(null);
             if (this.placeCandidates.isEmpty() && this.waypoints != null && this.waypoints.p2 != null) {
-                this.info("\u9644\u8fd1\u65e0\u7a7a\u4f4d\uff0c\u6539\u7528\u68c0\u6d4b\u6f5c\u5f71\u8d1d\u7684\u4f4d\u7f6e " + String.valueOf(this.waypoints.p2) + " \u9644\u8fd1\u653e\u7f6e.", new Object[0]);
+                this.info("附近无空位，改用检测潜影贝的位置 " + String.valueOf(this.waypoints.p2) + " 附近放置.", new Object[0]);
                 this.placeCandidates = this.findPlaceSpotsAt(this.waypoints.p2, null);
             }
             if (this.placeCandidates.isEmpty()) {
-                this.stopTask("\u627e\u4e0d\u5230\u653e\u7f6e\u672b\u5f71\u7bb1\u7684\u4f4d\u7f6e\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("找不到放置末影箱的位置，停止任务.");
                 return;
             }
             this.placeIndex = 0;
@@ -1330,7 +1330,7 @@ extends Module {
         }
         if (this.storageTick >= 4 && this.storageTick - this.lastPlaceClick >= 8) {
             if (this.placeIndex >= this.placeCandidates.size()) {
-                this.stopTask("\u672b\u5f71\u7bb1\u653e\u7f6e\u5931\u8d25 (\u5df2\u5c1d\u8bd5\u6240\u6709\u5019\u9009\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("末影箱放置失败 (已尝试所有候选位置)，停止任务.");
                 return;
             }
             net.minecraft.util.math.BlockPos spot = this.placeCandidates.get(this.placeIndex);
@@ -1358,7 +1358,7 @@ extends Module {
             return;
         }
         if (this.storageTick > 80) {
-            this.stopTask("\u672b\u5f71\u7bb1\u653e\u7f6e\u5931\u8d25 (\u8d85\u65f6)\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("末影箱放置失败 (超时)，停止任务.");
         }
     }
 
@@ -1380,7 +1380,7 @@ extends Module {
     private void onOpenEc() {
         if (this.storageTick == 1) {
             if (this.ecPos == null || !this.isEnderChestBlock(this.mc.world.getBlockState(this.ecPos))) {
-                this.info("\u672b\u5f71\u7bb1\u4e0d\u5728\u539f\u4f4d\uff0c\u91cd\u65b0\u653e\u7f6e.", new Object[0]);
+                this.info("末影箱不在原位，重新放置.", new Object[0]);
                 this.storagePhase = StoragePhase.PLACE_EC;
                 this.storageTick = 0;
                 return;
@@ -1391,7 +1391,7 @@ extends Module {
             net.minecraft.util.math.BlockPos off = this.findStandOffSpot(this.ecPos);
             if (off != null && !PathManagers.get().isPathing()) {
                 PathManagers.get().moveTo(off, false);
-                this.info("\u5b58\u50a8: \u73a9\u5bb6\u7ad9\u5728\u672b\u5f71\u7bb1\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u6253\u5f00.", new Object[0]);
+                this.info("存储: 玩家站在末影箱上，先走下来再打开.", new Object[0]);
             }
             if (this.isStandingOnBlock(this.ecPos)) {
                 return;
@@ -1414,10 +1414,10 @@ extends Module {
             if (this.isStandingOnBlock(this.ecPos)) {
                 this.standingMovedOff = false;
                 this.storageTick = 0;
-                this.info("\u6253\u5f00\u672b\u5f71\u7bb1\u5931\u8d25\u4e14\u73a9\u5bb6\u7ad9\u5728\u672b\u5f71\u7bb1\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u91cd\u8bd5.", new Object[0]);
+                this.info("打开末影箱失败且玩家站在末影箱上，先走下来再重试.", new Object[0]);
                 return;
             }
-            this.warning("\u6253\u5f00\u672b\u5f71\u7bb1\u5931\u8d25 (\u5df2\u5c1d\u8bd5 5 \u6b21)\uff0c\u653e\u7f6e\u65b0\u7684\u672b\u5f71\u7bb1\u518d\u8bd5.", new Object[0]);
+            this.warning("打开末影箱失败 (已尝试 5 次)，放置新的末影箱再试.", new Object[0]);
             ++this.ecOpenFailCount;
             this.storagePhase = StoragePhase.PLACE_EC;
             this.storageTick = 0;
@@ -1430,7 +1430,7 @@ extends Module {
         net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
         int rows = this.currentRows();
         if (sh == null || rows <= 0) {
-            this.stopTask("\u672b\u5f71\u7bb1\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("末影箱界面异常，停止任务.");
             return;
         }
         if (this.storageTick < 3) {
@@ -1469,10 +1469,10 @@ extends Module {
             }
             this.pickStep = 0;
             if (this.boxPurposeSupply) {
-                this.stopTask("\u80cc\u5305\u65e0\u7a7a\u4f4d\u653e\u6f5c\u5f71\u76d2\uff0c\u65e0\u6cd5\u8865\u8d27\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("背包无空位放潜影盒，无法补货，停止任务.");
                 return;
             }
-            this.stopTask("\u80cc\u5305\u65e0\u7a7a\u4f4d\u653e\u6f5c\u5f71\u76d2\uff0c\u65e0\u6cd5\u5b58\u9798\u7fc5\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("背包无空位放潜影盒，无法存鞘翅，停止任务.");
             return;
         }
         if (!this.moveIdle()) {
@@ -1481,7 +1481,7 @@ extends Module {
         if (this.boxInventorySlot != -1) {
             int screenSlot = this.invSlotToScreen(rows, this.boxInventorySlot);
             if (this.firstEmptyContainerSlot(sh, rows) == -1) {
-                this.stopTask("\u672b\u5f71\u7bb1\u5df2\u6ee1\uff0c\u65e0\u6cd5\u5f52\u8fd8\u6f5c\u5f71\u76d2\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("末影箱已满，无法归还潜影盒，停止任务.");
                 return;
             }
             this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, screenSlot);
@@ -1497,7 +1497,7 @@ extends Module {
             if (items.length() >= 80) continue;
             items.append(st.getItem().getName().getString()).append("(").append(st.getCount()).append(") ");
         }
-        this.info("\u5b58\u50a8: \u672b\u5f71\u7bb1\u884c\u6570=" + rows + " \u975e\u7a7a\u69fd=" + nonEmpty + " [" + String.valueOf(items) + "]", new Object[0]);
+        this.info("存储: 末影箱行数=" + rows + " 非空槽=" + nonEmpty + " [" + String.valueOf(items) + "]", new Object[0]);
         if (this.dumpNeeded) {
             boolean bl = this.dumpNeeded = this.countElytraMain() > 0;
         }
@@ -1527,24 +1527,24 @@ extends Module {
                 return;
             }
             if (this.freeSlots() == 0) {
-                this.completeTask("\u80cc\u5305\u4e0e\u672b\u5f71\u7bb1\u5168\u90e8\u653e\u6ee1\uff0c\u4efb\u52a1\u5b8c\u6210.");
+                this.completeTask("背包与末影箱全部放满，任务完成.");
                 return;
             }
-            this.info("\u6ca1\u6709\u7a7a\u4f4d\u6f5c\u5f71\u76d2\uff0c\u9798\u7fc5\u7559\u5728\u80cc\u5305.", new Object[0]);
+            this.info("没有空位潜影盒，鞘翅留在背包.", new Object[0]);
             this.dumpNeeded = false;
         }
         if (this.resupplyNeeded) {
             if (this.resupplyRescan) {
                 this.resupplyRescan = false;
                 this.supplyScanStart = 0;
-                this.info("\u5b58\u50a8: \u5b58\u9798\u7fc5\u817e\u51fa\u7a7a\u95f4\uff0c\u4ece\u672b\u5f71\u7bb1\u5f00\u5934\u91cd\u65b0\u626b\u63cf\u8865\u7ed9.", new Object[0]);
+                this.info("存储: 存鞘翅腾出空间，从末影箱开头重新扫描补给.", new Object[0]);
             }
             if (this.supplyScanStart > this.containerLast(rows)) {
                 if (this.anyDeficit()) {
-                    this.stopTask("\u7269\u8d44\u4e0d\u8db3 (\u672b\u5f71\u7bb1\u5185\u5df2\u904d\u5386\u5b8c\u6240\u6709\u6f5c\u5f71\u76d2)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    this.stopTask("物资不足 (末影箱内已遍历完所有潜影盒)，停止任务.");
                     return;
                 }
-                this.info("\u5b58\u50a8: \u8865\u8d27\u904d\u5386\u5b8c\u6210.", new Object[0]);
+                this.info("存储: 补货遍历完成.", new Object[0]);
                 this.resupplyNeeded = false;
                 this.storagePhase = StoragePhase.MINE_EC;
                 this.storageTick = 0;
@@ -1558,7 +1558,7 @@ extends Module {
                         if (!this.takeFailedItems.contains(st.getItem()) && this.needsItem(st.getItem())) {
                             this.supplyScanStart = i + 1;
                             this.click(net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, i);
-                            this.info("\u5b58\u50a8: \u4ece\u672b\u5f71\u7bb1\u76f4\u63a5\u62ff\u53d6\u6563\u653e\u7269\u8d44 " + st.getItem().getName().getString() + ".", new Object[0]);
+                            this.info("存储: 从末影箱直接拿取散放物资 " + st.getItem().getName().getString() + ".", new Object[0]);
                         } else {
                             this.supplyScanStart = i + 1;
                         }
@@ -1596,7 +1596,7 @@ extends Module {
                 this.mc.player.closeHandledScreen();
             }
             if (this.storageTick > 40) {
-                this.stopTask("\u5173\u95ed\u5bb9\u5668\u754c\u9762\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("关闭容器界面超时，停止任务.");
                 return;
             }
             return;
@@ -1612,19 +1612,19 @@ extends Module {
     private void onPlaceBox() {
         if (this.storageTick == 1) {
             if (this.boxInventorySlot == -1) {
-                this.stopTask("\u6f5c\u5f71\u76d2\u69fd\u4f4d\u4e22\u5931\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("潜影盒槽位丢失，停止任务.");
                 return;
             }
             this.boxInventorySlot = this.ensureItemSelected(this.boxInventorySlot);
             this.placeCandidates = this.findBoxPlaceSpots(this.ecPos);
             this.boxPlaceFloorFallback = false;
             if (this.placeCandidates.isEmpty()) {
-                this.info("\u9644\u8fd1\u6ca1\u6709\u6302\u653e\u4f4d\u7f6e (\u7a7a\u6c14+\u4e0a\u65b9\u5b9e\u5fc3)\uff0c\u6539\u7528\u5730\u677f\u653e\u7f6e.", new Object[0]);
+                this.info("附近没有挂放位置 (空气+上方实心)，改用地板放置.", new Object[0]);
                 this.placeCandidates = this.findBoxFloorSpots(this.ecPos);
                 this.boxPlaceFloorFallback = true;
             }
             if (this.placeCandidates.isEmpty()) {
-                this.stopTask("\u627e\u4e0d\u5230\u653e\u7f6e\u6f5c\u5f71\u76d2\u7684\u4f4d\u7f6e (\u9700\u8981\u7a7a\u6c14\u683c\u4e14\u4e0a\u65b9\u6709\u65b9\u5757)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("找不到放置潜影盒的位置 (需要空气格且上方有方块)，停止任务.");
                 return;
             }
             this.placeIndex = 0;
@@ -1635,17 +1635,17 @@ extends Module {
             net.minecraft.util.math.BlockPos spot;
             if (this.placeIndex >= this.placeCandidates.size()) {
                 if (!this.boxPlaceFloorFallback) {
-                    this.info("\u6302\u653e\u4f4d\u7f6e\u5168\u90e8\u653e\u7f6e\u5931\u8d25\uff0c\u6539\u7528\u5730\u677f\u653e\u7f6e.", new Object[0]);
+                    this.info("挂放位置全部放置失败，改用地板放置.", new Object[0]);
                     this.placeCandidates = this.findBoxFloorSpots(this.ecPos);
                     this.boxPlaceFloorFallback = true;
                     this.placeIndex = 0;
                     this.placeClickAttempts = 0;
                     if (this.placeCandidates.isEmpty()) {
-                        this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u627e\u4e0d\u5230\u5730\u677f\u653e\u7f6e\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                        this.stopTask("潜影盒放置失败 (找不到地板放置位置)，停止任务.");
                         return;
                     }
                 } else {
-                    this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u5df2\u5c1d\u8bd5\u6240\u6709\u5019\u9009\u4f4d\u7f6e)\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    this.stopTask("潜影盒放置失败 (已尝试所有候选位置)，停止任务.");
                     return;
                 }
             }
@@ -1678,14 +1678,14 @@ extends Module {
             return;
         }
         if (this.storageTick > 160) {
-            this.stopTask("\u6f5c\u5f71\u76d2\u653e\u7f6e\u5931\u8d25 (\u8d85\u65f6)\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("潜影盒放置失败 (超时)，停止任务.");
         }
     }
 
     private void onOpenBox() {
         if (this.storageTick == 1) {
             if (this.boxPos == null || !this.isShulkerBlock(this.mc.world.getBlockState(this.boxPos))) {
-                this.warning("\u6f5c\u5f71\u76d2\u4e0d\u5728\u539f\u4f4d\uff0c\u6316\u6389\u91cd\u6765.", new Object[0]);
+                this.warning("潜影盒不在原位，挖掉重来.", new Object[0]);
                 this.storagePhase = StoragePhase.MINE_BOX;
                 this.storageTick = 0;
                 return;
@@ -1696,7 +1696,7 @@ extends Module {
             net.minecraft.util.math.BlockPos off = this.findStandOffSpot(this.boxPos);
             if (off != null && !PathManagers.get().isPathing()) {
                 PathManagers.get().moveTo(off, false);
-                this.info("\u5b58\u50a8: \u73a9\u5bb6\u7ad9\u5728\u6f5c\u5f71\u76d2\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u6253\u5f00.", new Object[0]);
+                this.info("存储: 玩家站在潜影盒上，先走下来再打开.", new Object[0]);
             }
             if (this.isStandingOnBlock(this.boxPos)) {
                 return;
@@ -1727,10 +1727,10 @@ extends Module {
                 this.storageTick = 0;
                 this.openRetry = 0;
                 this.boxOpenClickTick = -1;
-                this.info("\u6253\u5f00\u6f5c\u5f71\u76d2\u5931\u8d25\u4e14\u73a9\u5bb6\u7ad9\u5728\u6f5c\u5f71\u76d2\u4e0a\uff0c\u5148\u8d70\u4e0b\u6765\u518d\u91cd\u8bd5.", new Object[0]);
+                this.info("打开潜影盒失败且玩家站在潜影盒上，先走下来再重试.", new Object[0]);
                 return;
             }
-            this.warning("\u6253\u5f00\u6f5c\u5f71\u76d2\u5931\u8d25 (\u5df2\u5c1d\u8bd5 5 \u6b21)\uff0c\u6316\u6389\u91cd\u6765.", new Object[0]);
+            this.warning("打开潜影盒失败 (已尝试 5 次)，挖掉重来.", new Object[0]);
             this.storagePhase = StoragePhase.MINE_BOX;
             this.storageTick = 0;
             this.openRetry = 0;
@@ -1742,7 +1742,7 @@ extends Module {
         net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
         int rows = this.currentRows();
         if (sh == null || rows <= 0) {
-            this.stopTask("\u6f5c\u5f71\u76d2\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("潜影盒界面异常，停止任务.");
             return;
         }
         if (this.storageTick < 3) {
@@ -1753,7 +1753,7 @@ extends Module {
         }
         if (this.fillIndex == -1) {
             this.fillIndex = this.playerFirst(rows);
-            this.info("\u5b58\u50a8: \u5f00\u59cb\u5f80\u6f5c\u5f71\u76d2\u5b58\u9798\u7fc5.", new Object[0]);
+            this.info("存储: 开始往潜影盒存鞘翅.", new Object[0]);
         }
         if (this.fillStuckSlot >= 0) {
             if (sh.getSlot(this.fillStuckSlot).getStack().getItem() == net.minecraft.item.Items.ELYTRA) {
@@ -1762,7 +1762,7 @@ extends Module {
                     this.fillIndex = -1;
                     this.fillStuckSlot = -1;
                     this.fillStuckTicks = 0;
-                    this.info("\u5b58\u50a8: \u6f5c\u5f71\u76d2\u5df2\u6ee1.", new Object[0]);
+                    this.info("存储: 潜影盒已满.", new Object[0]);
                     this.afterClose = StoragePhase.MINE_BOX;
                     this.storagePhase = StoragePhase.CLOSE_SCREEN;
                     this.storageTick = 0;
@@ -1780,7 +1780,7 @@ extends Module {
         }
         if (src == -1) {
             this.fillIndex = -1;
-            this.info("\u5b58\u50a8: \u9798\u7fc5\u5df2\u5168\u90e8\u5b58\u5165\u6f5c\u5f71\u76d2.", new Object[0]);
+            this.info("存储: 鞘翅已全部存入潜影盒.", new Object[0]);
             this.afterClose = StoragePhase.MINE_BOX;
             this.storagePhase = StoragePhase.CLOSE_SCREEN;
             this.storageTick = 0;
@@ -1796,7 +1796,7 @@ extends Module {
         net.minecraft.screen.ScreenHandler sh = this.mc.player.currentScreenHandler;
         int rows = this.currentRows();
         if (sh == null || rows <= 0) {
-            this.stopTask("\u6f5c\u5f71\u76d2\u754c\u9762\u5f02\u5e38\uff0c\u505c\u6b62\u4efb\u52a1.");
+            this.stopTask("潜影盒界面异常，停止任务.");
             return;
         }
         if (this.storageTick < 3) {
@@ -1832,20 +1832,20 @@ extends Module {
                             int elytra = this.findUnwornElytraSlot(sh, rows);
                             if (elytra != -1) {
                                 this.moveQueue.add(new MoveOp(elytra, boxFree));
-                                this.info("\u5b58\u50a8: \u80cc\u5305\u7a7a\u95f4\u4e0d\u8db3\uff0c\u5148\u628a\u9798\u7fc5\u653e\u5165\u76d2\u5b50\u817e\u51fa\u7a7a\u4f4d.", new Object[0]);
+                                this.info("存储: 背包空间不足，先把鞘翅放入盒子腾出空位.", new Object[0]);
                             } else {
                                 int junk = this.findJunkSlotInPlayer(sh, rows, rules);
                                 if (junk != -1) {
                                     this.moveQueue.add(new MoveOp(junk, boxFree));
-                                    this.info("\u5b58\u50a8: \u80cc\u5305\u5df2\u6ee1\uff0c\u5148\u628a\u6742\u7269\u653e\u5165\u76d2\u5b50\u817e\u51fa\u7a7a\u4f4d.", new Object[0]);
+                                    this.info("存储: 背包已满，先把杂物放入盒子腾出空位.", new Object[0]);
                                 } else {
                                     this.takeFailedItems.add(target.item);
-                                    this.info("\u5b58\u50a8: \u80cc\u5305\u65e0\u7a7a\u4f4d\u4e14\u65e0\u6742\u7269\u53ef\u817e\uff0c\u8865\u8d27 " + target.item.getName().getString() + " \u8df3\u8fc7.", new Object[0]);
+                                    this.info("存储: 背包无空位且无杂物可腾，补货 " + target.item.getName().getString() + " 跳过.", new Object[0]);
                                 }
                             }
                         } else {
                             this.takeFailedItems.add(target.item);
-                            this.info("\u5b58\u50a8: \u76d2\u5b50\u5df2\u6ee1\u65e0\u6cd5\u817e\u4f4d\uff0c\u8865\u8d27 " + target.item.getName().getString() + " \u8df3\u8fc7.", new Object[0]);
+                            this.info("存储: 盒子已满无法腾位，补货 " + target.item.getName().getString() + " 跳过.", new Object[0]);
                         }
                     }
                     return;
@@ -1865,7 +1865,7 @@ extends Module {
         this.takeEmptyTicks = 0;
         this.takeStuckSlot = -1;
         this.takeStuckTicks = 0;
-        this.info("\u5b58\u50a8: \u672c\u76d2\u7269\u8d44\u5df2\u62ff\u53d6\u5b8c\u6bd5 (\u6240\u6709\u80fd\u62ff\u4e14\u9700\u8981\u7684).", new Object[0]);
+        this.info("存储: 本盒物资已拿取完毕 (所有能拿且需要的).", new Object[0]);
         this.afterClose = StoragePhase.MINE_BOX;
         this.storagePhase = StoragePhase.CLOSE_SCREEN;
         this.storageTick = 0;
@@ -1878,13 +1878,13 @@ extends Module {
                 this.pickupWaitStart = -1;
                 PathManagers.get().stop();
                 if (this.findSilkTouchSlot() == -1) {
-                    this.stopTask("\u9700\u8981\u7cbe\u51c6\u91c7\u96c6\u5de5\u5177\u624d\u80fd\u56de\u6536\u6f5c\u5f71\u76d2\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    this.stopTask("需要精准采集工具才能回收潜影盒，停止任务.");
                     return;
                 }
                 PathManagers.get().mine(s.getBlock());
-                this.info("\u7528 baritone (\u7cbe\u51c6\u91c7\u96c6) \u6316\u6398\u6f5c\u5f71\u76d2.", new Object[0]);
+                this.info("用 寻路 (精准采集) 挖掘潜影盒.", new Object[0]);
             } else if (this.storageTick > 600) {
-                this.stopTask("baritone \u6316\u6398\u6f5c\u5f71\u76d2\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("寻路 挖掘潜影盒超时，停止任务.");
             }
             return;
         }
@@ -1900,7 +1900,7 @@ extends Module {
             return;
         }
         if (this.storageTick > this.pickupWaitStart + 200) {
-            this.warning("\u6f5c\u5f71\u76d2\u6389\u843d\u672a\u62fe\u53d6\uff0c\u7ee7\u7eed\u4efb\u52a1.", new Object[0]);
+            this.warning("潜影盒掉落未拾取，继续任务.", new Object[0]);
             this.boxInventorySlot = -1;
             this.boxFromInventory = false;
             this.storagePhase = this.dumpNeeded || this.resupplyNeeded ? StoragePhase.OPEN_EC : StoragePhase.MINE_EC;
@@ -1921,13 +1921,13 @@ extends Module {
                 this.pickupWaitStart = -1;
                 PathManagers.get().stop();
                 if (this.findSilkTouchSlot() == -1) {
-                    this.stopTask("\u9700\u8981\u7cbe\u51c6\u91c7\u96c6\u5de5\u5177\u624d\u80fd\u56de\u6536\u672b\u5f71\u7bb1\uff0c\u505c\u6b62\u4efb\u52a1.");
+                    this.stopTask("需要精准采集工具才能回收末影箱，停止任务.");
                     return;
                 }
                 PathManagers.get().mine(net.minecraft.block.Blocks.ENDER_CHEST);
-                this.info("\u7528 baritone (\u7cbe\u51c6\u91c7\u96c6) \u6316\u6398\u672b\u5f71\u7bb1.", new Object[0]);
+                this.info("用 寻路 (精准采集) 挖掘末影箱.", new Object[0]);
             } else if (this.storageTick > 600) {
-                this.stopTask("baritone \u6316\u6398\u672b\u5f71\u7bb1\u8d85\u65f6\uff0c\u505c\u6b62\u4efb\u52a1.");
+                this.stopTask("寻路 挖掘末影箱超时，停止任务.");
             }
             return;
         }
@@ -1940,7 +1940,7 @@ extends Module {
             return;
         }
         if (this.storageTick > this.pickupWaitStart + 400) {
-            this.warning("\u672b\u5f71\u7bb1\u6389\u843d\u672a\u62fe\u53d6 (\u6316\u672b\u5f71\u7bb1\u9700\u8981\u7cbe\u51c6\u91c7\u96c6)\uff0c\u7ee7\u7eed\u4efb\u52a1.", new Object[0]);
+            this.warning("末影箱掉落未拾取 (挖末影箱需要精准采集)，继续任务.", new Object[0]);
             this.afterStorageSession();
             return;
         }
@@ -1955,7 +1955,7 @@ extends Module {
         this.storageTick = 0;
         this.pickupWaitStart = -1;
         if (this.state == State.COLLECTING && this.collectStep == CollectStep.EQUIP) {
-            this.info("\u8239\u65c1\u5b58\u50a8\u4f1a\u8bdd\u7ed3\u675f\uff0c\u5148\u8d70\u56de\u964d\u843d\u70b9\u518d\u8d77\u98de.", new Object[0]);
+            this.info("船旁存储会话结束，先走回降落点再起飞.", new Object[0]);
             this.advance(CollectStep.EXIT_P1);
         } else {
             this.relaunchAfterShip();
@@ -2303,7 +2303,7 @@ extends Module {
         for (String entry : (List<String>)this.supplies.get()) {
             String[] p = entry.split(";");
             if (p.length < 3) {
-                this.warning("\u7269\u8d44\u914d\u7f6e\u683c\u5f0f\u9519\u8bef: " + entry, new Object[0]);
+                this.warning("物资配置格式错误: " + entry, new Object[0]);
                 continue;
             }
             net.minecraft.util.Identifier id = net.minecraft.util.Identifier.tryParse((String)p[0].trim());
@@ -2320,7 +2320,7 @@ extends Module {
                 out.add(new SupplyRule(supplyItem, Integer.parseInt(p[1].trim()), Integer.parseInt(p[2].trim())));
             }
             catch (NumberFormatException e) {
-                this.warning("\u7269\u8d44\u6570\u91cf\u683c\u5f0f\u9519\u8bef: " + entry, new Object[0]);
+                this.warning("物资数量格式错误: " + entry, new Object[0]);
             }
         }
         return out;
@@ -2490,7 +2490,7 @@ extends Module {
         int h4 = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, cols[3][0], cols[3][1]);
         int min = Math.min(Math.min(h1, h2), Math.min(h3, h4));
         if ((this.debugSetting.get()).booleanValue()) {
-            this.debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + String.valueOf(rotation) + " min=" + min);
+            this.debugLog("城=(" + chunkX + "," + chunkZ + ") 旋转=" + String.valueOf(rotation) + " 最小=" + min);
             this.debugColumn(posX, posZ, h1);
             this.debugColumn(posX, posZ + zOff, h2);
             this.debugColumn(posX + xOff, posZ, h3);
@@ -2503,7 +2503,7 @@ extends Module {
         float rawF = this.endIslandHeightValue(x / 8, z / 8);
         double e = ((double)rawF - 8.0) / 128.0;
         int vanilla = this.vanillaWorldSurfaceWg(x, z);
-        this.debugLog("col(" + x + "," + z + ") real=" + realHeight + " vanilla=" + vanilla + " E=" + String.format("%.4f", e) + " rawF=" + String.format("%.1f", Float.valueOf(rawF)));
+        this.debugLog("列(" + x + "," + z + ") 实际=" + realHeight + " 原版=" + vanilla + " E=" + String.format("%.4f", e) + " 原始=" + String.format("%.1f", Float.valueOf(rawF)));
     }
 
     private int vanillaWorldSurfaceWg(int x, int z) {
@@ -2591,7 +2591,7 @@ extends Module {
         min = Math.min(min, this.vanillaWorldSurfaceWg(posX + xOff, posZ));
         min = Math.min(min, this.vanillaWorldSurfaceWg(posX + xOff, posZ + zOff));
         if ((this.debugSetting.get()).booleanValue()) {
-            this.debugLog("city=(" + chunkX + "," + chunkZ + ") rotation=" + String.valueOf(rotation) + " predMin=" + min);
+            this.debugLog("城=(" + chunkX + "," + chunkZ + ") 旋转=" + String.valueOf(rotation) + " 预测最小=" + min);
         }
         return min >= 60;
     }
@@ -2615,7 +2615,7 @@ extends Module {
             }
         }
         catch (Exception e) {
-            this.error("\u8c03\u8bd5\u65e5\u5fd7\u5199\u5165\u5931\u8d25: " + e.getMessage(), new Object[0]);
+            this.error("调试日志写入失败: " + e.getMessage(), new Object[0]);
         }
     }
 
@@ -2670,9 +2670,9 @@ extends Module {
         }
         if (frame != null) {
             this.mc.interactionManager.attackEntity((net.minecraft.entity.player.PlayerEntity)this.mc.player, (net.minecraft.entity.Entity)frame);
-            this.info("\u653b\u51fb\u5c55\u793a\u6846.", new Object[0]);
+            this.info("攻击展示框.", new Object[0]);
         } else {
-            this.info("\u672a\u627e\u5230\u5c55\u793a\u6846.", new Object[0]);
+            this.info("未找到展示框.", new Object[0]);
         }
     }
 
@@ -2692,7 +2692,7 @@ extends Module {
             return;
         }
         InvUtils.move().from(slot).toArmor(2);
-        this.info("\u5df2\u7a7f\u4e0a\u9798\u7fc5.", new Object[0]);
+        this.info("已穿上鞘翅.", new Object[0]);
     }
 
     private boolean isWearingFullDurabilityElytra() {
@@ -2713,7 +2713,7 @@ extends Module {
             FindItemResult inv = InvUtils.find((net.minecraft.item.Item[])new net.minecraft.item.Item[]{net.minecraft.item.Items.FIREWORK_ROCKET});
             if (inv.found()) {
                 InvUtils.move().from(inv.slot()).toHotbar(1);
-                this.info("\u7269\u54c1\u680f\u6ca1\u6709\u70df\u82b1\uff0c\u4ece\u80cc\u5305\u8c03\u53d6\u653e\u5230\u7b2c 2 \u4e2a\u69fd\u4f4d.", new Object[0]);
+                this.info("物品栏没有烟花，从背包调取放到第 2 个槽位.", new Object[0]);
             }
             return;
         }
@@ -2797,7 +2797,7 @@ extends Module {
                 this.antiClimbActive = false;
                 this.antiClimbTicks = 0;
                 this.antiClearStreak = 0;
-                this.debugLog("前方区块已加载，结束防卡拉升，恢复 pitch40 飞行.");
+                this.debugLog("前方区块已加载，结束防卡拉升，恢复 俯冲巡航 飞行.");
             }
         } else if (ahead >= 0.0 && ahead <= (double)this.chunkLookahead.get()) {
             this.antiClimbActive = true;
@@ -2978,43 +2978,73 @@ extends Module {
     }
 
     private static enum State {
-        IDLE,
-        SEARCHING,
-        RISING,
-        FLYING,
-        LANDING,
-        COLLECTING,
-        DONE;
+        IDLE("空闲"),
+        SEARCHING("搜索"),
+        RISING("起飞"),
+        FLYING("飞行"),
+        LANDING("降落"),
+        COLLECTING("采集"),
+        DONE("完成");
 
+        private final String label;
+
+        private State(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return this.label;
+        }
     }
 
     private static enum CollectStep {
-        TO_P1,
-        TO_P2,
-        WAIT_SHULKER,
-        TO_P3,
-        HIT_FRAME,
-        PICK_UP,
-        EQUIP,
-        EXIT_P1,
-        EXIT_LANDING,
-        LEAVE_SHIP;
+        TO_P1("前往P1"),
+        TO_P2("前往P2"),
+        WAIT_SHULKER("等待潜影盒"),
+        TO_P3("前往P3"),
+        HIT_FRAME("打展示框"),
+        PICK_UP("拾取鞘翅"),
+        EQUIP("穿鞘翅"),
+        EXIT_P1("撤离P1"),
+        EXIT_LANDING("撤离降落点"),
+        LEAVE_SHIP("离开船");
 
+        private final String label;
+
+        private CollectStep(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return this.label;
+        }
     }
 
     private static enum StoragePhase {
-        NONE,
-        PLACE_EC,
-        OPEN_EC,
-        PICK_BOX,
-        CLOSE_SCREEN,
-        PLACE_BOX,
-        OPEN_BOX,
-        FILL_BOX,
-        TAKE_SUPPLIES,
-        MINE_BOX,
-        MINE_EC;
+        NONE("无"),
+        PLACE_EC("放置末影箱"),
+        OPEN_EC("打开末影箱"),
+        PICK_BOX("取潜影盒"),
+        CLOSE_SCREEN("关界面"),
+        PLACE_BOX("放置潜影盒"),
+        OPEN_BOX("打开潜影盒"),
+        FILL_BOX("装盒"),
+        TAKE_SUPPLIES("取物资"),
+        MINE_BOX("挖潜影盒"),
+        MINE_EC("挖末影箱");
 
+        private final String label;
+
+        private StoragePhase(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return this.label;
+        }
     }
 
     private record ShipTarget(CPos chunk, net.minecraft.util.math.BlockPos headPos, net.minecraft.util.math.Direction facing) {
