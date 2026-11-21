@@ -172,6 +172,7 @@ extends Module {
     private final Set<String> sessionSkip;
     private int searchExtends;
     private net.minecraft.util.math.Direction takeoffFacing;
+    private boolean takeoffFromP1;
     private int noElytraTicks;
     private boolean frameHadElytra;
     private boolean frameAirChecked;
@@ -816,8 +817,8 @@ extends Module {
         }
 
         if (this.headFound && !this.frameAirChecked) {
-            if (this.frameAirScanTicks % 20 == 0) {
-                net.minecraft.entity.decoration.ItemFrameEntity airFrame = this.findFrameAt(this.waypoints.p3);
+            if (this.frameAirScanTicks % 10 == 0) {
+                net.minecraft.entity.decoration.ItemFrameEntity airFrame = this.findFrameNear(this.waypoints.p3, 2.0);
                 if (airFrame != null) {
                     this.frameAirChecked = true;
                     this.frameAirEmpty = airFrame.getHeldItemStack().getItem() != net.minecraft.item.Items.ELYTRA;
@@ -830,14 +831,18 @@ extends Module {
                 }
             }
             ++this.frameAirScanTicks;
-            if (this.frameAirScanTicks > 120) {
+            if (this.frameAirScanTicks > 200) {
                 this.frameAirChecked = true;
                 this.frameAirEmpty = true;
-                this.info("空中未找到展示框实体，按无鞘翅处理 (跳过该船).");
+                this.info("空中 200 tick 未找到展示框实体，按无鞘翅处理 (跳过该船).");
             }
         }
 
+        boolean holdForFrame = this.headFound && !this.frameAirChecked && this.horizontalDistance(lp) <= 12.0;
         float yaw = !this.headFound && this.sweepScan.get() ? this.sweepYaw() : this.yawTowards(lp);
+        if (holdForFrame) {
+            yaw = this.mc.player.getYaw() + 4.0f;
+        }
         double y = this.mc.player.getY();
         if (this.climbing) {
             if (y >= this.maxHeight.get() && !this.antiClimbActive) this.climbing = false;
@@ -855,6 +860,9 @@ extends Module {
         }
 
         float pitch = this.climbing ? -54.77f : 37.72f;
+        if (holdForFrame) {
+            pitch = this.climbing ? -54.77f : 0.0f;
+        }
         if (this.pitchSmooth.get()) {
             float speed = pitch < this.smoothedPitch ? this.pitchRotateUp.get().floatValue() : this.pitchRotateDown.get().floatValue();
             this.smoothedPitch = ElytraCollector.stepToward(this.smoothedPitch, pitch, speed);
@@ -865,6 +873,11 @@ extends Module {
 
         this.rotateTo(yaw, pitch);
         this.mc.options.forwardKey.setPressed(true);
+
+        // 等框扫描期间绕圈，用烟花维持高度（不降落）
+        if (holdForFrame && this.frameAirScanTicks > 0 && this.frameAirScanTicks % 40 == 0) {
+            this.useFirework();
+        }
 
         if (this.frameAirEmpty) {
             if (this.mc.player.getY() < this.maxHeight.get()) {
@@ -878,7 +891,7 @@ extends Module {
             }
             return;
         }
-        if (this.headFound && this.horizontalDistance(lp) <= 3.0) {
+        if (this.headFound && this.frameAirChecked && !this.frameAirEmpty && this.horizontalDistance(lp) <= 3.0) {
             this.state = State.LANDING;
             this.stateTick = 0;
         }
@@ -1023,7 +1036,7 @@ extends Module {
                 break;
             }
             case 9: {
-                PathManagers.get().moveTo(this.waypoints.landing.down(4), false);
+                PathManagers.get().moveTo(this.takeoffFromP1 ? this.waypoints.p1 : this.waypoints.landing.down(4), false);
                 break;
             }
         }
@@ -1125,9 +1138,26 @@ extends Module {
                 break;
             }
             case 9: {
-                if (!this.reached(this.waypoints.landing.down(4), 2.5)) break;
+                net.minecraft.util.math.BlockPos takeoff = this.takeoffFromP1 ? this.waypoints.p1 : this.waypoints.landing.down(4);
+                if (!this.reached(takeoff, 2.5)) {
+                    if (this.stateTick > 400) {
+                        this.stopTask("走不到起飞点，请手动离开船.");
+                    }
+                    break;
+                }
+                if (!this.canTakeOffHere()) {
+                    if (!this.takeoffFromP1) {
+                        this.takeoffFromP1 = true;
+                        this.stateTick = 0;
+                        PathManagers.get().moveTo(this.waypoints.p1, false);
+                        this.info("起飞点上方有遮挡，改到船外起飞点再试.", new Object[0]);
+                        break;
+                    }
+                    this.stopTask("船外起飞点上方仍被遮挡，请手动离开船.");
+                    break;
+                }
                 this.releaseForward();
-                this.info("已回到降落点，起飞离开.", new Object[0]);
+                this.info("已到起飞点，起飞离开.", new Object[0]);
                 this.state = State.RISING;
                 this.stateTick = 0;
             }
@@ -1217,8 +1247,10 @@ extends Module {
         this.landingRecover = false;
         this.releaseForward();
         this.launchSearch();
-        if (this.mc.player.isOnGround() && this.waypoints != null && this.horizontalDistance(this.waypoints.landing) > 2.5) {
-            this.info("已降落：先回降落点修正起飞方向后再离开.", new Object[0]);
+        this.takeoffFromP1 = false;
+        if (this.mc.player.isOnGround() && this.waypoints != null) {
+            // 一律先走到起飞点、确认头顶 4 格开阔再起飞，绝不在船舱内原地升空
+            this.info("先回起飞点确认头顶开阔，再离开该船.", new Object[0]);
             this.state = State.COLLECTING;
             this.collectStep = CollectStep.LEAVE_SHIP;
             this.stateTick = 0;
@@ -1227,6 +1259,21 @@ extends Module {
             this.state = State.RISING;
             this.stateTick = 0;
         }
+    }
+
+    /** 起飞点头顶 3×3×4 是否全部是空气（防止在船舱/屋檐下起跳撞墙） */
+    private boolean canTakeOffHere() {
+        net.minecraft.util.math.BlockPos p = this.mc.player.getBlockPos();
+        for (int dy = 1; dy <= 4; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (!this.mc.world.getBlockState(p.add(dx, dy, dz)).isAir()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     private void onStorageTick() {
@@ -2884,6 +2931,30 @@ extends Module {
             best = frame;
         }
         return best;
+    }
+
+    /** 在目标点周围 radius 格内找展示框：优先持有鞘翅的，其次取最近（解决种子坐标 ±1 偏差扫不到） */
+    private net.minecraft.entity.decoration.ItemFrameEntity findFrameNear(net.minecraft.util.math.BlockPos pos, double radius) {
+        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos).expand(radius);
+        net.minecraft.entity.decoration.ItemFrameEntity best = null;
+        double bestD = Double.MAX_VALUE;
+        net.minecraft.entity.decoration.ItemFrameEntity fallback = null;
+        double fallbackD = Double.MAX_VALUE;
+        for (net.minecraft.entity.Entity entity : this.mc.world.getOtherEntities(null, box, e -> e instanceof net.minecraft.entity.decoration.ItemFrameEntity)) {
+            if (!(entity instanceof net.minecraft.entity.decoration.ItemFrameEntity)) continue;
+            net.minecraft.entity.decoration.ItemFrameEntity frame = (net.minecraft.entity.decoration.ItemFrameEntity)entity;
+            double d = frame.squaredDistanceTo((double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5);
+            if (frame.getHeldItemStack().getItem() == net.minecraft.item.Items.ELYTRA) {
+                if (d < bestD) {
+                    bestD = d;
+                    best = frame;
+                }
+            } else if (d < fallbackD) {
+                fallbackD = d;
+                fallback = frame;
+            }
+        }
+        return best != null ? best : fallback;
     }
 
     private net.minecraft.entity.decoration.ItemFrameEntity findFrameAt(net.minecraft.util.math.BlockPos pos) {
