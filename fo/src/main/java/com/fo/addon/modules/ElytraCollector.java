@@ -261,7 +261,7 @@ extends Module {
         this.debugSetting = this.sgGeneral.add((((new BoolSetting.Builder().name("调试日志")).description("输出调试日志 (用于校准高度公式).")).defaultValue(false)).build());
         this.sgStorage = this.settings.createGroup("存储");
         this.freeSlotDump = this.sgStorage.add((((new IntSetting.Builder().name("存盒空格阈值")).description("背包可用空格 ≤ 此值时，拿到鞘翅后自动去末影箱存鞘翅.")).defaultValue(3)).range(0, 36).sliderRange(0, 36).build());
-        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:cooked_beef;8;32")))).build());
+        this.supplies = this.sgStorage.add((((new StringListSetting.Builder().name("物资列表")).description("物资列表，格式: 物品代号;最低值;目标库存 (如 minecraft:firework_rocket;32;256). 背包物资低于最低值时自动从末影箱补货，拿到目标库存为止.")).defaultValue(new ArrayList<String>(List.of("minecraft:firework_rocket;4;16", "minecraft:golden_carrot;8;32")))).build());
         this.lowYExit = this.sgStorage.add((((new BoolSetting.Builder().name("低Y停止任务")).description("Y 低于阈值时自动停止任务 (防虚空掉物，不退游戏).")).defaultValue(true)).build());
         this.lowYThreshold = this.sgStorage.add((((new IntSetting.Builder().name("低Y阈值")).description("低于此 Y 自动停止任务.")).defaultValue(-20)).range(-64, 100).sliderRange(-64, 64).build());
         // 防卡区块（内嵌自 Ying 0.7.2 Pitch40Fly）
