@@ -147,6 +147,9 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new FOKillAura());
         Modules.get().add(new FOAncientCitySearch());
         Modules.get().add(new StashMover());
+        Modules.get().add(new com.fo.addon.modules.FOStructureSearch());
+        Modules.get().add(new com.fo.addon.modules.FOMushroomFinder());
+        Modules.get().add(new com.fo.addon.modules.FOThreeCNewbieCheck());
     }
 
     @Override

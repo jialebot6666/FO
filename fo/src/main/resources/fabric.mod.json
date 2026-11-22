@@ -30,5 +30,8 @@
     "java": ">=${jdk_version}",
     "minecraft": "${minecraft_version}",
     "meteor-client": "*"
-  }
+  },
+  "mixins": [
+    "fo.mixins.json"
+  ]
 }
