@@ -777,7 +777,8 @@ extends Module {
         this.landingRecover = false;
         this.recoverCount = 0;
         this.stateTick = 0;
-        this.info("飞向最近未去过的船 近似龙头=" + String.valueOf(this.current.headPos) + " 朝向=" + String.valueOf(this.current.facing), new Object[0]);
+        this.info("飞向最近未去过的船，朝向=" + String.valueOf(this.current.facing), new Object[0]);
+        this.debugLog("近似龙头=" + this.current.headPos);
         this.state = State.FLYING;
     }
 
@@ -865,7 +866,8 @@ extends Module {
                     PathManagers.get().moveTo(new net.minecraft.util.math.BlockPos(bx, this.mc.player.getBlockY(), bz), false);
                     this.antiStuckResume = this.antiStuckResumeTicks.get();
                     this.jumpStuckCount = 0;
-                    this.info("起跳卡住，绕行到 (" + bx + "," + this.mc.player.getBlockY() + "," + bz + ").", new Object[0]);
+                    this.info("起跳卡住，绕行.", new Object[0]);
+                    this.debugLog("绕行到 (" + bx + "," + this.mc.player.getBlockY() + "," + bz + ")");
                     return;
                 }
             }
@@ -986,13 +988,14 @@ extends Module {
                             this.exactHead = exact.pos;
                             this.waypoints = ShipWaypoints.from(this.exactHead, this.current.facing);
                             this.headFound = true;
-                            this.info("已确认龙头: " + this.exactHead + " 朝向=" + this.current.facing);
+                            this.info("已确认龙头，朝向=" + this.current.facing);
                             if (this.debugSetting.get()) {
                                 int realTop = this.mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, this.exactHead.getX(), this.exactHead.getZ());
                                 this.debugLog("龙头=(" + this.exactHead.getX() + "," + this.exactHead.getY() + "," + this.exactHead.getZ() + ") 龙头下地表=" + realTop + " 种子Y=" + this.current.headPos.getY());
                             }
                         } else {
-                            this.info("检测龙头第 " + this.scanAttempts + "/7 次未找到 (目标=" + this.current.headPos.getX() + "," + this.current.headPos.getZ() + ").");
+                            this.info("检测龙头第 " + this.scanAttempts + "/7 次未找到.");
+                            this.debugLog("检测目标=" + this.current.headPos.getX() + "," + this.current.headPos.getZ());
                         }
                     }
                 }
@@ -1015,7 +1018,8 @@ extends Module {
                     this.exactHead = last.pos;
                     this.waypoints = ShipWaypoints.from(this.exactHead, this.current.facing);
                     this.headFound = true;
-                    this.info("整列扫描发现龙头: " + this.exactHead + " 朝向=" + this.current.facing);
+                    this.info("整列扫描发现龙头，朝向=" + this.current.facing);
+                    this.debugLog("整列扫描龙头=" + this.exactHead);
                 }
             } else {
                 this.nearTicks = 0;
@@ -1679,7 +1683,7 @@ extends Module {
             net.minecraft.util.math.BlockPos existing;
             if (this.ecOpenFailCount == 0 && (existing = this.findNearbyEnderChest(5)) != null) {
                 this.ecPos = existing;
-                this.info("存储: 发现周围已有末影箱 " + String.valueOf(existing) + "，直接打开.", new Object[0]);
+                this.info("存储: 发现周围已有末影箱，直接打开.", new Object[0]);
                 this.storagePhase = StoragePhase.OPEN_EC;
                 this.storageTick = 0;
                 this.openRetry = 0;
@@ -1694,7 +1698,7 @@ extends Module {
             this.ensureItemSelected(ecSlot);
             this.placeCandidates = this.findPlaceSpots(null);
             if (this.placeCandidates.isEmpty() && this.waypoints != null && this.waypoints.p2 != null) {
-                this.info("附近无空位，改用检测潜影贝的位置 " + String.valueOf(this.waypoints.p2) + " 附近放置.", new Object[0]);
+                this.info("附近无空位，改用检测潜影贝的位置附近放置.", new Object[0]);
                 this.placeCandidates = this.findPlaceSpotsAt(this.waypoints.p2, null);
             }
             if (this.placeCandidates.isEmpty()) {
