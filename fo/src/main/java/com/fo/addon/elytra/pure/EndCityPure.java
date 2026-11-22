@@ -422,4 +422,32 @@ public final class EndCityPure {
         addPiece(env, base, rot, -2, 8, -2, FAT_TOWER_TOP);
         return true;
     }
+
+    /**
+     * 原版 EndCity.getAverageYPosition：取城中心 4 个角地形高度的最小值。
+     * 与 seedfinding 的区别是这里走 26.3 噪声，外环不再判虚空。
+     */
+    static int getAverageYPosition(EndNoisePure.SurfaceNoise sn, EndNoisePure.EndNoise en,
+                                   int chunkX, int chunkZ) {
+        JavaRandom rand = new JavaRandom();
+        rand.setSeed(chunkX + (long) chunkZ * 10387313L);
+        int rot = rand.nextInt(4);
+        int dx = 5;
+        int dz = 5;
+        if (rot == 1) {
+            dx = -5;
+        } else if (rot == 2) {
+            dx = -5;
+            dz = -5;
+        } else if (rot == 3) {
+            dz = -5;
+        }
+        int x = (chunkX << 4) + 7;
+        int z = (chunkZ << 4) + 7;
+        int h0 = EndNoisePure.heightInGround(sn, en, x, z);
+        int h1 = EndNoisePure.heightInGround(sn, en, x, z + dz);
+        int h2 = EndNoisePure.heightInGround(sn, en, x + dx, z);
+        int h3 = EndNoisePure.heightInGround(sn, en, x + dx, z + dz);
+        return Math.min(Math.min(h0, h1), Math.min(h2, h3));
+    }
 }

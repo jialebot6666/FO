@@ -588,8 +588,6 @@ extends Module {
                 return;
             }
             this.worldSeed = this.parseSeed((String)this.seedSetting.get());
-            EndBiomeSource biomeSource = new EndBiomeSource(MCVersion.v1_21, this.worldSeed);
-            EndTerrainGenerator terrainGen = new EndTerrainGenerator(biomeSource);
             int px = (int)Math.floor(this.mc.player.getX());
             int pz = (int)Math.floor(this.mc.player.getZ());
             int spacing = 20;
@@ -622,7 +620,7 @@ extends Module {
                         if (locator.getEndCityShip(cx, cz, ship) == 0) {
                             continue;
                         }
-                        int baseY = EndCity.getAverageYPosition(terrainGen, cx, cz);
+                        int baseY = locator.getAverageY(cx, cz);
                         int[] f = ElytraCollector.frameFromShipBB(ship);
                         if (f == null) {
                             continue;

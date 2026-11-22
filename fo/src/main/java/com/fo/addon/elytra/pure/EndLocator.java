@@ -48,6 +48,11 @@ public final class EndLocator {
         return EndNoisePure.isViableEndCityTerrain(seed, mc, surfaceNoise, endNoise, blockX, blockZ);
     }
 
+    /** 原版 EndCity.getAverageYPosition（26.3 口径）：城基座平均 Y。 */
+    public int getAverageY(int chunkX, int chunkZ) {
+        return EndCityPure.getAverageYPosition(surfaceNoise, endNoise, chunkX, chunkZ);
+    }
+
     /**
      * 末地城船 piece。
      *

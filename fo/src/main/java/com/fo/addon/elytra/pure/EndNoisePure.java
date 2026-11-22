@@ -463,6 +463,22 @@ public final class EndNoisePure {
         return 0;
     }
 
+    /** 原版 getHeightInGround：返回该列最上面实心方块的 y（末地 0..127）。 */
+    static int heightInGround(SurfaceNoise sn, EndNoise en, int blockX, int blockZ) {
+        int cellx = blockX >> 3;
+        int cellz = blockZ >> 3;
+        final int y0 = 0;
+        final int y1 = 32;
+        final int yn = y1 - y0 + 1;
+        double[][] n = new double[4][yn];
+        sampleNoiseColumnEnd(n[0], sn, en, cellx, cellz, y0, y1);
+        sampleNoiseColumnEnd(n[1], sn, en, cellx, cellz + 1, y0, y1);
+        sampleNoiseColumnEnd(n[2], sn, en, cellx + 1, cellz, y0, y1);
+        sampleNoiseColumnEnd(n[3], sn, en, cellx + 1, cellz + 1, y0, y1);
+        return getSurfaceHeight(n[0], n[1], n[2], n[3], y0, y1, 4,
+                (blockX & 7) / 8.0, (blockZ & 7) / 8.0);
+    }
+
     /** 末地高度噪声（8 格一个 cell）。 */
     public static float getEndHeightNoise(EndNoise en, int x, int z, int range) {
         int hx = x / 2;
