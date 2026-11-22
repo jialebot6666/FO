@@ -3,6 +3,7 @@ package com.fo.addon.modules;
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.ancient.core.XaeroWaypointBridge;
 import com.fo.addon.utils.MushroomBiomeSampler;
+import com.fo.addon.utils.MushroomClusterLogic;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -13,8 +14,9 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 
-import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -128,13 +130,17 @@ public class FOMushroomFinder extends Module {
             info("检测到下界启动，已把中心换算为主世界坐标 (" + cx + "," + cz + ")。");
         }
 
+        int baseX = cx - radius;
+        int baseZ = cz - radius;
+
         CompletableFuture.runAsync(() -> {
-            List<Point> found = new ArrayList<>();
+            List<MushroomClusterLogic.Point> found;
             try {
                 MushroomBiomeSampler sampler = new MushroomBiomeSampler(seed);
+                Set<Long> hits = new HashSet<>();
                 int lastProgress = 0;
-                for (int x = cx - radius; x <= cx + radius; x += step) {
-                    int progress = (int) ((long) (x - (cx - radius)) * 100 / (2L * radius));
+                for (int x = baseX; x <= cx + radius; x += step) {
+                    int progress = (int) ((long) (x - baseX) * 100 / (2L * radius));
                     if (progress >= lastProgress + 10) {
                         lastProgress = progress;
                         final int p = progress;
@@ -142,16 +148,18 @@ public class FOMushroomFinder extends Module {
                             if (generation == searchGeneration) info("搜索进度 " + p + "%");
                         });
                     }
-                    for (int z = cz - radius; z <= cz + radius; z += step) {
+                    int ix = (x - baseX) / step;
+                    for (int z = baseZ; z <= cz + radius; z += step) {
                         if (generation != searchGeneration) {
                             searching = false;
                             return;
                         }
                         if (sampler.isMushroomAt(x, z)) {
-                            addPoint(found, x, z);
+                            hits.add(MushroomClusterLogic.key(ix, (z - baseZ) / step));
                         }
                     }
                 }
+                found = MushroomClusterLogic.cluster(hits, baseX, baseZ, step);
             } catch (Throwable t) {
                 searching = false;
                 String msg = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
@@ -161,22 +169,14 @@ public class FOMushroomFinder extends Module {
                 return;
             }
             searching = false;
+            final List<MushroomClusterLogic.Point> result = found;
             mc.execute(() -> {
-                if (generation == searchGeneration && isActive()) showResults(found);
+                if (generation == searchGeneration && isActive()) showResults(result);
             });
         });
     }
 
-    private void addPoint(List<Point> found, int x, int z) {
-        for (Point p : found) {
-            if (Math.abs(p.x - x) <= 128 && Math.abs(p.z - z) <= 128) {
-                return;
-            }
-        }
-        found.add(new Point(x, z));
-    }
-
-    private void showResults(List<Point> points) {
+    private void showResults(List<MushroomClusterLogic.Point> points) {
         if (points.isEmpty()) {
             warning("该范围内没有发现蘑菇岛。");
             return;
@@ -184,9 +184,9 @@ public class FOMushroomFinder extends Module {
         if (xaeroSync.get() && XaeroWaypointBridge.isXaeroPresent()) {
             int count = 0;
             for (int i = 0; i < points.size(); i++) {
-                Point p = points.get(i);
+                MushroomClusterLogic.Point p = points.get(i);
                 if (XaeroWaypointBridge.addWaypoint(XaeroWaypointBridge.Preference.AUTO,
-                        p.x, 64, p.z, "蘑菇岛 #" + (i + 1), "蘑菇岛（FO）", "GOLD")) {
+                        p.x(), 64, p.z(), "蘑菇岛 #" + (i + 1), "蘑菇岛（FO）", "GOLD")) {
                     ++count;
                 }
             }
@@ -194,10 +194,10 @@ public class FOMushroomFinder extends Module {
         }
         int shown = Math.min(points.size(), 20);
         for (int i = 0; i < shown; i++) {
-            Point p = points.get(i);
-            int nx = Math.floorDiv(p.x, 8);
-            int nz = Math.floorDiv(p.z, 8);
-            info("蘑菇岛 #" + (i + 1) + "：主世界 X=" + p.x + " Z=" + p.z
+            MushroomClusterLogic.Point p = points.get(i);
+            int nx = Math.floorDiv(p.x(), 8);
+            int nz = Math.floorDiv(p.z(), 8);
+            info("蘑菇岛 #" + (i + 1) + "：主世界 X=" + p.x() + " Z=" + p.z()
                 + "；下界对应 X=" + nx + " Z=" + nz);
         }
         info("搜索完成，共发现 " + points.size() + " 处蘑菇岛；已显示前 " + shown + " 处。");
@@ -218,6 +218,5 @@ public class FOMushroomFinder extends Module {
         }
     }
 
-    private record Point(int x, int z) {
-    }
+
 }
