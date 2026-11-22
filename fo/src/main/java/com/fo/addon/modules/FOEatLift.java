@@ -2,16 +2,18 @@ package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.EatLiftLogic;
+import com.fo.addon.utils.SlmHook;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.ItemStack;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * FO 进食拉升。
@@ -26,12 +28,6 @@ import net.minecraft.item.ItemStack;
 public class FOEatLift extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgLift = settings.createGroup("拉升");
-
-    private final Setting<Boolean> onlyWhenElytra = sgGeneral.add(new BoolSetting.Builder()
-        .name("只在鞘翅采集启用时生效")
-        .description("开启后只有 FO 鞘翅采集模块在跑时才动作，手走路吃东西不打扰。")
-        .defaultValue(true)
-        .build());
 
     private final Setting<Boolean> requireFood = sgGeneral.add(new BoolSetting.Builder()
         .name("只认食物")
@@ -75,6 +71,8 @@ public class FOEatLift extends Module {
         .defaultValue(true)
         .build());
 
+    public static final Logger LOGGER = LoggerFactory.getLogger("fo-eatlift");
+
     private final EatLiftLogic logic = new EatLiftLogic();
 
     private boolean active;
@@ -84,7 +82,7 @@ public class FOEatLift extends Module {
 
     public FOEatLift() {
         super(AddonTemplate.CATEGORY, "FO 进食拉升",
-            "吃东西时自动按住 W（可加空格）并平滑抬视角，吃完恢复原状。");
+            "吃东西时自动按住 W（可加空格）并平滑抬视角，吃完恢复原状；跟随 SlimefunHelper 鞘翅追击开关。");
     }
 
     @Override
@@ -107,11 +105,8 @@ public class FOEatLift extends Module {
             eating = !stack.isEmpty() && stack.contains(DataComponentTypes.FOOD);
         }
 
-        boolean gate = true;
-        if (onlyWhenElytra.get()) {
-            ElytraCollector collector = Modules.get().get(ElytraCollector.class);
-            gate = collector != null && collector.isActive();
-        }
+        // 与 eat-lift 原版一致：读 SlimefunHelper 鞘翅追击的开关；没装或读不到时放行
+        boolean gate = SlmHook.isElytraBotOn();
 
         EatLiftLogic.Action action = logic.tick(eating, gate, delayTicks.get(), holdTicks.get());
         if (action == EatLiftLogic.Action.PRESS) {
