@@ -195,7 +195,7 @@ public class FOAncientCitySearch extends Module {
 
     private final MinecraftClient mc;
     private Long manualSeed;
-    private boolean searching;
+    private volatile boolean searching;
     private CompletableFuture<Void> searchTask;
 
     /**
@@ -212,6 +212,8 @@ public class FOAncientCitySearch extends Module {
     private volatile Long activeSeed;
     /** 本轮搜索的结果首次落地前，先【整体替换】该作用域的旧记录（旧记录可能来自别的种子）。 */
     private boolean storeReplacePending;
+    /** 本轮搜索零结果：需要客户端线程清掉旧标记（整体替换语义）。 */
+    private volatile boolean clearPending;
 
     /** 一个待应用的命中点（坐标 + 标签 + 预生成的路径点名字）。 */
     private record PendingMark(int x, int y, int z, String label, String waypointName) {
@@ -1191,6 +1193,70 @@ public class FOAncientCitySearch extends Module {
         }
     }
 
+    // ==================== 供「FO 附魔金采集」使用的公开桥接 ====================
+    // 新模块只读本模块的标记/种子，并通过这里触发搜索、写已开名单；
+    // 不复制搜索逻辑、不在后台线程直接改 fo-ancient-chests.json。
+
+    /** 搜索是否正在进行（附魔金采集用来等待自动搜索完成）。 */
+    public boolean isSearching() {
+        return searching;
+    }
+
+    /** 自动偷取是否开启（附魔金采集检测到就先暂停，避免两个模块抢同一个箱子）。 */
+    public boolean isAutoStealEnabled() {
+        return autoStealSetting.get();
+    }
+
+    /** 搜索结果是否还有未落到存档的记录（异步线程算完到客户端线程落盘之间有几 tick 空窗）。 */
+    public boolean hasPendingResults() {
+        if (searching) return true;
+        if (clearPending) return true;
+        return !pendingMarks.isEmpty();
+    }
+
+    /** 由附魔金采集触发的自动搜索：沿用本模块现有的半径/类型/种子设置。 */
+    public void startAutoSearch() {
+        if (mc.player == null || mc.world == null) return;
+        if (searching) return;
+        startSearch();
+    }
+
+    /** 当前作用域（服务器 + 维度）；没有进入世界时返回 null。 */
+    public String currentScopeKey() {
+        return currentScope();
+    }
+
+    /** 当前作用域的全部命中记录（优先用本模块内存里的最新数据）。 */
+    public List<AncientChestStore.Mark> currentMarks() {
+        loadStore();
+        String scope = currentScope();
+        return scope == null ? List.of() : chestStore.marks(scope);
+    }
+
+    /** 某个水平坐标是否已在「已开名单」里。 */
+    public boolean isChestOpened(int x, int z) {
+        loadStore();
+        String scope = currentScope();
+        return scope != null && chestStore.isOpen(scope, x, z);
+    }
+
+    /**
+     * 附魔金采集开箱成功后调用：写入已开名单、删高亮与路径点，并把双箱另一半一并处理。
+     * 只在客户端线程调用。
+     */
+    public void markChestOpenedExternally(int x, int y, int z) {
+        loadStore();
+        String scope = currentScope();
+        if (scope == null) return;
+        BlockPos pos = new BlockPos(x, y, z);
+        chestStore.markOpened(scope, x, z);
+        if (chestStore.remove(scope, x, z)) {
+            XaeroWaypointBridge.removeWaypointAt(x, z);
+        }
+        removePartnerMark(scope, pos);
+        saveStore();
+    }
+
     private void startSearch() {
         if (searching) {
             warning("搜索正在进行中...");
@@ -1210,6 +1276,7 @@ public class FOAncientCitySearch extends Module {
         }
         activeSeed = seed;
         storeReplacePending = true;
+        clearPending = false;
         pendingMarks.clear();
         setSearching(true);
         BlockPos playerPos = mc.player.getBlockPos();
@@ -1368,6 +1435,9 @@ public class FOAncientCitySearch extends Module {
     private void reportResults(List<FoundChest> results, BlockPos playerPos) {
         if (results.isEmpty()) {
             warning("在指定范围内未找到包含" + searchTypeSetting.get() + "的古城箱子");
+            // 整体替换语义：零结果也要清旧标记，否则上一轮的残留记录会被当成新结果。
+            // 真正清理由客户端线程的 flushPendingMarks 做（Xaero/存档都只能在客户端线程碰）。
+            clearPending = true;
             return;
         }
         results.sort(Comparator.comparingDouble(fc -> fc.distance));
@@ -1410,6 +1480,21 @@ public class FOAncientCitySearch extends Module {
      * 于是抛 ConcurrentModificationException 把整局崩掉。
      */
     private void flushPendingMarks() {
+        // 搜索线程还在往队列里加结果时不能读/清：ArrayDeque 不是线程安全的。
+        // searching 是 volatile，置 false 之前的 add 对客户端线程可见。
+        if (searching) return;
+        if (clearPending) {
+            clearPending = false;
+            loadStore();
+            String scope = currentScope();
+            if (scope != null && storeReplacePending) {
+                storeReplacePending = false;
+                clearWaypointsOf(chestStore.marks(scope));
+                chestStore.clearMarks(scope);
+                if (activeSeed != null) chestStore.setScopeSeed(scope, activeSeed);
+                saveStore();
+            }
+        }
         if (pendingMarks.isEmpty()) {
             return;
         }

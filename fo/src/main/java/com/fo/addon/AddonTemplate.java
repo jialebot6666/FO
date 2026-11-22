@@ -10,6 +10,7 @@ import com.fo.addon.modules.AutoMining;
 import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
+import com.fo.addon.modules.FOEnchantedGoldCollector;
 import com.fo.addon.modules.FOKillAura;
 import com.fo.addon.modules.StashMover;
 import com.fo.addon.utils.EnchantLevelMapSetting;
@@ -146,6 +147,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoMining());
         Modules.get().add(new FOKillAura());
         Modules.get().add(new FOAncientCitySearch());
+        Modules.get().add(new FOEnchantedGoldCollector());
         Modules.get().add(new StashMover());
         Modules.get().add(new com.fo.addon.modules.FOStructureSearch());
         Modules.get().add(new com.fo.addon.modules.FOMushroomFinder());

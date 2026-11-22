@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.7p39`（**测试版**；对外正式版仍是 `6.7`，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.7p39-1.21.11.jar`
+- 当前版本：`mod-version = 6.9p23`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p23-1.21.11.jar`
   （测试版在正式版号后加 `pN`，如 `6.7p37`，产物名 `FO-6.7p37-1.21.11.jar`；详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
@@ -16,6 +16,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   7. FO 杀戮光环（`modules/FOKillAura`）
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
+  10. FO 附魔金采集（`modules/FOEnchantedGoldCollector`，6.9p23 新增：联动古城搜索，p40 飞行 + 竖井/通道 + 只取附魔金 + 满 64 存盒 + 经验瓶修复）
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
