@@ -17,6 +17,7 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
   10. FO 附魔金采集（`modules/FOEnchantedGoldCollector`，6.9p23 新增：联动古城搜索，p40 飞行 + 竖井/通道 + 只取附魔金 + 满 64 存盒 + 经验瓶修复）
+- 6.9p23 附魔金采集的边界：独立黑名单 `fo-enchanted-gold-auto.json`；只读古城搜索标记、不复制搜索逻辑；竖井每格查下/四邻/前瞻流体；升井用垫脚方块回填竖井，取完箱必须先回竖井底再升井，绝不能在地底切飞行。
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。
