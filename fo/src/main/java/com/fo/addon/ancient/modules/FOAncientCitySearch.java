@@ -2,8 +2,10 @@ package com.fo.addon.ancient.modules;
 
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.ancient.core.AncientChestExtractor;
+import com.fo.addon.ancient.core.AncientCityBiomeCheck;
 import com.fo.addon.ancient.core.AncientChestStore;
 import com.fo.addon.ancient.core.AncientEnchantData;
+import com.fo.addon.ancient.core.AncientGeometry;
 import com.fo.addon.ancient.core.AncientJigsawSimulator;
 import com.fo.addon.ancient.core.AncientLootEvaluator;
 import com.fo.addon.ancient.core.AncientLootTable;
@@ -12,7 +14,6 @@ import com.fo.addon.ancient.core.AncientResourceSource;
 import com.fo.addon.ancient.core.AncientSearchLogic;
 import com.fo.addon.ancient.core.AncientSeedStore;
 import com.fo.addon.ancient.core.AncientStealStats;
-import com.fo.addon.ancient.core.CubiomesJNI;
 import com.fo.addon.ancient.core.FoundChest;
 import com.fo.addon.ancient.core.GameVersionOption;
 import com.fo.addon.ancient.core.LootTarget;
@@ -1228,25 +1229,9 @@ public class FOAncientCitySearch extends Module {
         List<FoundChest> results = new ArrayList<>();
         int radius = searchRadiusSetting.get();
 
-        // 群系验证暂时仍走 cubiomes（阶段 2.5 自写群系采样完成前，DLL 只保留这一个用途）
-        CubiomesJNI jni = null;
-        long generator = 0L;
-        boolean jniReady = false;
-        debug("DLL 加载状态: " + CubiomesJNI.isLibraryLoaded());
-        try {
-            if (CubiomesJNI.isLibraryLoaded()) {
-                jni = new CubiomesJNI();
-                int versionId = gameVersionSetting.get() == GameVersionOption.FROM_26_1 ? 24 : 23;
-                generator = jni.initGenerator(versionId, seed);
-                jniReady = true;
-                debug("生成器初始化完成: versionId=" + versionId + " generator=" + generator);
-            }
-        } catch (Throwable t) {
-            // native 链接失败（UnsatisfiedLinkError 等 Error 也要捕获，避免中断整个扫描）
-            debug("生成器初始化失败: " + t);
-            debugStack(t);
-            jniReady = false;
-        }
+        // 群系验证走原版：BuiltinRegistries 构造 NoiseConfig + MultiNoiseBiomeSource，
+        // 按世界种子在 quart 坐标采样，判 Deep Dark。零原生依赖、零黑盒。
+        AncientCityBiomeCheck biomeCheck = new AncientCityBiomeCheck(seed);
 
         // 古城定位改为纯 Java（零原生依赖、零黑盒）。
         // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
@@ -1257,11 +1242,9 @@ public class FOAncientCitySearch extends Module {
             AncientCityLocatorLogic.findNearby(seed, playerPos.getX(), playerPos.getZ(), radius);
         info("定位完成: 半径内候选古城 " + cities.size() + " 座");
 
-        if (jniReady) {
-            info("群系验证: 已启用（cubiomes）");
-        } else {
-            warning("CubiomesJNI 原生库不可用，跳过群系验证；候选里可能包含实际不生成的古城（前往前请留意）。");
-        }
+        info("群系验证: 已启用（原版 MultiNoiseBiomeSource）");
+        AncientResourceSource structures = AncientResourceSource.bundledStructures();
+        AncientResourceSource pools = AncientResourceSource.bundledPools();
 
         int total = cities.size();
         int done = 0;
@@ -1282,35 +1265,27 @@ public class FOAncientCitySearch extends Module {
             int cityChunkX = city.chunkX();
             int cityChunkZ = city.chunkZ();
             try {
-                if (jniReady && jni != null) {
-                    // 群系验证探针点与旧实现保持一致：城市原点 + 8（不要改成原点，那会改变验证结果）
-                    int probeX = city.blockX() + 8;
-                    int probeZ = city.blockZ() + 8;
-                    boolean viable = jni.isViableAncientCity(generator, probeX, probeZ);
-                    debug("古城候选 区块 " + cityChunkX + "," + cityChunkZ
-                        + " 方块 " + city.blockX() + "," + city.blockZ() + " 群系验证=" + viable);
-                    if (!viable) {
-                        continue;
-                    }
+                // 群系验证：原版 MultiNoiseBiomeSource 采样 city_center 包围盒中心。
+                List<AncientJigsawSimulator.Piece> pieces =
+                    AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
+                AncientGeometry.BoundingBox centerBb = pieces.get(0).bb;
+                int centerX = (centerBb.minX + centerBb.maxX) / 2;
+                int centerZ = (centerBb.minZ + centerBb.maxZ) / 2;
+                boolean viable = biomeCheck.isDeepDarkAtCenter(centerX, centerZ);
+                debug("古城候选 区块 " + cityChunkX + "," + cityChunkZ
+                    + " 方块 " + city.blockX() + "," + city.blockZ()
+                    + " 群系采样 " + centerX + "," + centerZ + " 深暗之域=" + viable);
+                if (!viable) {
+                    continue;
                 }
                 found++;
-                // 结构重放仍走黑盒（V6.8 换成纯 Java 后即可删除黑盒 jar）。
-                // 已用独立参考实现交叉验证过：纯 Java 管线给出的箱子集与黑盒完全一致。
-                List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos);
+                List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, pieces, structures);
                 debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
                 results.addAll(chests);
             } catch (Throwable t) {
                 // UnsatisfiedLinkError 等 Error 不能中断整个扫描
                 debug("古城 区块 " + cityChunkX + "," + cityChunkZ + " 处理异常: " + t);
                 debugStack(t);
-            }
-        }
-
-        if (jni != null && generator != 0L) {
-            try {
-                jni.freeGenerator(generator);
-            } catch (Throwable t) {
-                // 忽略
             }
         }
 
@@ -1324,18 +1299,16 @@ public class FOAncientCitySearch extends Module {
      * @param cityChunkX 古城所在【区块】X（与 {@code AncientCityLocatorLogic.City.chunkX()} 一致）
      * @param cityChunkZ 古城所在【区块】Z
      */
-    private List<FoundChest> chestsOfOneCity(long seed, int cityChunkX, int cityChunkZ, BlockPos playerPos) {
+    private List<FoundChest> chestsOfOneCity(long seed, int cityChunkX, int cityChunkZ, BlockPos playerPos,
+                                             List<AncientJigsawSimulator.Piece> pieces,
+                                             AncientResourceSource structures) {
         List<FoundChest> results = new ArrayList<>();
-        AncientResourceSource structures = AncientResourceSource.bundledStructures();
-        AncientResourceSource pools = AncientResourceSource.bundledPools();
         // 战利品表按游戏版本挑。表在版本间有三处差异：
         //   ≤1.20.6 附魔旧语法 / 1.21.6 起第 8 条由 saddle 常量变 leather uniform / ≥26.1 少 name_tag。
         // 选错会让每一次加权抽取错位 —— 实机表现正是「位置对、物品全错」。
         AncientResourceSource dataSource =
             AncientResourceSource.bundledLootTables(gameVersionSetting.get());
 
-        List<AncientJigsawSimulator.Piece> pieces =
-            AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
         List<AncientChestExtractor.Chest> chests =
             AncientChestExtractor.extract(pieces, seed, structures);
         debug("古城结构生成完成: 区块 " + cityChunkX + "," + cityChunkZ
