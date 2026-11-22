@@ -2,7 +2,7 @@
 package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
-import com.fo.addon.elytra.CubiomesEndJNI;
+import com.fo.addon.elytra.pure.EndLocator;
 import com.fo.addon.pathing.PathManagers;
 import com.seedfinding.mcbiome.source.BiomeSource;
 import com.seedfinding.mcbiome.source.EndBiomeSource;
@@ -514,11 +514,8 @@ extends Module {
     /** 搜索入口：末地环模式优先走 26.3 原生定位器，否则走旧版种子推算。 */
     private void searchShips(int generation) {
         if ((this.ringSearch.get()).booleanValue()) {
-            if (CubiomesEndJNI.isLibraryLoaded()) {
-                this.searchShipsRing(generation);
-                return;
-            }
-            this.warning("末地环定位器未加载（原生库缺失），回退旧版种子推算.", new Object[0]);
+            this.searchShipsRing(generation);
+            return;
         }
         this.searchShipsLegacy(generation);
     }
@@ -601,12 +598,7 @@ extends Module {
             int prx = Math.floorDiv(px >> 4, spacing);
             int prz = Math.floorDiv(pz >> 4, spacing);
             ArrayList<ShipTarget> found = new ArrayList<ShipTarget>();
-            long handle = CubiomesEndJNI.initEndLocator(CubiomesEndJNI.MC_1_26_3, this.worldSeed);
-            if (handle == 0L) {
-                this.warning("末地环定位器初始化失败，回退旧版种子推算.", new Object[0]);
-                this.searchShipsLegacy(generation);
-                return;
-            }
+            EndLocator locator = new EndLocator(EndLocator.MC_1_26_3, this.worldSeed);
             try {
                 int[] out = new int[2];
                 int[] ship = new int[7];
@@ -617,17 +609,17 @@ extends Module {
                     for (int drz = -regionRange; drz <= regionRange; ++drz) {
                         int rx = prx + drx;
                         int rz = prz + drz;
-                        if (CubiomesEndJNI.getEndCityAt(handle, rx, rz, out) == 0) {
+                        if (locator.getEndCityAt(rx, rz, out) == 0) {
                             continue;
                         }
                         int bx = out[0];
                         int bz = out[1];
-                        if (!CubiomesEndJNI.isViableEndCity(handle, bx, bz)) {
+                        if (!locator.isViableEndCity(bx, bz)) {
                             continue;
                         }
                         int cx = bx >> 4;
                         int cz = bz >> 4;
-                        if (CubiomesEndJNI.getEndCityShip(handle, cx, cz, ship) == 0) {
+                        if (locator.getEndCityShip(cx, cz, ship) == 0) {
                             continue;
                         }
                         int baseY = EndCity.getAverageYPosition(terrainGen, cx, cz);
@@ -649,7 +641,7 @@ extends Module {
                 }
             }
             finally {
-                CubiomesEndJNI.freeEndLocator(handle);
+                locator.free();
             }
             this.applySearchResults(found, range, generation);
         }
