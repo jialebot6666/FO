@@ -29,6 +29,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
@@ -1231,8 +1234,6 @@ public class FOAncientCitySearch extends Module {
 
         // 群系验证走原版：BuiltinRegistries 构造 NoiseConfig + MultiNoiseBiomeSource，
         // 按世界种子在 quart 坐标采样，判 Deep Dark。零原生依赖、零黑盒。
-        AncientCityBiomeCheck biomeCheck = new AncientCityBiomeCheck(seed);
-
         // 古城定位改为纯 Java（零原生依赖、零黑盒）。
         // 语义：半径单位是区块，但距离按「方块距离」算，基准点是城市原点方块坐标
         //（旧实现按区块距离、基准点是「城市原点 + 8」，两者在半径边界会差半个区块）。
@@ -1247,47 +1248,65 @@ public class FOAncientCitySearch extends Module {
         AncientResourceSource pools = AncientResourceSource.bundledPools();
 
         int total = cities.size();
-        int done = 0;
-        int found = 0;
-        int lastPct = -1;
+        AtomicInteger done = new AtomicInteger();
+        AtomicInteger found = new AtomicInteger();
+        AtomicInteger lastPct = new AtomicInteger(-1);
+        AtomicLong jigsawNanos = new AtomicLong();
+        AtomicLong biomeNanos = new AtomicLong();
+        List<FoundChest> syncResults = Collections.synchronizedList(results);
+        // 原版 NoiseConfig / MultiNoiseSampler 只在本地读，但每个线程各持一份最稳
+        ThreadLocal<AncientCityBiomeCheck> checks =
+            ThreadLocal.withInitial(() -> new AncientCityBiomeCheck(seed));
 
-        for (AncientCityLocatorLogic.City city : cities) {
+        cities.parallelStream().forEach(city -> {
             if (!searching) {
                 return;
             }
-            int pct = ++done * 100 / Math.max(1, total);
-            if (pct - lastPct >= 10) {
-                lastPct = pct;
-                // 注意：Meteor info() 内部 String.format，裸 % 必须转义为 %%（对齐原版 %%）否则抛 Conversion 异常
-                info("进度: " + done + "/" + total + " (" + pct + "%%)  已找到 " + found + " 个古城");
+            int current = done.incrementAndGet();
+            int pct = current * 100 / Math.max(1, total);
+            int prev = lastPct.get();
+            if (pct - prev >= 10 && lastPct.compareAndSet(prev, pct)) {
+                // 注意：Meteor info() 内部 String.format，裸 % 必须转义为 %% 否则抛 Conversion 异常
+                info("进度: " + current + "/" + total + " (" + pct + "%%)  已找到 " + found.get() + " 个古城");
             }
 
             int cityChunkX = city.chunkX();
             int cityChunkZ = city.chunkZ();
             try {
-                // 群系验证：原版 MultiNoiseBiomeSource 采样 city_center 包围盒中心。
+                long t0 = System.nanoTime();
                 List<AncientJigsawSimulator.Piece> pieces =
                     AncientJigsawSimulator.simulate(seed, cityChunkX, cityChunkZ, structures, pools);
+                jigsawNanos.addAndGet(System.nanoTime() - t0);
+
                 AncientGeometry.BoundingBox centerBb = pieces.get(0).bb;
                 int centerX = (centerBb.minX + centerBb.maxX) / 2;
                 int centerZ = (centerBb.minZ + centerBb.maxZ) / 2;
-                boolean viable = biomeCheck.isDeepDarkAtCenter(centerX, centerZ);
+
+                long t1 = System.nanoTime();
+                boolean viable = checks.get().isDeepDarkAtCenter(centerX, centerZ);
+                biomeNanos.addAndGet(System.nanoTime() - t1);
+
                 debug("古城候选 区块 " + cityChunkX + "," + cityChunkZ
                     + " 方块 " + city.blockX() + "," + city.blockZ()
                     + " 群系采样 " + centerX + "," + centerZ + " 深暗之域=" + viable);
                 if (!viable) {
-                    continue;
+                    return;
                 }
-                found++;
+                found.incrementAndGet();
                 List<FoundChest> chests = chestsOfOneCity(seed, cityChunkX, cityChunkZ, playerPos, pieces, structures);
                 debug("城市箱子收集完成: 候选 " + chests.size() + " 个");
-                results.addAll(chests);
+                syncResults.addAll(chests);
             } catch (Throwable t) {
                 // UnsatisfiedLinkError 等 Error 不能中断整个扫描
                 debug("古城 区块 " + cityChunkX + "," + cityChunkZ + " 处理异常: " + t);
                 debugStack(t);
             }
-        }
+        });
+        checks.remove();
+
+        info("耗时拆分: 拼图 " + (jigsawNanos.get() / 1_000_000L) + " ms，群系采样 "
+            + (biomeNanos.get() / 1_000_000L) + " ms（并行，线程数 "
+            + Runtime.getRuntime().availableProcessors() + "）");
 
         reportResults(results, playerPos);
         setSearching(false);
