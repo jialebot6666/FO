@@ -2,6 +2,7 @@ package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.threec.ThreeCPlayerService;
+import com.fo.addon.utils.threec.ThreeCCacheStore;
 import com.fo.addon.utils.threec.ThreeCQueryQueue;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -13,7 +14,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.player.PlayerEntity;
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -48,6 +48,22 @@ public class FOThreeCNewbieCheck extends Module {
         .min(0).max(2000)
         .build());
 
+    private final Setting<Integer> cacheHours = sgGeneral.add(new IntSetting.Builder()
+        .name("缓存有效期")
+        .description("查询结果保留多少小时，0 表示永不过期。到期后会静默重查刷新，期间仍显示旧数据。")
+        .defaultValue(24)
+        .min(0).max(2160)
+        .build());
+
+    private final Setting<Boolean> btnClearCache = sgGeneral.add(new BoolSetting.Builder()
+        .name("清空缓存")
+        .description("删除所有已缓存的玩家时长，下次进入范围会重新查询。")
+        .defaultValue(false)
+        .onChanged(v -> {
+            if (v) onClearCache();
+        })
+        .build());
+
     private final Setting<Boolean> btnQuerySelf = sgGeneral.add(new BoolSetting.Builder()
         .name("查询自己")
         .description("立即查询自己的游玩时长。")
@@ -72,7 +88,8 @@ public class FOThreeCNewbieCheck extends Module {
         })
         .build());
 
-    private final ConcurrentHashMap<String, ThreeCPlayerService.PlayerTime> cache = new ConcurrentHashMap<>();
+    // 落盘缓存：开关模块、重启游戏都不丢，只有过期或手动清空才重查
+    private final ThreeCCacheStore store = ThreeCCacheStore.load();
     private final AtomicBoolean selfToggle = new AtomicBoolean(false);
     private final AtomicBoolean nameToggle = new AtomicBoolean(false);
     private final AtomicInteger tickCounter = new AtomicInteger();
@@ -87,11 +104,11 @@ public class FOThreeCNewbieCheck extends Module {
     @Override
     public void onActivate() {
         closeQueue();
-        cache.clear();
         queue = new ThreeCQueryQueue(ThreeCPlayerService::query, new ThreeCQueryQueue.Listener() {
             @Override
             public void success(ThreeCPlayerService.PlayerTime data) {
-                cache.put(ThreeCQueryQueue.key(data.name()), data);
+                store.put(ThreeCQueryQueue.key(data.name()),
+                    new ThreeCCacheStore.Entry(data, System.currentTimeMillis()));
             }
 
             @Override
@@ -106,7 +123,7 @@ public class FOThreeCNewbieCheck extends Module {
     @Override
     public void onDeactivate() {
         closeQueue();
-        cache.clear();
+        store.saveIfDirty();
     }
 
     @EventHandler
@@ -115,12 +132,18 @@ public class FOThreeCNewbieCheck extends Module {
         if (q == null || mc.player == null || mc.world == null) return;
         int range = autoQueryRange.get();
         if (range <= 0) return;
-        if (tickCounter.incrementAndGet() % 20 != 0) return;
+        int tick = tickCounter.incrementAndGet();
+        // 每 5 秒落盘一次，避免每查到一个就写文件
+        if (tick % 100 == 0) store.saveIfDirty();
+        if (tick % 20 != 0) return;
+        long now = System.currentTimeMillis();
+        long ttl = cacheHours.get();
         for (PlayerEntity player : mc.world.getPlayers()) {
             if (player == mc.player) continue;
             if (mc.player.distanceTo(player) > range) continue;
             String name = player.getName().getString();
-            if (cache.containsKey(ThreeCQueryQueue.key(name))) continue;
+            ThreeCCacheStore.Entry cached = store.get(ThreeCQueryQueue.key(name));
+            if (cached != null && !cached.isExpired(ttl, now)) continue;
             if (q.isQueued(name)) continue;
             try {
                 q.enqueue(name, false);
@@ -133,11 +156,19 @@ public class FOThreeCNewbieCheck extends Module {
     /** 供 mixin 读取：返回该玩家已缓存的时长数据，没有则 null。 */
     public ThreeCPlayerService.PlayerTime nametagResult(PlayerEntity player) {
         if (!showOnNametags.get() || player == null) return null;
-        return cache.get(ThreeCQueryQueue.key(player.getName().getString()));
+        ThreeCCacheStore.Entry entry = store.get(ThreeCQueryQueue.key(player.getName().getString()));
+        return entry == null ? null : entry.data();
     }
 
     public boolean isNewbie(ThreeCPlayerService.PlayerTime data) {
         return data != null && data.isNewbie(thresholdHours.get());
+    }
+
+    private void onClearCache() {
+        btnClearCache.set(false);
+        store.clear();
+        store.saveIfDirty();
+        info("3C 缓存已清空");
     }
 
     private void onQuerySelf() {
