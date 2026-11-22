@@ -173,6 +173,7 @@ public class FOEnchantedGoldCollector extends Module {
     private int cityIndex;
     private int openedInCity;
     private int fakeCityFailures;
+    private boolean fakeCityBlacklistPending;
     private int totalCollected;
     private int packedTotal;
     private int openedTotal;
@@ -519,6 +520,7 @@ public class FOEnchantedGoldCollector extends Module {
         cityIndex = 0;
         openedInCity = 0;
         fakeCityFailures = 0;
+        fakeCityBlacklistPending = false;
         totalCollected = 0;
         packedTotal = 0;
         openedTotal = 0;
@@ -846,6 +848,7 @@ public class FOEnchantedGoldCollector extends Module {
             currentCity = cities.get(cityIndex);
             openedInCity = 0;
             fakeCityFailures = 0;
+            fakeCityBlacklistPending = false;
             if (pickChestInCity()) {
                 beginFlight();
                 return;
@@ -1479,6 +1482,18 @@ public class FOEnchantedGoldCollector extends Module {
         if (pauseAfterAscent) {
             pauseAfterAscent = false;
             pause("竖井/通道遇到流体，已安全升井；按设置未拉黑，任务暂停");
+            return;
+        }
+        if (fakeCityBlacklistPending) {
+            fakeCityBlacklistPending = false;
+            if (currentCity != null) {
+                store.blacklistCity(scope(), currentCity.centerX(), currentCity.centerZ(),
+                    EnchantedGoldStore.REASON_FAKE_CITY);
+                saveStore();
+                warning("同一座城连续 3 个目标失真，判定假城，整城拉黑。");
+            }
+            fakeCityFailures = 0;
+            rotateToNextCity();
             return;
         }
         if (surfaceEvaluated) {
@@ -2540,14 +2555,18 @@ public class FOEnchantedGoldCollector extends Module {
         if (EnchantedGoldStore.REASON_TARGET_MISSING.equals(reason)) {
             fakeCityFailures++;
             // 在地底不能直接切城起飞；等升井后再算，避免从竖井里启动飞行
-            if (fakeCityFailures >= 3 && currentCity != null && !underground) {
-                store.blacklistCity(scope, currentCity.centerX(), currentCity.centerZ(),
-                    EnchantedGoldStore.REASON_FAKE_CITY);
-                saveStore();
-                warning("同一座城连续 3 个目标失真，判定假城，整城拉黑。");
-                fakeCityFailures = 0;
-                rotateToNextCity();
-                return;
+            if (fakeCityFailures >= 3 && currentCity != null) {
+                if (!underground) {
+                    store.blacklistCity(scope, currentCity.centerX(), currentCity.centerZ(),
+                        EnchantedGoldStore.REASON_FAKE_CITY);
+                    saveStore();
+                    warning("同一座城连续 3 个目标失真，判定假城，整城拉黑。");
+                    fakeCityFailures = 0;
+                    rotateToNextCity();
+                    return;
+                }
+                // 地底不能直接起飞：先升井，回到地表再拉黑整城
+                fakeCityBlacklistPending = true;
             }
         }
         if (underground) {
