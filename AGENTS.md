@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.9p23`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p23-1.21.11.jar`
+- 当前版本：`mod-version = 6.9p24`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p24-1.21.11.jar`
   （测试版在正式版号后加 `pN`，如 `6.7p37`，产物名 `FO-6.7p37-1.21.11.jar`；详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
@@ -17,7 +17,29 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
   10. FO 附魔金采集（`modules/FOEnchantedGoldCollector`，6.9p23 新增：联动古城搜索，p40 飞行 + 竖井/通道 + 只取附魔金 + 满 64 存盒 + 经验瓶修复）
+  11. FO 不祥宝库 ESP（`modules/FOVaultEsp`，6.9p24 新增：客户端 ESP，只高亮不祥宝库——同一个 `minecraft:vault` 的 `ominous=true`，普通宝库不显示；半径默认 500 格 + 光柱 + 只显示未开）
 - 6.9p23 附魔金采集的边界：独立黑名单 `fo-enchanted-gold-auto.json`；只读古城搜索标记、不复制搜索逻辑；竖井每格查下/四邻/前瞻流体；升井用垫脚方块回填竖井，取完箱必须先回竖井底再升井，绝不能在地底切飞行。
+
+- ✅ 6.9p24 已完成：**新增「FO 不祥宝库 ESP」**（用户口径：只 ESP 不祥宝库、不要普通宝库、服务器环境）。
+  - **判据（本机官方 jar 实证）**：不祥宝库不是独立方块，就是 `minecraft:vault`；`assets/minecraft/blockstates/vault.json`
+    共 32 个 variant = `facing` × `ominous`(true/false) × `vault_state`(inactive/active/unlocking/ejecting)。
+    `ominous=true` = 不祥宝库，`vault_state=inactive` = 还没开过；jar 里没有任何 `ominous_vault` 方块资源
+    （只有结构模板 `reward/ominous_vault.nbt` 叫这个名）。属性随区块数据下发 → 客户端不需要方块实体包，
+    也不发包，服务器无感；**不要**用材质/模型或方块实体 NBT 判断。
+  - **实现**：`modules/FOVaultEsp`（模块）+ `utils/VaultEspLogic`（纯逻辑：不祥判定/只显示未开/半径过滤/距离排序/
+    数量上限/时间片，可单测）。扫描只走**已加载区块**：先用 `ChunkSection.hasAny(st -> st.isOf(Blocks.VAULT))`
+    廉价筛 section，命中才逐格判 `VaultBlock.OMINOUS`；跨 tick 分摊（每 tick 约 2ms / 32 区块），
+    扫完一整遍按「重扫间隔」再扫。命中坐标再用 `world.getBlockState` 复核一次，防 section 索引错位误报。
+    Yarn 1.21.11 注意：`VAULT_STATE` 的声明类型是 `Property<VaultState>`（不是 EnumProperty），`FACING` 才是 EnumProperty。
+  - **设置（全中文）**：扫描半径（默认 **500 格** = 用户口径的服务器可渲染范围）、重扫间隔、只显示未开（默认开）、
+    发现提示（默认关）、最大显示数、未开颜色/已开颜色、渲染模式、光柱（默认开，画到地表的细柱方便高空定位）。
+  - ⚠️ **构建坑（重要）**：在含中文的路径下（本工作区 `工作区\FO`）Gradle **跑不了测试**——测试 JVM 的
+    `@argfile`（`%USERPROFILE%\.gradle\.tmp\gradle-worker-classpath*.txt`）由 Gradle 按 UTF-8 写、
+    Windows 启动器按 ANSI(GBK) 读，classpath 里的中文目录变乱码 → 所有测试 `ClassNotFoundException`（包括老测试）。
+    本机做法：robocopy 到 ASCII 路径副本 `C:\fo-ascii\FO` 里构建，再拷 jar 回仓库。结果：62 套件 **517 测试全绿**
+    （0 failures / 0 errors），产物 `FO-6.9p24-1.21.11.jar`。
+  - 测试：新增 `VaultEspLogicTest` 7 个用例（不祥/普通判定、只显示未开、半径过滤、距离排序+数量上限、
+    默认半径 500、时间片判定）。
 - **古城模块的依赖收尾路线**（目标「彻底零原生依赖」，全程自研：以 zychen027/AncientCityLootPredictor 的行为为规格，自己写成 Java）：
   - ✅ 6.7 已完成：**古城定位**改为纯 Java 自写（`utils/AncientCityLocatorLogic`），不再走 cubiomes 的 region 扫描；
     结构数据（58 个 NBT + 7 个 JSON）打进 mod 资源，由 `ancient/core/AncientResourceSource` 从 jar 内直读。

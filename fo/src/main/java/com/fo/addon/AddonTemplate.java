@@ -12,6 +12,7 @@ import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOEnchantedGoldCollector;
 import com.fo.addon.modules.FOKillAura;
+import com.fo.addon.modules.FOVaultEsp;
 import com.fo.addon.modules.StashMover;
 import com.fo.addon.utils.EnchantLevelMapSetting;
 import com.fo.addon.utils.FoSectionSetting;
@@ -153,6 +154,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new com.fo.addon.modules.FOMushroomFinder());
         Modules.get().add(new com.fo.addon.modules.FOThreeCNewbieCheck());
         Modules.get().add(new com.fo.addon.modules.FOEatLift());
+        Modules.get().add(new FOVaultEsp());
     }
 
     @Override
