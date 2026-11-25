@@ -27,6 +27,17 @@ class TakeoffClearanceLogicTest {
     }
 
     @Test
+    void tallClearanceNeedsSeventyTwo() {
+        boolean[] b = new boolean[72];
+        java.util.Arrays.fill(b, true);
+        assertTrue(TakeoffClearanceLogic.canTakeOffTall(b));
+        b[40] = false;
+        assertFalse(TakeoffClearanceLogic.canTakeOffTall(b));
+        assertFalse(TakeoffClearanceLogic.canTakeOffTall(new boolean[36]));
+        assertFalse(TakeoffClearanceLogic.canTakeOffTall(null));
+    }
+
+    @Test
     void wrongSizeIsNotClear() {
         assertFalse(TakeoffClearanceLogic.canTakeOff(new boolean[27]));
         assertFalse(TakeoffClearanceLogic.canTakeOff(new boolean[37]));

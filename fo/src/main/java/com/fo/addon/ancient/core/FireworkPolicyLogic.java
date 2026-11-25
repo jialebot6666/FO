@@ -11,6 +11,15 @@ public final class FireworkPolicyLogic {
     private FireworkPolicyLogic() {
     }
 
+    /**
+     * 巡航段专用：抬头爬升不再补烟花，只保「掉到硬下限以下」这一条兜底。
+     */
+    public static boolean shouldBoostHolding(double y, double floorY, double distToTarget, int cooldownTicks) {
+        if (cooldownTicks > 0) return false;
+        if (distToTarget <= 20.0) return false;
+        return y < floorY;
+    }
+
     public static boolean shouldBoost(boolean climbing, double y, double minY, double maxY,
                                       double distToTarget, double vy, int cooldownTicks) {
         if (cooldownTicks > 0) return false;

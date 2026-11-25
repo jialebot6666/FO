@@ -10,6 +10,15 @@ public final class TakeoffClearanceLogic {
     private TakeoffClearanceLogic() {
     }
 
+    /** 3×3×8 共 72 格：垂直上冲需要更高的净空。 */
+    public static boolean canTakeOffTall(boolean[] blocks) {
+        if (blocks == null || blocks.length != 72) return false;
+        for (boolean air : blocks) {
+            if (!air) return false;
+        }
+        return true;
+    }
+
     /** blocks 按「3×3×4」展平，true = 空气。 */
     public static boolean canTakeOff(boolean[] blocks) {
         if (blocks == null || blocks.length != 36) return false;

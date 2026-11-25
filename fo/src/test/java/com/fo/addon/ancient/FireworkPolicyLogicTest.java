@@ -35,6 +35,14 @@ class FireworkPolicyLogicTest {
     }
 
     @Test
+    void holdingModeOnlyBoostsBelowHardFloor() {
+        assertTrue(FireworkPolicyLogic.shouldBoostHolding(210, 215, 100, 0));
+        assertFalse(FireworkPolicyLogic.shouldBoostHolding(230, 215, 100, 0));
+        assertFalse(FireworkPolicyLogic.shouldBoostHolding(210, 215, 100, 10));
+        assertFalse(FireworkPolicyLogic.shouldBoostHolding(210, 215, 20, 0));
+    }
+
+    @Test
     void boostsWhenBelowMinimumEvenDiving() {
         assertTrue(FireworkPolicyLogic.shouldBoost(false, 220, 230, 300, 100, 0.5, 0));
     }
