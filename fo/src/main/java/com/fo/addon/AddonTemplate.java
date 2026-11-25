@@ -12,12 +12,15 @@ import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOEnchantedGoldCollector;
 import com.fo.addon.modules.FOKillAura;
+import com.fo.addon.modules.FOVaultEsp;
+import com.fo.addon.modules.FOVaultLoot;
 import com.fo.addon.modules.StashMover;
 import com.fo.addon.utils.EnchantLevelMapSetting;
 import com.fo.addon.utils.FoSectionSetting;
 import com.fo.addon.utils.StashStats;
 import com.fo.addon.utils.StashStatsSetting;
 import com.fo.addon.utils.StealStatsSetting;
+import com.fo.addon.utils.VaultOpenedSetting;
 import com.fo.addon.utils.StringMapSetting;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
@@ -88,6 +91,18 @@ public class AddonTemplate extends MeteorAddon {
             }
         });
 
+        // V6.9p25：不祥宝库 ESP 的「已打开记录」——显示条数 + 一键清理按钮。
+        //   记录文件是 <游戏目录>/fo/vault-opened.json，右键点过不祥宝库就记一笔。
+        SettingsWidgetFactory.registerCustomFactory(VaultOpenedSetting.class, theme -> (table, setting) -> {
+            VaultOpenedSetting s = (VaultOpenedSetting) setting;
+            WLabel label = table.add(theme.label(s.statusText())).expandCellX().widget();
+            WButton clear = table.add(theme.button("清理记录")).widget();
+            clear.action = () -> {
+                s.clearRecords();
+                label.set(s.statusText());
+            };
+        });
+
         // V6.7：珍珠点映射设置（miku 珍珠大管家同款表格：用户名 | 坐标 | 删除；底部 重置 | 加号）
         SettingsWidgetFactory.registerCustomFactory(StringMapSetting.class, theme -> (table, setting) ->
             StringMapSetting.fillTable(theme, table, (StringMapSetting) setting));
@@ -153,6 +168,8 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new com.fo.addon.modules.FOMushroomFinder());
         Modules.get().add(new com.fo.addon.modules.FOThreeCNewbieCheck());
         Modules.get().add(new com.fo.addon.modules.FOEatLift());
+        Modules.get().add(new FOVaultEsp());
+        Modules.get().add(new FOVaultLoot());
     }
 
     @Override
