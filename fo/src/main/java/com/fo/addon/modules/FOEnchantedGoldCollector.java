@@ -174,12 +174,11 @@ public class FOEnchantedGoldCollector extends Module {
     private final Setting<Boolean> autoSupplyBottlesSetting;
     private final Setting<Integer> minBottlesSetting;
     private final Setting<Integer> targetBottlesSetting;
+    private final Setting<Integer> minTotemsSetting;
     private final Setting<Integer> maxBottlesPerRepairSetting;
     private final Setting<Boolean> mainHandPickaxeSetting;
     private final Setting<Boolean> pauseWithoutBottlesSetting;
 
-    private final Setting<Integer> lowYSetting;
-    private final Setting<Boolean> disconnectOnEmergencySetting;
     private final Setting<Integer> stageTimeoutSetting;
     private final Setting<Boolean> returnWhenFullSetting;
 
@@ -288,6 +287,8 @@ public class FOEnchantedGoldCollector extends Module {
     private int fillStuckTicks;
     /** 补给时连续这么久没取到东西，就判定拿完了。 */
     private int supplyEmptyTicks;
+    /** 这次补给没拿到图腾（末影箱里可能没有），本轮不再因为图腾反复停靠。 */
+    private boolean totemSupplyUnavailable;
     private ItemStack stationOriginalOffhand = ItemStack.EMPTY;
 
     private WLabel statusStage;
@@ -563,6 +564,14 @@ public class FOEnchantedGoldCollector extends Module {
             .sliderMin(32).sliderMax(576)
             .build());
 
+        minTotemsSetting = sgRepair.add(new IntSetting.Builder()
+            .name("最低图腾数量")
+            .description("不死图腾少于这个数量就停靠补给；任何一次停靠补给都会顺带补到该数量")
+            .defaultValue(5)
+            .min(1).max(64)
+            .sliderMin(1).sliderMax(16)
+            .build());
+
         maxBottlesPerRepairSetting = sgRepair.add(new IntSetting.Builder()
             .name("每次修复最多瓶数")
             .description("一次停靠最多投多少瓶，防止异常消耗")
@@ -581,20 +590,6 @@ public class FOEnchantedGoldCollector extends Module {
             .name("无经验瓶时暂停")
             .description("关闭后允许不带病飞行；默认开启，宁停不摔")
             .defaultValue(true)
-            .build());
-
-        lowYSetting = sgSafety.add(new IntSetting.Builder()
-            .name("低Y紧急退出")
-            .description("低于此高度立即停机（默认 -58，防掉虚空）")
-            .defaultValue(-58)
-            .min(-64).max(64)
-            .sliderMin(-64).sliderMax(64)
-            .build());
-
-        disconnectOnEmergencySetting = sgSafety.add(new BoolSetting.Builder()
-            .name("自动断开连接")
-            .description("紧急停机时是否直接断开服务器")
-            .defaultValue(false)
             .build());
 
         stageTimeoutSetting = sgSafety.add(new IntSetting.Builder()
@@ -635,6 +630,7 @@ public class FOEnchantedGoldCollector extends Module {
         autoSearchRequested = false;
         searchWaitTicks = 0;
         rescanAttempts = 0;
+        totemSupplyUnavailable = false;
         needRepairAfterAscent = false;
         pauseAfterAscent = false;
         surfaceEvaluated = false;
@@ -739,12 +735,6 @@ public class FOEnchantedGoldCollector extends Module {
         if (state == State.IDLE || state == State.DONE || state == State.PAUSE) return;
         if (mc.world.getRegistryKey() != World.OVERWORLD) {
             pause("已离开主世界，附魔金采集停止");
-            return;
-        }
-
-        // 低 Y 硬底线：低于阈值立即停机，绝不继续往下
-        if (mc.player.getY() < lowYSetting.get()) {
-            emergencyStop("当前高度低于 " + lowYSetting.get() + "，紧急停机");
             return;
         }
 
@@ -1428,6 +1418,7 @@ public class FOEnchantedGoldCollector extends Module {
             boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
             boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
                 || countFireworks() < minFireworksSetting.get()
+                || (countTotems() < minTotemsSetting.get() && !totemSupplyUnavailable)
                 || !hasEnoughFood();
             if (pack || supply) {
                 stationNeedPack = pack;
@@ -1738,6 +1729,7 @@ public class FOEnchantedGoldCollector extends Module {
             needStop |= autoRepairSetting.get() && elytraNeedsRepair();
             needStop |= autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get();
             needStop |= countFireworks() < minFireworksSetting.get();
+            needStop |= countTotems() < minTotemsSetting.get() && !totemSupplyUnavailable;
             needStop |= !hasEnoughFood();
             if (needStop) {
                 landForStop = true;
@@ -1842,6 +1834,7 @@ public class FOEnchantedGoldCollector extends Module {
         boolean pack = autoPackSetting.get() && PackGateLogic.shouldPack(countApples(), packThreshold);
         boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
             || countFireworks() < minFireworksSetting.get()
+            || (countTotems() < minTotemsSetting.get() && !totemSupplyUnavailable)
             || !hasEnoughFood();
         boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
 
@@ -2493,12 +2486,14 @@ public class FOEnchantedGoldCollector extends Module {
         boolean needBottles = countBottles() < targetBottlesSetting.get();
         boolean needFireworks = countFireworks() < minFireworksSetting.get() * 2;
         boolean needFood = !hasEnoughFood();
+        boolean needTotems = countTotems() < minTotemsSetting.get();
         int target = -1;
         for (int i = 0; i < rows * 9; i++) {
             ItemStack stack = sh.getSlot(i).getStack();
             if (stack.isEmpty()) continue;
             boolean take = (needBottles && stack.getItem() == Items.EXPERIENCE_BOTTLE)
                 || (needFireworks && stack.getItem() == Items.FIREWORK_ROCKET)
+                || (needTotems && stack.getItem() == Items.TOTEM_OF_UNDYING)
                 || (isFood(stack) && !hasEnoughFood());
             if (take) {
                 target = i;
@@ -2515,7 +2510,7 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
         // 散放槽位没有需要的物资：尝试找一只装了经验瓶/烟花的补给潜影盒
-        int supplyBox = findSupplyShulker(sh, rows, needBottles, needFireworks, needFood);
+        int supplyBox = findSupplyShulker(sh, rows, needBottles, needFireworks, needFood, needTotems);
         if (supplyBox != -1) {
             mc.interactionManager.clickSlot(sh.syncId, supplyBox, 0, SlotActionType.QUICK_MOVE, mc.player);
             stationSupplyBoxPending = true;
@@ -2541,6 +2536,7 @@ public class FOEnchantedGoldCollector extends Module {
             if (st.getItem() == Items.EXPERIENCE_BOTTLE) continue;
             if (st.getItem() == Items.ENDER_CHEST) continue;
             if (st.getItem() == Items.ELYTRA) continue;
+            if (st.getItem() == Items.TOTEM_OF_UNDYING) continue;
             if (isPickaxe(st.getItem())) continue;
             if (isShulkerBox(st)) continue;
             if (isFood(st)) continue;
@@ -2555,11 +2551,13 @@ public class FOEnchantedGoldCollector extends Module {
         boolean needBottles = countBottles() < targetBottlesSetting.get();
         boolean needFireworks = countFireworks() < minFireworksSetting.get() * 2;
         boolean needFood = !hasEnoughFood();
+        boolean needTotems = countTotems() < minTotemsSetting.get();
         for (int i = 0; i < 27; i++) {
             ItemStack stack = sh.getSlot(i).getStack();
             if (stack.isEmpty()) continue;
             boolean take = (needBottles && stack.getItem() == Items.EXPERIENCE_BOTTLE)
                 || (needFireworks && stack.getItem() == Items.FIREWORK_ROCKET)
+                || (needTotems && stack.getItem() == Items.TOTEM_OF_UNDYING)
                 || (needFood && isFood(stack));
             if (!take) continue;
             mc.interactionManager.clickSlot(sh.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
@@ -2574,7 +2572,7 @@ public class FOEnchantedGoldCollector extends Module {
 
     /** 找一只含有当前缺口物资的潜影盒（只看物品，不打开）。 */
     private int findSupplyShulker(ScreenHandler sh, int rows, boolean needBottles,
-                                  boolean needFireworks, boolean needFood) {
+                                  boolean needFireworks, boolean needFood, boolean needTotems) {
         for (int i = 0; i < rows * 9; i++) {
             ItemStack stack = sh.getSlot(i).getStack();
             if (!isShulkerBox(stack)) continue;
@@ -2583,6 +2581,7 @@ public class FOEnchantedGoldCollector extends Module {
             for (ItemStack inside : c.streamNonEmpty().toList()) {
                 if (needBottles && inside.getItem() == Items.EXPERIENCE_BOTTLE) return i;
                 if (needFireworks && inside.getItem() == Items.FIREWORK_ROCKET) return i;
+                if (needTotems && inside.getItem() == Items.TOTEM_OF_UNDYING) return i;
                 if (needFood && isFood(inside)) return i;
             }
         }
@@ -2631,6 +2630,11 @@ public class FOEnchantedGoldCollector extends Module {
 
     private void stationFinish() {
         stationStep = StationStep.NONE;
+        if (stationNeedSupply && !totemSupplyUnavailable
+            && countTotems() < minTotemsSetting.get()) {
+            totemSupplyUnavailable = true;
+            warning("这次补给没拿到图腾（末影箱里可能没有），本轮不再因为图腾停靠；重新开关模块可以再试。");
+        }
         PathManagers.get().setAllowBreak(true);
         if (countFireworks() < 4) {
             pause("烟花不足 4 发，无法继续飞行");
@@ -2841,20 +2845,6 @@ public class FOEnchantedGoldCollector extends Module {
         }
         state = State.PAUSE;
         statusText = "暂停";
-    }
-
-    private void emergencyStop(String reason) {
-        commitLootProgress();
-        warning(reason);
-        releaseForward();
-        PathManagers.get().stop();
-        if (disconnectOnEmergencySetting.get() && mc.player != null && mc.player.networkHandler != null) {
-            mc.player.networkHandler.getConnection().disconnect(
-                net.minecraft.text.Text.literal("FO 附魔金采集: " + reason));
-        }
-        state = State.PAUSE;
-        statusText = "紧急停机";
-        if (isActive()) toggle();
     }
 
     /** 开箱中途暂停/关闭时，把已经取到手的苹果先记进总数，避免重新开箱后少算。 */
@@ -3181,6 +3171,15 @@ public class FOEnchantedGoldCollector extends Module {
 
     private int countFireworks() {
         return countItem(Items.FIREWORK_ROCKET);
+    }
+
+    private int countTotems() {
+        int n = 0;
+        for (int i = 0; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).getItem() == Items.TOTEM_OF_UNDYING) n++;
+        }
+        if (mc.player.getOffHandStack().getItem() == Items.TOTEM_OF_UNDYING) n++;
+        return n;
     }
 
     private boolean isFood(ItemStack stack) {
