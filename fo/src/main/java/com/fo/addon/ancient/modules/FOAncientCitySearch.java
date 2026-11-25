@@ -1231,6 +1231,16 @@ public class FOAncientCitySearch extends Module {
     // 不复制搜索逻辑、不在后台线程直接改 fo-ancient-chests.json。
 
     /** 搜索是否正在进行（附魔金采集用来等待自动搜索完成）。 */
+    /** 供采集模块读取「只挖肥箱」开关。 */
+    public boolean isOnlyFatChest() {
+        return onlyFatChestSetting.get();
+    }
+
+    /** 供采集模块读取肥箱阈值。 */
+    public int getFatChestThreshold() {
+        return fatChestThresholdSetting.get();
+    }
+
     public boolean isSearching() {
         return searching;
     }

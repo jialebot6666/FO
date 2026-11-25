@@ -199,6 +199,7 @@ public class FOEnchantedGoldCollector extends Module {
     private int repairCount;
     private boolean autoSearchRequested;
     private int searchWaitTicks;
+    private int rescanAttempts;
 
     private BlockPos shaftColumn;
     private BlockPos lastShaftColumn;
@@ -627,6 +628,7 @@ public class FOEnchantedGoldCollector extends Module {
         repairCount = 0;
         autoSearchRequested = false;
         searchWaitTicks = 0;
+        rescanAttempts = 0;
         needRepairAfterAscent = false;
         pauseAfterAscent = false;
         surfaceEvaluated = false;
@@ -915,8 +917,11 @@ public class FOEnchantedGoldCollector extends Module {
         if (currentCity == null) return false;
         String scope = scope();
         if (scope == null) return false;
+        boolean onlyFat = searchModule.isOnlyFatChest();
+        int fatThreshold = Math.max(1, searchModule.getFatChestThreshold());
         List<AncientChestStore.Mark> usable = EnchantedGoldCityLogic.filterTargets(currentCity.marks(), m ->
-            !searchModule.isChestOpened(m.x(), m.z())
+            (!onlyFat || m.goldCount() >= fatThreshold)
+                && !searchModule.isChestOpened(m.x(), m.z())
                 && !store.isChestBlacklisted(scope, m.x(), m.y(), m.z()));
         // 肥箱优先：已知附魔金个数多的先飞，数量未知的排最后；同档按距离
         usable.sort(Comparator
@@ -942,6 +947,18 @@ public class FOEnchantedGoldCollector extends Module {
         while (true) {
             cityIndex++;
             if (cityIndex >= cities.size()) {
+                if (rescanAttempts < 3 && linkSearchSetting.get() && autoSearchSetting.get()) {
+                    rescanAttempts++;
+                    autoSearchRequested = false;
+                    searchWaitTicks = 0;
+                    cities = List.of();
+                    currentCity = null;
+                    info("首批城市跑完，重读标记重新聚类（第 " + rescanAttempts + "/3 次）。");
+                    state = State.SELECT_CITY;
+                    stateTicks = 0;
+                    statusText = "重新搜城";
+                    return;
+                }
                 info("所有城市都处理完了，任务结束。");
                 state = State.DONE;
                 statusText = "完成";
@@ -3067,8 +3084,8 @@ public class FOEnchantedGoldCollector extends Module {
     private BlockPos findSafeLandingSpot() {
         BlockPos center = mc.player.getBlockPos();
         List<BlockPos> spots = new ArrayList<>();
-        for (int dx = -16; dx <= 16; dx += 2) {
-            for (int dz = -16; dz <= 16; dz += 2) {
+        for (int dx = -64; dx <= 64; dx += 4) {
+            for (int dz = -64; dz <= 64; dz += 4) {
                 int x = center.getX() + dx;
                 int z = center.getZ() + dz;
                 if (!isChunkLoaded(x, z)) continue;
