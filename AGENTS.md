@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.9p25`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p25-1.21.11.jar`
+- 当前版本：`mod-version = 6.9p30`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p30-1.21.11.jar`
   （测试版在正式版号后加 `pN`，如 `6.7p37`，产物名 `FO-6.7p37-1.21.11.jar`；详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
@@ -19,6 +19,14 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   10. FO 附魔金采集（`modules/FOEnchantedGoldCollector`，6.9p23 新增：联动古城搜索，p40 飞行 + 竖井/通道 + 只取附魔金 + 满 64 存盒 + 经验瓶修复）
   11. FO 不祥宝库 ESP（`modules/FOVaultEsp`，6.9p24 新增 / 6.9p25 增强：客户端 ESP，只高亮不祥宝库——同一个 `minecraft:vault` 的 `ominous=true`，普通宝库不显示；半径默认 500 格；标记方式默认**追踪线**（可切光柱）；右键记录已开宝库到 `fo/vault-opened.json`，设置页可一键清理）
   12. FO 不祥宝库战利品定位（`modules/FOVaultLoot`，6.9p25 新增：按种子预测「全服第几次开」会出附魔金苹果/沉重核心；开箱后用弹出物品反推当前序号；内置 SeedMapper 同源 cubiomes loot 引擎 `vaulttool.exe`，仅 Windows）
+  13. FO 地狱飞行（`modules/FOHellFlight`，6.9p30：附件 XP 模式、Baritone ElytraProcess 寻路、可调补给与经验瓶修复）
+- ✅ 6.9p30 已完成：**新增「FO 地狱飞行」XP 模式**。
+  - **基准**：以用户附件 jar 字节码为准，直接调用 Baritone `IElytraProcess.pathTo/isActive/resetState/repackChunks`；删除自写导航和无尽鞘翅。
+  - **补给**：烟花默认 23 组、经验瓶 3 组、食物 1 组、图腾 2 个，全部可调；低耐久着陆并用经验瓶修复后继续飞行。
+  - **修复**：开始飞行关闭彗星界面；移除额外维度限制；末影箱点击支撑方块顶面，恢复 3/5 tick 等待并检查 `ActionResult`；盔甲检查默认关闭。
+  - **状态机**：`准备→补给→起飞→飞行→寻找着陆点→着陆→完成/下一段补给`，另有 `修复鞘翅` 状态；失败、取消、断线统一清理。
+  - **前端**：模块、设置、枚举、状态面板和聊天提示全中文；烟花速度阈值默认 **1.5**。
+  - **验证**：合并远端最新附魔金改动后全仓 **76 套件 592 测试全绿**（0 failures / 0 errors）；实机飞行与服务器兼容性仍需用户验证。
 - ✅ 6.9p25 已完成：**不祥宝库 ESP 的「已打开记录」+ 追踪线**（用户口径：方块状态分不出开过的 → 改成右键记录；
   记录落本地 FO 文件夹；设置页加清理按钮；标记默认追踪线，光柱/追踪线可切换）。
   - **已打开记录**：监听 Meteor 的 `InteractBlockEvent`，右键点到 **不祥宝库方块**（`Blocks.VAULT` + `OMINOUS=true`）
