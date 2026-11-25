@@ -29,17 +29,18 @@ public class VaultEspLogicTest {
 
     @Test
     void onlyUnopenedSwitch() {
-        assertTrue(VaultEspLogic.shouldHighlight(true, true));
-        assertFalse(VaultEspLogic.shouldHighlight(false, true), "只显示未开时，已开过的要藏起来");
-        assertTrue(VaultEspLogic.shouldHighlight(false, false), "关掉开关后已开过的也要画");
-        assertTrue(VaultEspLogic.shouldHighlight(true, false));
+        // 参数：opened（是否已开过）, onlyUnopened（只显示未开开关）
+        assertTrue(VaultEspLogic.shouldHighlight(false, true), "未开过且开关打开 → 画");
+        assertFalse(VaultEspLogic.shouldHighlight(true, true), "只显示未开时，已开过的要藏起来");
+        assertTrue(VaultEspLogic.shouldHighlight(true, false), "关掉开关后已开过的也要画");
+        assertTrue(VaultEspLogic.shouldHighlight(false, false));
     }
 
     @Test
     void nearestFiltersByRadius() {
         List<VaultEspLogic.Hit> hits = List.of(
-            new VaultEspLogic.Hit(0, 64, 10, true),
-            new VaultEspLogic.Hit(0, 64, 600, true) // 半径 500 之外
+            new VaultEspLogic.Hit(0, 64, 10),
+            new VaultEspLogic.Hit(0, 64, 600) // 半径 500 之外
         );
         List<VaultEspLogic.Hit> near = VaultEspLogic.nearest(hits, 0, 64, 0, 500, 32);
         assertEquals(1, near.size());
@@ -49,9 +50,9 @@ public class VaultEspLogicTest {
     @Test
     void nearestSortsByDistanceAndLimits() {
         List<VaultEspLogic.Hit> hits = List.of(
-            new VaultEspLogic.Hit(30, 64, 0, true),
-            new VaultEspLogic.Hit(0, 64, 5, true),
-            new VaultEspLogic.Hit(0, 64, 2, true)
+            new VaultEspLogic.Hit(30, 64, 0),
+            new VaultEspLogic.Hit(0, 64, 5),
+            new VaultEspLogic.Hit(0, 64, 2)
         );
         List<VaultEspLogic.Hit> near = VaultEspLogic.nearest(hits, 0, 64, 0, 500, 2);
         assertEquals(2, near.size());
@@ -63,9 +64,9 @@ public class VaultEspLogicTest {
     void nearestHandlesEmptyAndBadLimit() {
         assertTrue(VaultEspLogic.nearest(List.of(), 0, 64, 0, 500, 32).isEmpty());
         assertTrue(VaultEspLogic.nearest(
-            List.of(new VaultEspLogic.Hit(0, 64, 1, true)), 0, 64, 0, 500, 0).isEmpty());
+            List.of(new VaultEspLogic.Hit(0, 64, 1)), 0, 64, 0, 500, 0).isEmpty());
         assertTrue(VaultEspLogic.nearest(
-            List.of(new VaultEspLogic.Hit(0, 64, 1, true)), 0, 64, 0, 0, 32).isEmpty());
+            List.of(new VaultEspLogic.Hit(0, 64, 1)), 0, 64, 0, 0, 32).isEmpty());
     }
 
     @Test

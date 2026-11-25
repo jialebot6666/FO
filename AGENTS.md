@@ -4,7 +4,7 @@
 
 FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.21.11，模块统一带 `FO ` 前缀、全汉化）。
 - 代码根：`fo/`（包 `com.fo.addon`）；`ref-src/` 是本机外部参考源码目录，被 `.gitignore` 排除、不入库
-- 当前版本：`mod-version = 6.9p24`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p24-1.21.11.jar`
+- 当前版本：`mod-version = 6.9p25`（**测试版**，见 `fo/gradle/libs.versions.toml`），产物名 = `FO-6.9p25-1.21.11.jar`
   （测试版在正式版号后加 `pN`，如 `6.7p37`，产物名 `FO-6.7p37-1.21.11.jar`；详见「命名规范」）
 - 现有模块（全部注册在 `AddonTemplate.onInitialize()`，统一放进 `Category("FO")`，按注册顺序）：
   1. FO 鞘翅采集（`modules/ElytraCollector`）
@@ -17,7 +17,60 @@ FO — Minecraft **Meteor Client (Fabric) 生存辅助全自动插件**（MC 1.2
   8. FO 古城战利品搜索（`ancient/modules/FOAncientCitySearch`，6.3 新增：附魔金苹果/迅捷潜行3 搜索 + Xaero 路径点，半自动）
   9. FO 自动搬运（`modules/StashMover`，6.7 新增：珍珠超穿自动搬运，三种模式——搬运端（双号）/拉珍珠端（双号）/三号模式）
   10. FO 附魔金采集（`modules/FOEnchantedGoldCollector`，6.9p23 新增：联动古城搜索，p40 飞行 + 竖井/通道 + 只取附魔金 + 满 64 存盒 + 经验瓶修复）
-  11. FO 不祥宝库 ESP（`modules/FOVaultEsp`，6.9p24 新增：客户端 ESP，只高亮不祥宝库——同一个 `minecraft:vault` 的 `ominous=true`，普通宝库不显示；半径默认 500 格 + 光柱 + 只显示未开）
+  11. FO 不祥宝库 ESP（`modules/FOVaultEsp`，6.9p24 新增 / 6.9p25 增强：客户端 ESP，只高亮不祥宝库——同一个 `minecraft:vault` 的 `ominous=true`，普通宝库不显示；半径默认 500 格；标记方式默认**追踪线**（可切光柱）；右键记录已开宝库到 `fo/vault-opened.json`，设置页可一键清理）
+  12. FO 不祥宝库战利品定位（`modules/FOVaultLoot`，6.9p25 新增：按种子预测「全服第几次开」会出附魔金苹果/沉重核心；开箱后用弹出物品反推当前序号；内置 SeedMapper 同源 cubiomes loot 引擎 `vaulttool.exe`，仅 Windows）
+- ✅ 6.9p25 已完成：**不祥宝库 ESP 的「已打开记录」+ 追踪线**（用户口径：方块状态分不出开过的 → 改成右键记录；
+  记录落本地 FO 文件夹；设置页加清理按钮；标记默认追踪线，光柱/追踪线可切换）。
+  - **已打开记录**：监听 Meteor 的 `InteractBlockEvent`，右键点到 **不祥宝库方块**（`Blocks.VAULT` + `OMINOUS=true`）
+    就记一笔（不论服务端是否真的开成功——用户口径是"右键过"）。存储 `<游戏目录>/fo/vault-opened.json`
+    （FO 自己的文件夹，和 `fo/threec-cache.json` 同目录），**按「服务器地址+维度」分作用域**
+    （单人记「单人」），换服/换维度不串记录。纯逻辑 `utils/VaultOpenedStore`（可单测）：
+    `mark` 只记一次、`isOpened`、`count/totalCount`、`clearScope/clearAll`、JSON 往返、坏文件当空记录。
+  - **「打开过」判定**：右键记录命中 **或** 方块状态已不是 `inactive` 都算已开（有的服务端开完不重发方块状态，
+    所以不能只信方块状态）。「只显示未开」= 已开的直接不画；关掉后用「已开颜色」灰色显示。
+  - **设置页清理按钮**：新增展示型设置 `utils/VaultOpenedSetting`（仿 `StealStatsSetting`：不承载配置、
+    save/load 全空），`AddonTemplate` 里注册 `SettingsWidgetFactory` 画成「已记录 N 个（当前服务器+维度 M 个）」
+    + 「清理记录」按钮；按钮清空**全部作用域**并立即落盘，聊天栏报移除条数。
+  - **标记方式**：新增 `utils/VaultMarkerMode` 枚举（`TRACER=追踪线` 默认 / `BEAM=光柱` / `BOTH=两者都`，`toString()` 中文，
+    照 `GameVersionOption` 的做法）。追踪线 = **屏幕中心（`RenderUtils.center`）→ 宝库方块中心**（与 Meteor Tracers 的 Lines 同一套画法，用户口径「之前那个」）；`BOTH` 模式同时画光柱与追踪线；
+    光柱沿用原来的地表细柱逻辑（含地表 Y 缓存）。
+  - **战利品预测的真相（更正 2026-11-25）**：宝库表 `reward_ominous` 带 `random_sequence`，
+    战利品其实**可以按种子预测**：序列种子 = `RandomSeed.createUnmixedXoroshiroSeed(worldSeed)`
+    `split(createXoroshiroSeed("minecraft:chests/trial_chambers/reward_ominous"))` 再 `mix()`（Xoroshiro128++）；
+    该序列是**服务器级持久状态、每开一个不祥宝库推进一次**，所以「全服第几次开」决定掉落。
+    SeedMapper 的 `/sm:vault detect` 就是用弹出物品逐 offset 反推「全服第 N 次」并给出 32 位随机状态；
+    `/sm:vault predict state <hex>` 从状态往后预测（参照 `xpple/SeedMapper` 的 `VaultCommand` 与
+    `xpple/cubiomes` 的 loot 库）。⚠️ 早前"战利品由 ServerWorld.getRandom() 随机、不能预测"的结论**作废**。
+  - **战利品相关功能已从 ESP 撤出（6.9p25 清理）**：ESP 只负责高亮/追踪线/光柱/已打开记录；
+    「第 N 次开」「下几个提示」「预览物品提示」等临时功能全部删除，战利品定位将做成**独立模块**
+    （种子 → 全服序号级的附魔金苹果/沉重核心定位，默认种子 -7346913998703726680）。
+  - **战利品定位引擎落地（6.9p25，本轮）**：用 SeedMapper 同源的 `xpple/cubiomes` loot 库（C）在 MSVC 下编译成
+    `vaulttool.exe`（`pred` 预测 / `detect` 用弹出物品反推序号，输出 MATCH n + 32 位随机状态），
+    打包进资源 `/fo/vault/vaulttool.exe`，模块首次使用时释放到 `<游戏目录>/fo/tools/` 再调用（仅 Windows）。
+    ⚠️ 该 C 库自动生成的战利品表有两个坑（已在本机源码里修掉，**换库/升级时要重新修**）：
+    ① `subtable_pool_offset[N] = offset[N-1] + count[N]`（生成器写错索引，应加 `count[N-1]`）；
+    ② `merge_loot_pools` 不更新 `pool_count`，所以子表池只能靠 offset 按需生成，父表循环仍只走自己的池。
+    实际验证：修好后 200 次开箱里 unique 池出现率 73.5%（理论 75%），附魔金苹果/沉重核心都能正常预测；
+    引擎 10000 次开箱约 38ms。我们 1.21.11 jar 里的 4 张宝库表与 cubiomes 的 1.21.1 版逐字节一致（空白除外），所以引擎对 1.21.11 有效。
+  - **新模块「FO 不祥宝库战利品定位」**（`modules/FOVaultLoot` + `utils/VaultLootLogic` + `utils/VaultLootTarget` + `vault/VaultLootTool`）：
+    设置 = 种子（默认 -7346913998703726680）/ 起始序号 / 最大尝试次数（默认 10000）/ 预判数量（1~20，默认 5）/ 目标物品（附魔金苹果/沉重核心/两者都）/ 自动检测 + 检测半径。
+    开模块即后台预测并聊天栏列出接下来 N 个「会出目标物品」的次序号与「还差几次」；
+    右键不祥宝库后收集 2 秒内附近弹出的物品实体，调用 detect 反推「全服第几次开」，成功则更新起始序号并继续预测。
+    纯逻辑 `VaultLootLogic`（occurrences/firstN/formatOccurrence/spec）有 5 个单测；全仓 **529 测试全绿**。
+  - **2026-11-25 崩潰報告處理**：用戶發來的 `错误报告-2026-11-25_20.24.29.zip` 裡**沒有 crash-report.txt**，
+    只有 `hs_err_pid27900.log`：JVM 級 `EXCEPTION_ACCESS_VIOLATION` 發生在 **G1 Conc#0** 線程的 `jvm.dll` 裡（GC 併發階段），
+    不是 mod 拋出的 Java 異常。時間線：20:24:21 記錄第 13 個寶庫 → 20:24:23 本模塊 10 萬次 detect 失敗 → 20:24:29 JVM 崩。
+    - 我們的模塊日誌全是正常聊天輸出；但為排除「堆壓力誘發 JVM/GC bug」的可能，把**唯一的大分配路徑**改掉了：
+      舊的 `predict` 會在 Java 側把 10 萬次開箱的掉落全解析成對象（幾十萬個）→ 現在改成引擎內 `search` 模式
+      （掃描/過濾都在 `vaulttool.exe` 裡，Java 只解析最多 20 行）；引擎進程另加 120 秒超時。
+      `VaultLootTool.predict` 已刪除，新增 `VaultLootTool.search` + `VaultLootLogic.Hit/occurrencesFromHits`。
+    - 若同樣 hs_err 再現（G1/jvm.dll），優先懷疑其它原生 mod（evernight / JsMacros / Baritone / Xaero / Iris）或 JVM 21.0.7 本身。
+  - **檢測失敗的根因修復（同輪）**：舊版把「右鍵那一刻附近**已經存在**的掉落物」也收集進檢測清單（別的寶庫掉的、玩家丟的），
+    必然匹配不上。現在右鍵時先記錄基線實體 ID，只收**之後新出現**的；觀察窗口 40→60 tick、默認半徑 6→8 格。
+  - 模块构造描述同步更新；`VaultEspLogic.shouldHighlight(opened, onlyUnopened)` 语义改为「opened」，
+    `VaultEspLogicTest` 相应调整；新增 `VaultOpenedStoreTest` 7 个用例（只记一次/作用域隔离/清指定/清全部/
+    JSON 往返/坏 JSON/负坐标）。
+
 - 6.9p23 附魔金采集的边界：独立黑名单 `fo-enchanted-gold-auto.json`；只读古城搜索标记、不复制搜索逻辑；竖井每格查下/四邻/前瞻流体；升井用垫脚方块回填竖井，取完箱必须先回竖井底再升井，绝不能在地底切飞行。
 
 - ✅ 6.9p24 已完成：**新增「FO 不祥宝库 ESP」**（用户口径：只 ESP 不祥宝库、不要普通宝库、服务器环境）。

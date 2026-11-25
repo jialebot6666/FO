@@ -36,11 +36,11 @@ public final class VaultEspLogic {
     /**
      * 「只显示未开」开关下，这个宝库该不该画。
      *
-     * @param unopened     该宝库是否还没被打开过（vault_state=inactive）
+     * @param opened       该宝库是否已经打开过（右键记录过，或 vault_state 已不是 inactive）
      * @param onlyUnopened 开关是否打开
      */
-    public static boolean shouldHighlight(boolean unopened, boolean onlyUnopened) {
-        return !onlyUnopened || unopened;
+    public static boolean shouldHighlight(boolean opened, boolean onlyUnopened) {
+        return !onlyUnopened || !opened;
     }
 
     /** 两个方块坐标的三维平方距离。 */
@@ -94,6 +94,6 @@ public final class VaultEspLogic {
     }
 
     /** 一个不祥宝库命中点。 */
-    public record Hit(int x, int y, int z, boolean unopened) {
+    public record Hit(int x, int y, int z) {
     }
 }

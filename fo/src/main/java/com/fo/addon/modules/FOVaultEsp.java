@@ -2,6 +2,10 @@ package com.fo.addon.modules;
 
 import com.fo.addon.AddonTemplate;
 import com.fo.addon.utils.VaultEspLogic;
+import com.fo.addon.utils.VaultMarkerMode;
+import com.fo.addon.utils.VaultOpenedSetting;
+import com.fo.addon.utils.VaultOpenedStore;
+import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -13,12 +17,14 @@ import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.VaultBlock;
 import net.minecraft.block.enums.VaultState;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
@@ -42,6 +48,14 @@ import java.util.Set;
  * {@code vault_state=inactive} 表示还没被打开过。属性随区块数据下发，
  * 客户端不需要任何额外网络包，纯本地渲染，服务器无感。
  *
+ * <p><b>V6.9p25「已打开记录」</b>：有的服务端开完宝库不重发方块状态，光看 {@code vault_state}
+ * 分不出「新宝库」还是「开过的」。现在只要**右键点到不祥宝库**就记一条到
+ * {@code <游戏目录>/fo/vault-opened.json}（按服务器+维度分作用域），之后这个宝库按「已开」处理；
+ * 设置页「已打开记录」里有条数显示和「清理记录」按钮。
+ *
+ * <p><b>V6.9p25「标记方式」</b>：默认从眼睛画**追踪线**连到宝库；可切换成原来的**光柱**
+ * （从宝库顶画到地表）。
+ *
  * <p>扫描策略：只扫已加载区块，先用 section 的调色板（{@code hasAny}）廉价筛出
  * 含宝库方块的 section，命中才逐格精确判定；跨 tick 分摊耗时并限时约 2ms，
  * 扫完一整遍后按「重扫间隔」再扫下一遍。
@@ -49,6 +63,7 @@ import java.util.Set;
 public class FOVaultEsp extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRender = settings.createGroup("渲染");
+    private final SettingGroup sgOpened = settings.createGroup("已打开记录");
 
     private final Setting<Integer> scanRadius = sgGeneral.add(new IntSetting.Builder()
         .name("扫描半径")
@@ -70,7 +85,7 @@ public class FOVaultEsp extends Module {
 
     private final Setting<Boolean> onlyUnopened = sgGeneral.add(new BoolSetting.Builder()
         .name("只显示未开")
-        .description("只高亮还没被打开过的宝库（vault_state=inactive）。关掉后已开过的也会画，用「已开颜色」区分。")
+        .description("只显示还没打开过的宝库。「打开过」= 右键记录过，或方块状态已经是已开。")
         .defaultValue(true)
         .build());
 
@@ -90,13 +105,13 @@ public class FOVaultEsp extends Module {
 
     private final Setting<SettingColor> unopenedColor = sgRender.add(new ColorSetting.Builder()
         .name("未开颜色")
-        .description("还没被打开过的不祥宝库颜色。")
+        .description("还没打开过的不祥宝库颜色。")
         .defaultValue(new SettingColor(255, 200, 40, 220))
         .build());
 
     private final Setting<SettingColor> openedColor = sgRender.add(new ColorSetting.Builder()
         .name("已开颜色")
-        .description("已打开过的不祥宝库颜色（仅「只显示未开」关掉时可见）。")
+        .description("已打开过的不祥宝库颜色（关掉「只显示未开」时可见）。")
         .defaultValue(new SettingColor(160, 160, 160, 180))
         .build());
 
@@ -106,10 +121,18 @@ public class FOVaultEsp extends Module {
         .defaultValue(ShapeMode.Both)
         .build());
 
-    private final Setting<Boolean> showBeam = sgRender.add(new BoolSetting.Builder()
-        .name("光柱")
-        .description("从宝库顶画一根到地表的细柱，方便远距离/高空定位。")
-        .defaultValue(true)
+    private final Setting<VaultMarkerMode> markerMode = sgRender.add(new EnumSetting.Builder<VaultMarkerMode>()
+        .name("标记方式")
+        .description("追踪线：屏幕中心画一条线连到宝库（默认）；光柱：从宝库顶画到地表；两者都：两根都画。")
+        .defaultValue(VaultMarkerMode.TRACER)
+        .build());
+
+    /** 已打开记录展示 + 清理按钮（设置页里显示条数）。 */
+    private final VaultOpenedSetting openedRecords = sgOpened.add(new VaultOpenedSetting.Builder()
+        .name("打开记录")
+        .description("右键点过的不祥宝库会记录到 fo/vault-opened.json；这里显示条数，可以一键清理。")
+        .statusText(this::openedStatusText)
+        .clearAction(this::clearOpenedRecords)
         .build());
 
     /** 当前这一遍扫描已确认的宝库（key = BlockPos.asLong）。 */
@@ -119,6 +142,9 @@ public class FOVaultEsp extends Module {
     /** 地表 Y 缓存（画光柱用），key = x/z 打包。 */
     private final Map<Long, Integer> surfaceCache = new HashMap<>();
 
+    /** 已打开记录（本地 fo/vault-opened.json）。 */
+    private VaultOpenedStore openedStore = new VaultOpenedStore();
+
     private final List<long[]> pendingChunks = new ArrayList<>();
     private int pendingCursor;
     private long nextPassAtMs;
@@ -127,7 +153,7 @@ public class FOVaultEsp extends Module {
 
     public FOVaultEsp() {
         super(AddonTemplate.CATEGORY, "FO 不祥宝库 ESP",
-            "只在服务端下发的方块里高亮不祥宝库（普通宝库不显示）；不发包，服务器无感。");
+            "只在服务端下发的方块里高亮不祥宝库（普通宝库不显示）；右键记录已开的宝库；不发包，服务器无感。");
     }
 
     @Override
@@ -135,11 +161,13 @@ public class FOVaultEsp extends Module {
         clearAll();
         nextPassAtMs = 0;
         lastDimension = null;
+        openedStore = VaultOpenedStore.load();
     }
 
     @Override
     public void onDeactivate() {
         clearAll();
+        openedStore.saveIfDirty();
     }
 
     private void clearAll() {
@@ -151,9 +179,67 @@ public class FOVaultEsp extends Module {
         surfaceWorld = null;
     }
 
+    // ==================== 当前作用域 / 已打开记录 ====================
+
+    /** 当前作用域：服务器地址（单人则「单人」）+ 维度，不同服务器/维度的记录不串。 */
+    private String currentScope() {
+        if (mc.world == null) return null;
+        String server = mc.getCurrentServerEntry() != null
+            ? mc.getCurrentServerEntry().address : "单人";
+        return server + "|" + mc.world.getRegistryKey().getValue();
+    }
+
+    /** 设置页「打开记录」要显示的一行字。 */
+    private String openedStatusText() {
+        VaultOpenedStore store = openedStore;
+        if (store == null) return "已记录 0 个已打开的不祥宝库";
+        String scope = currentScope();
+        int inScope = scope == null ? 0 : store.count(scope);
+        return "已记录 " + store.totalCount() + " 个已打开的不祥宝库（当前服务器+维度 " + inScope + " 个）";
+    }
+
+    /** 设置页「清理记录」按钮：清空全部作用域的记录。 */
+    private void clearOpenedRecords() {
+        if (openedStore == null) openedStore = new VaultOpenedStore();
+        int removed = openedStore.totalCount();
+        openedStore.clearAll();
+        openedStore.saveIfDirty();
+        info("已清理打开记录：移除 %d 条（fo/vault-opened.json）", removed);
+    }
+
+    /** 右键点到不祥宝库就记一笔（不管服务端有没有真的开成功，用户口径就是"右键过"）。 */
+    @EventHandler
+    private void onInteractBlock(InteractBlockEvent event) {
+        if (mc.world == null || mc.player == null) return;
+        BlockHitResult result = event.result;
+        if (result == null) return;
+        BlockPos pos = result.getBlockPos();
+        if (!isOminous(mc.world.getBlockState(pos))) return;
+
+        String scope = currentScope();
+        if (scope == null) return;
+        if (openedStore == null) openedStore = VaultOpenedStore.load();
+        if (!openedStore.mark(scope, pos.getX(), pos.getY(), pos.getZ())) return;
+
+        openedStore.saveIfDirty();
+        info("已记录打开的不祥宝库：%d, %d, %d（当前服务器+维度已记录 %d 个）",
+            pos.getX(), pos.getY(), pos.getZ(), openedStore.count(scope));
+    }
+
+    private boolean isOpened(BlockPos pos, BlockState state) {
+        if (state.get(VaultBlock.VAULT_STATE) != VaultState.INACTIVE) return true;
+        String scope = currentScope();
+        return scope != null && openedStore != null
+            && openedStore.isOpened(scope, pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    // ==================== 扫描 ====================
+
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
+
+        openedStore.saveIfDirty();
 
         Object dimension = mc.world.getRegistryKey();
         if (!Objects.equals(dimension, lastDimension)) {
@@ -256,18 +342,17 @@ public class FOVaultEsp extends Module {
                             continue;
                         }
                         if (!isOminous(worldState)) continue;
-                        record(pos, worldState);
+                        record(pos);
                     }
                 }
             }
         }
     }
 
-    private void record(BlockPos pos, BlockState state) {
+    private void record(BlockPos pos) {
         long key = pos.asLong();
-        boolean unopened = state.get(VaultBlock.VAULT_STATE) == VaultState.INACTIVE;
         boolean isNew = !hits.containsKey(key);
-        hits.put(key, new VaultEspLogic.Hit(pos.getX(), pos.getY(), pos.getZ(), unopened));
+        hits.put(key, new VaultEspLogic.Hit(pos.getX(), pos.getY(), pos.getZ()));
         seenInPass.add(key);
 
         if (isNew && notifyNew.get()) {
@@ -278,6 +363,8 @@ public class FOVaultEsp extends Module {
         }
     }
 
+    // ==================== 渲染 ====================
+
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null || mc.player == null || hits.isEmpty()) return;
@@ -285,21 +372,30 @@ public class FOVaultEsp extends Module {
         Vec3d eye = mc.player.getEyePos();
         List<VaultEspLogic.Hit> visible = VaultEspLogic.nearest(
             new ArrayList<>(hits.values()), eye.x, eye.y, eye.z, scanRadius.get(), maxRender.get());
+        VaultMarkerMode mode = markerMode.get();
+        boolean drawBeam = mode == VaultMarkerMode.BEAM || mode == VaultMarkerMode.BOTH;
+        boolean drawTracer = mode == VaultMarkerMode.TRACER || mode == VaultMarkerMode.BOTH;
 
         for (VaultEspLogic.Hit hit : visible) {
             BlockPos pos = new BlockPos(hit.x(), hit.y(), hit.z());
             BlockState state = mc.world.getBlockState(pos);
             if (!isOminous(state)) continue;
 
-            boolean unopened = state.get(VaultBlock.VAULT_STATE) == VaultState.INACTIVE;
-            if (!VaultEspLogic.shouldHighlight(unopened, onlyUnopened.get())) continue;
+            boolean opened = isOpened(pos, state);
+            if (!VaultEspLogic.shouldHighlight(opened, onlyUnopened.get())) continue;
 
-            SettingColor color = unopened ? unopenedColor.get() : openedColor.get();
+            SettingColor color = opened ? openedColor.get() : unopenedColor.get();
             event.renderer.box(pos, color, color, shapeMode.get(), 0);
-            if (showBeam.get()) {
-                drawBeam(event, hit, color);
-            }
+            if (drawBeam) drawBeam(event, hit, color);
+            if (drawTracer) drawTracer(event, hit, color);
         }
+    }
+
+    /** 追踪线：屏幕中心（RenderUtils.center）→ 宝库方块中心，与 Meteor Tracers 的 Lines 同一套画法。 */
+    private void drawTracer(Render3DEvent event, VaultEspLogic.Hit hit, SettingColor color) {
+        Vec3d origin = RenderUtils.center != null ? RenderUtils.center : mc.player.getEyePos();
+        event.renderer.line(origin.x, origin.y, origin.z,
+            hit.x() + 0.5, hit.y() + 0.5, hit.z() + 0.5, color);
     }
 
     /** 从宝库顶画一根细柱到地表（与古城高亮同一套穿墙渲染管线）。 */
