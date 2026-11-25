@@ -1,0 +1,16 @@
+FO vault loot prediction engine - version pinning
+=====================================================
+
+Package               : FO-vault-loot-engine-06393cf
+Engine                : vaulttool.exe (Windows x64, MSVC /O2, C11)
+Reference exe SHA-256 : 4b96414e647334d0c0a351b9e5177745ec88978814947cc9d3424f9770f7df64
+Source (cubiomes)     : xpple/cubiomes commit 06393cf40f0d4aa30a6db28302ab053037ca785b (2026-11-24)
+                        https://github.com/xpple/cubiomes
+Upstream zip SHA-256  : 036abe861617be2285d82c7299c4447c9752115c5a2eb1663832694b33baf37d
+                        (upstream/cubiomes-master-06393cf40f0d.zip)
+Minecraft target      : 1.21.11 trial-chamber vault tables (reward / reward_ominous + rare/common/unique)
+                        NOTE: cubiomes ships these as *_1_21_1; byte-identical to 1.21.11 jar tables
+                        (verified modulo whitespace), which is why 1_21_1 is used.
+Reference impl        : xpple/SeedMapper commit a6918e91c1759169d3ec143eb136281c39e64541 (2026-11-22)
+                        (VaultCommand + ClientPacketListenerMixin; MIT)
+Toolchain used        : MSVC 19.x (Visual Studio Build Tools, Windows), cl /O2 /std:c11

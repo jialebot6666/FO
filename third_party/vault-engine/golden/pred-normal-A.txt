@@ -1,0 +1,10 @@
+OFFSET 1 ITEMS 4 minecraft:diamond_chestplate:1;minecraft:tipped_arrow:3;minecraft:arrow:8;minecraft:music_disc_precipice:1
+OFFSET 2 ITEMS 3 minecraft:iron_axe:1;minecraft:emerald:2;minecraft:guster_banner_pattern:1
+OFFSET 3 ITEMS 3 minecraft:tipped_arrow:8;minecraft:emerald:2;minecraft:emerald:4
+OFFSET 4 ITEMS 4 minecraft:diamond:1;minecraft:wind_charge:1;minecraft:emerald:4;minecraft:iron_ingot:4
+OFFSET 5 ITEMS 3 minecraft:bow:1;minecraft:arrow:4;minecraft:arrow:6
+OFFSET 6 ITEMS 4 minecraft:ominous_bottle:1;minecraft:arrow:8;minecraft:arrow:6;minecraft:arrow:3
+OFFSET 7 ITEMS 5 minecraft:iron_ingot:3;minecraft:arrow:7;minecraft:honey_bottle:1;minecraft:wind_charge:10;minecraft:guster_banner_pattern:1
+OFFSET 8 ITEMS 5 minecraft:shield:1;minecraft:emerald:2;minecraft:tipped_arrow:8;minecraft:wind_charge:2;minecraft:music_disc_precipice:1
+OFFSET 9 ITEMS 2 minecraft:golden_carrot:1;minecraft:wind_charge:1
+OFFSET 10 ITEMS 3 minecraft:iron_chestplate:1;minecraft:arrow:2;minecraft:trident:1

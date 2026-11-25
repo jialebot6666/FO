@@ -1,0 +1,10 @@
+OFFSET 1 ITEMS 5 minecraft:emerald:6;minecraft:emerald:4;minecraft:diamond:3;minecraft:emerald:9;minecraft:enchanted_golden_apple:1
+OFFSET 2 ITEMS 5 minecraft:crossbow:1;minecraft:wind_charge:8;minecraft:wind_charge:8;minecraft:emerald:10;minecraft:flow_banner_pattern:1
+OFFSET 3 ITEMS 4 minecraft:diamond_chestplate:1;minecraft:diamond:3;minecraft:tipped_arrow:12;minecraft:music_disc_creator:1
+OFFSET 4 ITEMS 4 minecraft:wind_charge:8;minecraft:diamond:2;minecraft:wind_charge:9;minecraft:flow_armor_trim_smithing_template:1
+OFFSET 5 ITEMS 3 minecraft:diamond_chestplate:1;minecraft:emerald:5;minecraft:emerald:8
+OFFSET 6 ITEMS 3 minecraft:book:1;minecraft:tipped_arrow:11;minecraft:enchanted_golden_apple:1
+OFFSET 7 ITEMS 5 minecraft:wind_charge:12;minecraft:wind_charge:8;minecraft:emerald:4;minecraft:emerald:5;minecraft:flow_banner_pattern:1
+OFFSET 8 ITEMS 3 minecraft:iron_block:1;minecraft:tipped_arrow:7;minecraft:flow_banner_pattern:1
+OFFSET 9 ITEMS 4 minecraft:diamond_chestplate:1;minecraft:wind_charge:9;minecraft:emerald:7;minecraft:flow_banner_pattern:1
+OFFSET 10 ITEMS 4 minecraft:crossbow:1;minecraft:emerald:5;minecraft:diamond:2;minecraft:emerald:10

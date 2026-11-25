@@ -13,7 +13,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 战利品预测引擎的外部进程封装。
@@ -28,25 +30,50 @@ public final class VaultLootTool {
     public record Detection(int offset, String state) {
     }
 
+    /** 官方参考二进制的 SHA-256（与源码包 VERSION.txt 一致，来源 xpple/cubiomes 06393cf）。 */
+    private static final String EXPECTED_SHA256 = "4b96414e647334d0c0a351b9e5177745ec88978814947cc9d3424f9770f7df64";
+    private static final String ENGINE_RESOURCE = "/fo/vault/vaulttool.exe";
+
     private VaultLootTool() {
     }
 
-    /** 释放（或复用）引擎可执行文件。 */
+    public static boolean isPlatformSupported() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    /** 释放（或复用）引擎可执行文件，并强制校验 SHA-256。 */
     public static Path ensure() throws IOException {
+        if (!isPlatformSupported()) {
+            throw new IOException("战利品引擎仅支持 Windows（当前系统：" + System.getProperty("os.name") + "）");
+        }
         Path dir = MinecraftClient.getInstance().runDirectory.toPath().resolve("fo").resolve("tools");
         Files.createDirectories(dir);
         Path exe = dir.resolve("vaulttool.exe");
-        try (InputStream in = VaultLootTool.class.getResourceAsStream("/fo/vault/vaulttool.exe")) {
-            if (in == null) {
-                throw new IOException("mod 里缺少内置战利品引擎 vaulttool.exe");
-            }
-            byte[] data = in.readAllBytes();
-            boolean write = !Files.exists(exe) || Files.size(exe) != data.length;
-            if (write) {
-                Files.write(exe, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
-            }
+
+        byte[] data;
+        try (InputStream in = VaultLootTool.class.getResourceAsStream(ENGINE_RESOURCE)) {
+            if (in == null) throw new IOException("mod 里缺少内置战利品引擎 vaulttool.exe");
+            data = in.readAllBytes();
+        }
+        if (!EXPECTED_SHA256.equals(sha256(data))) {
+            throw new IOException("内置战利品引擎校验失败（SHA-256 不匹配），已拒绝执行");
+        }
+
+        if (!Files.exists(exe) || !EXPECTED_SHA256.equals(sha256(Files.readAllBytes(exe)))) {
+            Files.write(exe, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        }
+        if (!EXPECTED_SHA256.equals(sha256(Files.readAllBytes(exe)))) {
+            throw new IOException("战利品引擎写入后校验失败，已拒绝执行");
         }
         return exe;
+    }
+
+    private static String sha256(byte[] data) throws IOException {
+        try {
+            return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(data));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IOException("JVM 缺少 SHA-256 实现", e);
+        }
     }
 
     /**

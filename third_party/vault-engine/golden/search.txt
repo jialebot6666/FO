@@ -1,0 +1,6 @@
+HIT 4 minecraft:enchanted_golden_apple 1
+HIT 7 minecraft:enchanted_golden_apple 1
+HIT 11 minecraft:heavy_core 1
+HIT 18 minecraft:enchanted_golden_apple 1
+HIT 20 minecraft:enchanted_golden_apple 1
+DONE 5

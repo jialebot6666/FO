@@ -1,0 +1,445 @@
+diff --git a/cubiomes/loot/loot_functions.h b/cubiomes/loot/loot_functions.h
+index 5edd39d..a1c7c95 100644
+--- a/cubiomes/loot/loot_functions.h
++++ b/cubiomes/loot/loot_functions.h
+@@ -280,9 +280,9 @@ STRUCT(LootFunction) {
+ // ----------------------------------------------------------------------------------------
+ // Roll count choice functions
+ 
+-static inline int roll_count_constant(RandomSource*, const int min, int unused_)
++static inline int roll_count_constant(RandomSource* unused_rand, const int min, int unused_)
+ {
+-    (void)(unused_); // Unused
++    (void)(unused_); (void)(unused_rand); // Unused
+     return min;
+ }
+ 
+
+diff --git a/cubiomes/loot/loot_table_context.c b/cubiomes/loot/loot_table_context.c
+index 73b570d..01c750b 100644
+--- a/cubiomes/loot/loot_table_context.c
++++ b/cubiomes/loot/loot_table_context.c
+@@ -90,7 +90,7 @@ static void generate_loot_pool(LootTableContext* context, int pool_index)
+     const int has_entry_conditions = pool->entry_conditions_index[last] + pool->entry_conditions_count[last] > pool->pool_condition_count;
+ 
+     // recover entry weights only for pools with conditional entries
+-    int entry_weights[has_entry_conditions ? pool->entry_count : 1];
++    int entry_weights[64];
+     if (has_entry_conditions) {
+         memset(entry_weights, 0, sizeof(entry_weights));
+         for (int w = 0; w < pool->total_weight; w++) {
+@@ -112,7 +112,7 @@ static void generate_loot_pool(LootTableContext* context, int pool_index)
+             entry = pool->precomputed_loot[w];
+         } else {
+             // check entry conditions
+-            int cumulative_weights[pool->entry_count];
++            int cumulative_weights[64];
+             int total_weight = 0;
+             int entry_count = 0;
+             for (int e = 0; e < pool->entry_count; e++) {
+
+diff --git a/cubiomes/loot/loot_table_parser.c b/cubiomes/loot/loot_table_parser.c
+index 32f1be7..5d975d0 100644
+--- a/cubiomes/loot/loot_table_parser.c
++++ b/cubiomes/loot/loot_table_parser.c
+@@ -147,7 +147,7 @@ static void parse_set_effect(LootFunction* loot_function, const cJSON* function_
+         return;
+     }
+     int effectCount = cJSON_GetArraySize(effects);
+-    MobEffectEntry mobEffects[effectCount];
++    MobEffectEntry mobEffects[64];
+     for (int i = 0; i < effectCount; ++i) {
+         cJSON* effect_entry = cJSON_GetArrayItem(effects, i);
+         if (!cJSON_IsObject(effect_entry)) {
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_1_21_1.c
+index ff0c8f7..112cc86 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_1_21_1.c
+@@ -12,17 +12,17 @@
+ 
+ static int initialised = 0;
+ 
+-static char* item_names[0] = {};
+-static int global_item_ids[0] = {};
++static char* item_names[1] = {NULL};
++static int global_item_ids[1] = {0};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[10] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+ static int entry_to_item__0[2] = {-2, -3};
+ static int entry_conditions_count__0[2] = {0, 0};
+ static int entry_conditions_index__0[2] = {0, 0};
+ static int entry_functions_count__0[2] = {0, 0};
+ static int entry_functions_index__0[2] = {0, 0};
+-static LootFunction loot_functions__0[0];
++static LootFunction loot_functions__0[1];
+ static const LootPool reward_1_21_1__0 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__0,
+@@ -39,14 +39,14 @@ static const LootPool reward_1_21_1__0 = {
+     .entry_functions_index = entry_functions_index__0,
+     .loot_functions = loot_functions__0,
+ };
+-static LootItemCondition conditions__1[0];
++static LootItemCondition conditions__1[1];
+ static int precomputed_loot__1[1] = {0};
+ static int entry_to_item__1[1] = {-3};
+ static int entry_conditions_count__1[1] = {0};
+ static int entry_conditions_index__1[1] = {0};
+ static int entry_functions_count__1[1] = {0};
+ static int entry_functions_index__1[1] = {0};
+-static LootFunction loot_functions__1[0];
++static LootFunction loot_functions__1[1];
+ static const LootPool reward_1_21_1__1 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__1,
+@@ -70,7 +70,7 @@ static int entry_conditions_count__2[1] = {0};
+ static int entry_conditions_index__2[1] = {1};
+ static int entry_functions_count__2[1] = {0};
+ static int entry_functions_index__2[1] = {0};
+-static LootFunction loot_functions__2[0];
++static LootFunction loot_functions__2[1];
+ static const LootPool reward_1_21_1__2 = {
+     .pool_condition_count = 1,
+     .conditions = conditions__2,
+@@ -90,7 +90,7 @@ static const LootPool reward_1_21_1__2 = {
+ 
+ static int subtable_pool_offset[3] = {0};
+ static int subtable_pool_count[3] = {0};
+-static LootPool loot_pools[3] = {reward_1_21_1__0, reward_1_21_1__1, reward_1_21_1__2};
++static LootPool loot_pools[3];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 0,
+@@ -133,6 +133,9 @@ static void init_subtables() {
+ }
+ 
+ LootTableContext* init_reward_1_21_1() {
++    loot_pools[0] = reward_1_21_1__0;
++    loot_pools[1] = reward_1_21_1__1;
++    loot_pools[2] = reward_1_21_1__2;
+     if (!initialised) {
+         create_loot_functions();
+         init_subtables();
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_common_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_common_1_21_1.c
+index b7e8c6d..7a6f5c2 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_common_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_common_1_21_1.c
+@@ -12,7 +12,7 @@ static int initialised = 0;
+ static char* item_names[9] = {"minecraft:arrow", "minecraft:tipped_arrow", "minecraft:emerald", "minecraft:wind_charge", "minecraft:iron_ingot", "minecraft:honey_bottle", "minecraft:ominous_bottle", "minecraft:wind_charge", "minecraft:diamond"};
+ static int global_item_ids[9] = {ITEM_ARROW, ITEM_TIPPED_ARROW, ITEM_EMERALD, ITEM_WIND_CHARGE, ITEM_IRON_INGOT, ITEM_HONEY_BOTTLE, ITEM_OMINOUS_BOTTLE, ITEM_WIND_CHARGE, ITEM_DIAMOND};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[25] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 8};
+ static int entry_to_item__0[9] = {0, 1, 2, 3, 4, 5, 6, 3, 8};
+ static int entry_conditions_count__0[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+@@ -37,7 +37,7 @@ static const LootPool reward_common_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_common_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 9,
+@@ -67,6 +67,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_common_1_21_1() {
++    loot_pools[0] = reward_common_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_1_21_1.c
+index 3bdf4ef..59098bc 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_1_21_1.c
+@@ -12,17 +12,17 @@
+ 
+ static int initialised = 0;
+ 
+-static char* item_names[0] = {};
+-static int global_item_ids[0] = {};
++static char* item_names[1] = {NULL};
++static int global_item_ids[1] = {0};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[10] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+ static int entry_to_item__0[2] = {-2, -3};
+ static int entry_conditions_count__0[2] = {0, 0};
+ static int entry_conditions_index__0[2] = {0, 0};
+ static int entry_functions_count__0[2] = {0, 0};
+ static int entry_functions_index__0[2] = {0, 0};
+-static LootFunction loot_functions__0[0];
++static LootFunction loot_functions__0[1];
+ static const LootPool reward_ominous_1_21_1__0 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__0,
+@@ -39,14 +39,14 @@ static const LootPool reward_ominous_1_21_1__0 = {
+     .entry_functions_index = entry_functions_index__0,
+     .loot_functions = loot_functions__0,
+ };
+-static LootItemCondition conditions__1[0];
++static LootItemCondition conditions__1[1];
+ static int precomputed_loot__1[1] = {0};
+ static int entry_to_item__1[1] = {-3};
+ static int entry_conditions_count__1[1] = {0};
+ static int entry_conditions_index__1[1] = {0};
+ static int entry_functions_count__1[1] = {0};
+ static int entry_functions_index__1[1] = {0};
+-static LootFunction loot_functions__1[0];
++static LootFunction loot_functions__1[1];
+ static const LootPool reward_ominous_1_21_1__1 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__1,
+@@ -70,7 +70,7 @@ static int entry_conditions_count__2[1] = {0};
+ static int entry_conditions_index__2[1] = {1};
+ static int entry_functions_count__2[1] = {0};
+ static int entry_functions_index__2[1] = {0};
+-static LootFunction loot_functions__2[0];
++static LootFunction loot_functions__2[1];
+ static const LootPool reward_ominous_1_21_1__2 = {
+     .pool_condition_count = 1,
+     .conditions = conditions__2,
+@@ -90,7 +90,7 @@ static const LootPool reward_ominous_1_21_1__2 = {
+ 
+ static int subtable_pool_offset[3] = {0};
+ static int subtable_pool_count[3] = {0};
+-static LootPool loot_pools[3] = {reward_ominous_1_21_1__0, reward_ominous_1_21_1__1, reward_ominous_1_21_1__2};
++static LootPool loot_pools[3];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 0,
+@@ -133,6 +133,9 @@ static void init_subtables() {
+ }
+ 
+ LootTableContext* init_reward_ominous_1_21_1() {
++    loot_pools[0] = reward_ominous_1_21_1__0;
++    loot_pools[1] = reward_ominous_1_21_1__1;
++    loot_pools[2] = reward_ominous_1_21_1__2;
+     if (!initialised) {
+         create_loot_functions();
+         init_subtables();
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_common_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_common_1_21_1.c
+index acbcef1..c9acda6 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_common_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_common_1_21_1.c
+@@ -12,7 +12,7 @@ static int initialised = 0;
+ static char* item_names[5] = {"minecraft:emerald", "minecraft:wind_charge", "minecraft:tipped_arrow", "minecraft:diamond", "minecraft:ominous_bottle"};
+ static int global_item_ids[5] = {ITEM_EMERALD, ITEM_WIND_CHARGE, ITEM_TIPPED_ARROW, ITEM_DIAMOND, ITEM_OMINOUS_BOTTLE};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[15] = {0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4};
+ static int entry_to_item__0[5] = {0, 1, 2, 3, 4};
+ static int entry_conditions_count__0[5] = {0, 0, 0, 0, 0};
+@@ -37,7 +37,7 @@ static const LootPool reward_ominous_common_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_ominous_common_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 5,
+@@ -63,6 +63,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_ominous_common_1_21_1() {
++    loot_pools[0] = reward_ominous_common_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_rare_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_rare_1_21_1.c
+index 399e73e..dc4058a 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_rare_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_rare_1_21_1.c
+@@ -12,7 +12,7 @@ static int initialised = 0;
+ static char* item_names[10] = {"minecraft:emerald_block", "minecraft:iron_block", "minecraft:crossbow", "minecraft:golden_apple", "minecraft:diamond_axe", "minecraft:diamond_chestplate", "minecraft:book", "minecraft:book", "minecraft:book", "minecraft:diamond_block"};
+ static int global_item_ids[10] = {ITEM_EMERALD_BLOCK, ITEM_IRON_BLOCK, ITEM_CROSSBOW, ITEM_GOLDEN_APPLE, ITEM_DIAMOND_AXE, ITEM_DIAMOND_CHESTPLATE, ITEM_BOOK, ITEM_BOOK, ITEM_BOOK, ITEM_DIAMOND_BLOCK};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[29] = {0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 8, 8, 9};
+ static int entry_to_item__0[10] = {0, 1, 2, 3, 4, 5, 6, 6, 6, 9};
+ static int entry_conditions_count__0[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+@@ -37,7 +37,7 @@ static const LootPool reward_ominous_rare_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_ominous_rare_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 10,
+@@ -62,6 +62,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_ominous_rare_1_21_1() {
++    loot_pools[0] = reward_ominous_rare_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_unique_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_unique_1_21_1.c
+index c135b86..fdcdb70 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_unique_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_ominous_unique_1_21_1.c
+@@ -12,14 +12,14 @@ static int initialised = 0;
+ static char* item_names[5] = {"minecraft:enchanted_golden_apple", "minecraft:flow_armor_trim_smithing_template", "minecraft:flow_banner_pattern", "minecraft:music_disc_creator", "minecraft:heavy_core"};
+ static int global_item_ids[5] = {ITEM_ENCHANTED_GOLDEN_APPLE, ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE, ITEM_FLOW_BANNER_PATTERN, ITEM_MUSIC_DISC_CREATOR, ITEM_HEAVY_CORE};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[10] = {0, 0, 0, 1, 1, 1, 2, 2, 3, 4};
+ static int entry_to_item__0[5] = {0, 1, 2, 3, 4};
+ static int entry_conditions_count__0[5] = {0, 0, 0, 0, 0};
+ static int entry_conditions_index__0[5] = {0, 0, 0, 0, 0};
+ static int entry_functions_count__0[5] = {0, 0, 0, 0, 0};
+ static int entry_functions_index__0[5] = {0, 0, 0, 0, 0};
+-static LootFunction loot_functions__0[0];
++static LootFunction loot_functions__0[1];
+ static const LootPool reward_ominous_unique_1_21_1__0 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__0,
+@@ -37,7 +37,7 @@ static const LootPool reward_ominous_unique_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_ominous_unique_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 5,
+@@ -55,6 +55,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_ominous_unique_1_21_1() {
++    loot_pools[0] = reward_ominous_unique_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_rare_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_rare_1_21_1.c
+index cff49b7..c39a103 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_rare_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_rare_1_21_1.c
+@@ -12,7 +12,7 @@ static int initialised = 0;
+ static char* item_names[11] = {"minecraft:emerald", "minecraft:shield", "minecraft:bow", "minecraft:crossbow", "minecraft:iron_axe", "minecraft:iron_chestplate", "minecraft:golden_carrot", "minecraft:book", "minecraft:book", "minecraft:diamond_chestplate", "minecraft:diamond_axe"};
+ static int global_item_ids[11] = {ITEM_EMERALD, ITEM_SHIELD, ITEM_BOW, ITEM_CROSSBOW, ITEM_IRON_AXE, ITEM_IRON_CHESTPLATE, ITEM_GOLDEN_CARROT, ITEM_BOOK, ITEM_BOOK, ITEM_DIAMOND_CHESTPLATE, ITEM_DIAMOND_AXE};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[23] = {0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 10};
+ static int entry_to_item__0[11] = {0, 1, 2, 3, 4, 5, 6, 7, 7, 9, 10};
+ static int entry_conditions_count__0[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+@@ -37,7 +37,7 @@ static const LootPool reward_rare_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_rare_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 11,
+@@ -67,6 +67,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_rare_1_21_1() {
++    loot_pools[0] = reward_rare_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_unique_1_21_1.c b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_unique_1_21_1.c
+index 5ad3101..c5c9637 100644
+--- a/cubiomes/loot/loot_tables/chests/trial_chambers/reward_unique_1_21_1.c
++++ b/cubiomes/loot/loot_tables/chests/trial_chambers/reward_unique_1_21_1.c
+@@ -12,14 +12,14 @@ static int initialised = 0;
+ static char* item_names[5] = {"minecraft:golden_apple", "minecraft:bolt_armor_trim_smithing_template", "minecraft:guster_banner_pattern", "minecraft:music_disc_precipice", "minecraft:trident"};
+ static int global_item_ids[5] = {ITEM_GOLDEN_APPLE, ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE, ITEM_GUSTER_BANNER_PATTERN, ITEM_MUSIC_DISC_PRECIPICE, ITEM_TRIDENT};
+ 
+-static LootItemCondition conditions__0[0];
++static LootItemCondition conditions__0[1];
+ static int precomputed_loot__0[12] = {0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 4};
+ static int entry_to_item__0[5] = {0, 1, 2, 3, 4};
+ static int entry_conditions_count__0[5] = {0, 0, 0, 0, 0};
+ static int entry_conditions_index__0[5] = {0, 0, 0, 0, 0};
+ static int entry_functions_count__0[5] = {0, 0, 0, 0, 0};
+ static int entry_functions_index__0[5] = {0, 0, 0, 0, 0};
+-static LootFunction loot_functions__0[0];
++static LootFunction loot_functions__0[1];
+ static const LootPool reward_unique_1_21_1__0 = {
+     .pool_condition_count = 0,
+     .conditions = conditions__0,
+@@ -37,7 +37,7 @@ static const LootPool reward_unique_1_21_1__0 = {
+     .loot_functions = loot_functions__0,
+ };
+ 
+-static LootPool loot_pools[1] = {reward_unique_1_21_1__0};
++static LootPool loot_pools[1];
+ static LootTableContext context = {
+     .version = MC_1_21_1,
+     .item_count = 5,
+@@ -55,6 +55,7 @@ static void create_loot_functions() {
+ }
+ 
+ LootTableContext* init_reward_unique_1_21_1() {
++    loot_pools[0] = reward_unique_1_21_1__0;
+     if (!initialised) {
+         create_loot_functions();
+         initialised = 1;
+
+diff --git a/cubiomes/rng.h b/cubiomes/rng.h
+index d2c1e56..2d1ecd6 100644
+--- a/cubiomes/rng.h
++++ b/cubiomes/rng.h
+@@ -10,6 +10,13 @@
+ #include <stddef.h>
+ #include <inttypes.h>
+ 
++#ifdef _MSC_VER
++#include <intrin.h>
++static inline int tc_popcount64(uint64_t x) { return (int)__popcnt64(x); }
++#else
++static inline int tc_popcount64(uint64_t x) { return __builtin_popcountll(x); }
++#endif
++
+ #include "xrms.h"
+ 
+ 
+@@ -313,14 +320,14 @@ static inline void calcVecMul(const uint64_t m[128][2], Xoroshiro* xr) {
+ 
+     #pragma GCC unroll 64
+     for (int r = 0; r < 64; ++r) {
+-        const int bit = __builtin_popcountll((m[r][0] & xr->hi) ^ (m[r][1] & xr->lo)) & 1;
++        const int bit = tc_popcount64((m[r][0] & xr->hi) ^ (m[r][1] & xr->lo)) & 1;
+         if (bit) {
+             hi |= 1ULL << (64 - r - 1);
+         }
+     }
+     #pragma GCC unroll 64
+     for (int r = 0; r < 64; ++r) {
+-        const int bit = __builtin_popcountll((m[r + 64][0] & xr->hi) ^ (m[r + 64][1] & xr->lo)) & 1;
++        const int bit = tc_popcount64((m[r + 64][0] & xr->hi) ^ (m[r + 64][1] & xr->lo)) & 1;
+         if (bit) {
+             lo |= 1ULL << (64 - r - 1);
+         }
+@@ -332,7 +339,7 @@ static inline void calcVecMul(const uint64_t m[128][2], Xoroshiro* xr) {
+ 
+ static inline void xSkipN(Xoroshiro *xr, uint64_t count)
+ {
+-    if (count < 100ULL * __builtin_popcountll(count)) {
++    if (count < 100ULL * tc_popcount64(count)) {
+         while (count-- > 0) {
+             xNextLong(xr);
+         }
+
