@@ -5,7 +5,6 @@ import com.fo.addon.ancient.core.AncientChestStore;
 import com.fo.addon.ancient.core.EnchantedGoldCityLogic;
 import com.fo.addon.ancient.core.EnchantedGoldStore;
 import com.fo.addon.ancient.core.FatChestLogic;
-import com.fo.addon.ancient.core.FlightNavLogic;
 import com.fo.addon.ancient.core.FluidColumnLogic;
 import com.fo.addon.ancient.core.GearRepairLogic;
 import com.fo.addon.ancient.core.GearSupplyLogic;
@@ -88,7 +87,7 @@ public class FOEnchantedGoldCollector extends Module {
     }
 
     /** 飞行子阶段。 */
-    private enum FlightPhase { TAKEOFF, CLIMB, CRUISE, APPROACH, TERMINAL }
+    private enum FlightPhase { RISING, SHAFT_CLIMB, FLYING, LANDING }
 
     /** 升井子阶段：对中 → 起跳 → 滑翔上升。 */
     private enum AscendPhase { CENTER, LAUNCH, GLIDE }
@@ -137,19 +136,29 @@ public class FOEnchantedGoldCollector extends Module {
     private final Setting<Integer> landingRetriesSetting;
     private final Setting<Double> fireworkIntervalSetting;
     private final Setting<Boolean> pitchSmoothSetting;
+    /** 俯仰平滑：抬头速率（度/刻）。 */
+    private final Setting<Double> pitchRotateUpSetting;
+    /** 俯仰平滑：低头速率（度/刻）。 */
+    private final Setting<Double> pitchRotateDownSetting;
+    /** 抬头阶段垂直速度低于此值才补烟花。 */
+    private final Setting<Double> fireworkVelocityThresholdSetting;
+    private final Setting<Integer> fireworkBoostCooldownSetting;
+    private final Setting<Boolean> autoFireworkBoostSetting;
+    /** 降到落点 3 格内时每 2 刻反向一次，原地荡着下降。 */
+    private final Setting<Boolean> slowFallBoostSetting;
 
     private final Setting<Integer> fluidLookaheadSetting;
     private final Setting<Boolean> blacklistOnFluidSetting;
     private final Setting<Boolean> abandonUnderwaterSetting;
     private final Setting<Integer> wardenDistanceSetting;
-    /** 终端螺旋的起始半径（格）。 */
-    private final Setting<Integer> spiralRadiusSetting;
     /** 升井时竖直速度低于此值就补烟花。 */
     private final Setting<Double> ascendThrustSetting;
 
     private final Setting<Boolean> autoPackSetting;
     private final Setting<StorageMode> storageModeSetting;
     private final Setting<Integer> minEmptyBoxesSetting;
+    /** 攒够多少附魔金苹果才停靠存盒。 */
+    private final Setting<Integer> packThresholdSetting;
 
     private final Setting<Boolean> autoRepairSetting;
     private final Setting<Double> elytraThresholdSetting;
@@ -210,18 +219,30 @@ public class FOEnchantedGoldCollector extends Module {
     private int ascendBurst;
     private int ascendTicks;
 
-    private FlightPhase flightPhase = FlightPhase.TAKEOFF;
-    private FlightNavLogic.Layer flightLayer = FlightNavLogic.Layer.CRUISE;
+    private FlightPhase flightPhase = FlightPhase.RISING;
     private float smoothedPitch;
     private int fireworkCooldown;
     private int landingFailures;
     private int flightTicksTotal;
     private double flightTargetX;
     private double flightTargetZ;
-    private double lastTargetDistance = Double.MAX_VALUE;
-    private int growStreak;
-    private int terminalHalfTurns;
-    private double spiralStartRadius;
+    private double landingTargetY;
+
+    /** 高度滞回：true=正在抬头爬升，false=正在 p40 俯冲。只在到顶/到底时翻转。 */
+    private boolean climbing;
+    /** 展翅后是否已经打过第一发烟花。 */
+    private boolean firstFireworkDone;
+    private int lastFireworkTick;
+    private int fireworkBoostCooldown;
+    /** 滑翔意外中断的恢复计数。 */
+    private int glideFailTicks;
+    private int glideRecoverTicks;
+    private boolean glideRecovering;
+    /** 低于降落点时反向拉升。 */
+    private boolean landingRecover;
+    private int recoverStageTick;
+    private float recoveryYaw;
+    private int recoverCount;
 
     /** 升井后若需存盒/修复，先落地处理；不需要就空中直接转场。 */
     private boolean landForStop;
@@ -323,12 +344,48 @@ public class FOEnchantedGoldCollector extends Module {
             .sliderMin(0).sliderMax(320)
             .build());
 
-        spiralRadiusSetting = sgFlight.add(new IntSetting.Builder()
-            .name("螺旋起始半径")
-            .description("终端盘旋下降的起始半径（格），每转半圈缩 2 格，最小 2")
-            .defaultValue(12)
-            .min(4).max(32)
-            .sliderMin(4).sliderMax(24)
+        pitchRotateUpSetting = sgFlight.add(new DoubleSetting.Builder()
+            .name("抬头速度")
+            .description("俯仰平滑开启时，抬头爬升每游戏刻转多少度（默认 5.45）")
+            .defaultValue(5.45)
+            .min(1.0).max(20.0)
+            .sliderMin(1.0).sliderMax(12.0)
+            .build());
+
+        pitchRotateDownSetting = sgFlight.add(new DoubleSetting.Builder()
+            .name("低头速度")
+            .description("俯仰平滑开启时，俯冲低头每游戏刻转多少度（默认 0.9）")
+            .defaultValue(0.9)
+            .min(0.5).max(2.0)
+            .sliderMin(0.5).sliderMax(2.0)
+            .build());
+
+        autoFireworkBoostSetting = sgFlight.add(new BoolSetting.Builder()
+            .name("自动补烟花")
+            .description("只在抬头速度不足或低于最低高度时补，俯冲段不烧烟花")
+            .defaultValue(true)
+            .build());
+
+        fireworkVelocityThresholdSetting = sgFlight.add(new DoubleSetting.Builder()
+            .name("补烟花速度阈值")
+            .description("抬头阶段垂直速度低于此值才补烟花（负值=已在下坠）")
+            .defaultValue(-0.35)
+            .min(-0.5).max(1.0)
+            .sliderMin(-0.5).sliderMax(0.5)
+            .build());
+
+        fireworkBoostCooldownSetting = sgFlight.add(new IntSetting.Builder()
+            .name("补烟花冷却")
+            .description("两发补烟花之间至少间隔多少游戏刻")
+            .defaultValue(10)
+            .min(0).max(100)
+            .sliderMin(0).sliderMax(100)
+            .build());
+
+        slowFallBoostSetting = sgFlight.add(new BoolSetting.Builder()
+            .name("缓降辅助")
+            .description("降到落点 3 格内时每 2 刻反向一次，原地荡着下降")
+            .defaultValue(true)
             .build());
 
         ascendThrustSetting = sgFlight.add(new DoubleSetting.Builder()
@@ -415,6 +472,14 @@ public class FOEnchantedGoldCollector extends Module {
             .defaultValue(1)
             .min(1).max(16)
             .sliderMin(1).sliderMax(8)
+            .build());
+
+        packThresholdSetting = sgStorage.add(new IntSetting.Builder()
+            .name("存盒门槛")
+            .description("背包里攒够多少个附魔金苹果才停靠存盒（不满不存）")
+            .defaultValue(64)
+            .min(1).max(576)
+            .sliderMin(1).sliderMax(256)
             .build());
 
         autoRepairSetting = sgRepair.add(new BoolSetting.Builder()
@@ -887,17 +952,27 @@ public class FOEnchantedGoldCollector extends Module {
         PathManagers.get().setAllowBreak(true);
         flightTargetX = currentChest.x() + 0.5;
         flightTargetZ = currentChest.z() + 0.5;
-        // 刚出井就在滑翔：直接进爬升，不要在地面起跳
-        flightPhase = mc.player.isGliding() ? FlightPhase.CLIMB : FlightPhase.TAKEOFF;
-        flightLayer = FlightNavLogic.Layer.CRUISE;
-        lastTargetDistance = Double.MAX_VALUE;
-        growStreak = 0;
-        terminalHalfTurns = 0;
-        spiralStartRadius = 0;
-        smoothedPitch = mc.player.getPitch();
+        landingTargetY = surfaceY(currentChest.x(), currentChest.z());
+        climbing = mc.player.getY() <= minHeightSetting.get();
+        firstFireworkDone = false;
+        lastFireworkTick = 0;
+        fireworkBoostCooldown = 0;
         fireworkCooldown = 0;
-        landingFailures = 0;
-        flightTicksTotal = 0;
+        glideFailTicks = 0;
+        glideRecoverTicks = 0;
+        glideRecovering = false;
+        landingRecover = false;
+        recoverStageTick = 0;
+        recoverCount = 0;
+        smoothedPitch = mc.player.getPitch();
+
+        if (mc.player.isGliding()) {
+            // 出井后还没到拉升高度：-85° 垂直顶上去；已经够高就直接 p40 巡航
+            flightPhase = mc.player.getY() < riseHeightSetting.get()
+                ? FlightPhase.SHAFT_CLIMB : FlightPhase.FLYING;
+        } else {
+            flightPhase = FlightPhase.RISING;
+        }
         state = State.FLY;
         stateTicks = 0;
         statusText = "飞向目标";
@@ -911,51 +986,41 @@ public class FOEnchantedGoldCollector extends Module {
             pause("飞行超过 10 分钟仍未到达，已暂停");
             return;
         }
-
-        // 途中每 20 tick 看一次鞘翅与烟花
-        if (stateTicks % 20 == 0) {
-            ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
-            if (chest.getItem() == Items.ELYTRA) {
-                if (GearRepairLogic.belowSafety(chest.getMaxDamage(), chest.getDamage(),
-                    minSafeDurabilitySetting.get())) {
-                    warning("鞘翅剩余耐久低于安全线，立即迫降。");
-                    flightPhase = FlightPhase.TERMINAL;
-                } else if (GearRepairLogic.needsRepair(chest.getMaxDamage(), chest.getDamage(),
-                    elytraThresholdSetting.get())) {
-                    warning("鞘翅耐久低于修复阈值，降落后处理。");
-                    needRepairAfterAscent = true;
-                }
-            }
-            if (countFireworks() < 4) {
-                warning("烟花剩余 " + countFireworks() + " 发，提前降落。");
-                flightPhase = FlightPhase.TERMINAL;
-            }
-        }
-
-        // 撞山/被打断后滑翔中断：先尝试重新展开，别直接掉下去
-        if (flightPhase != FlightPhase.TAKEOFF && !mc.player.isGliding() && !mc.player.isOnGround()) {
-            if (stateTicks % 4 == 0) sendStartGliding();
-            if (stateTicks % 20 == 0) useFirework();
-            rotateTo(yawTo(flightTargetX, flightTargetZ), -30.0f);
-            mc.options.forwardKey.setPressed(true);
+        if (stateTicks % 20 == 0 && countFireworks() < 4
+            && flightPhase != FlightPhase.LANDING) {
+            warning("烟花剩余 " + countFireworks() + " 发，就近迫降补给。");
+            enterLowFuelLanding();
             return;
         }
-
         switch (flightPhase) {
-            case TAKEOFF -> flyTakeoff();
-            case CLIMB -> flyClimb();
-            case CRUISE -> flyCruise();
-            case APPROACH -> flyApproach();
-            case TERMINAL -> flyTerminal();
+            case RISING -> flyRising();
+            case SHAFT_CLIMB -> flyShaftClimb();
+            case FLYING -> flyFlying();
+            case LANDING -> flyLanding();
         }
     }
 
-    private void flyTakeoff() {
-        equipElytra();
-        mc.options.forwardKey.setPressed(true);
-        mc.player.setPitch(-45.0f);
+    /** 地面起飞：头顶开阔才起跳，展翅后一路顶到拉升高度。 */
+    private void flyRising() {
+        if (stateTicks > 400) {
+            pause("起飞失败：没穿鞘翅或没有烟花");
+            return;
+        }
         if (!mc.player.isGliding()) {
+            mc.player.setPitch(-45.0f);
+            mc.options.forwardKey.setPressed(true);
             if (mc.player.isOnGround()) {
+                if (!canTakeOffHere()) {
+                    BlockPos spot = findTakeoffSpot();
+                    if (spot != null && stateTicks % 20 == 1 && !PathManagers.get().isPathing()) {
+                        statusText = "走到开阔点";
+                        PathManagers.get().moveTo(spot, false);
+                    }
+                    if (stateTicks > 20 * 10) {
+                        pause("起飞点头顶被挡，找不到开阔位置");
+                    }
+                    return;
+                }
                 PathManagers.get().stop();
                 mc.player.jump();
             } else if (stateTicks % 4 == 0) {
@@ -963,88 +1028,148 @@ public class FOEnchantedGoldCollector extends Module {
             }
             return;
         }
-        useFirework();
-        fireworkCooldown = fireworkTicks();
-        flightPhase = FlightPhase.CLIMB;
-        stateTicks = 0;
-        statusText = "爬升";
-    }
 
-    private void flyClimb() {
-        rotateTo(yawTo(flightTargetX, flightTargetZ), -54.77f);
-        mc.options.forwardKey.setPressed(true);
-        if (fireworkCooldown > 0) fireworkCooldown--;
-        // 只在冷却到 0 时投；不能写成「冷却到 0 或低于最低高度」，后者会在低空每 tick 投一发
-        if (fireworkCooldown == 0) {
+        // 已展翅：首发立即打，之后按烟花间隔顶到拉升高度
+        if (!firstFireworkDone) {
             useFirework();
-            fireworkCooldown = fireworkTicks();
+            firstFireworkDone = true;
+            lastFireworkTick = stateTicks;
+        } else if (stateTicks - lastFireworkTick >= fireworkTicks()) {
+            useFirework();
+            lastFireworkTick = stateTicks;
         }
+        rotateTo(yawTo(flightTargetX, flightTargetZ), -45.0f);
+        mc.options.forwardKey.setPressed(true);
         if (mc.player.getY() >= riseHeightSetting.get()) {
-            flightPhase = FlightPhase.CRUISE;
+            flightPhase = FlightPhase.FLYING;
             stateTicks = 0;
             statusText = "巡航";
         }
     }
 
-    private void flyCruise() {
-        double dist = Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ));
-        rotateTo(yawTo(flightTargetX, flightTargetZ),
-            FlightNavLogic.cruisePitch(mc.player.getY(), minHeightSetting.get(), maxHeightSetting.get()));
+    /** 出井后：-85° 近乎垂直，靠烟花一路顶到拉升高度，中途不做水平巡航。 */
+    private void flyShaftClimb() {
+        if (!mc.player.isGliding()) {
+            if (stateTicks % 4 == 0) sendStartGliding();
+            if (stateTicks % 20 == 0) useFirework();
+            rotateTo(yawTo(flightTargetX, flightTargetZ), -85.0f);
+            mc.options.forwardKey.setPressed(true);
+            return;
+        }
+        rotateTo(yawTo(flightTargetX, flightTargetZ), -85.0f);
         mc.options.forwardKey.setPressed(true);
-
         if (fireworkCooldown > 0) fireworkCooldown--;
-        double vx = mc.player.getVelocity().x;
-        double vz = mc.player.getVelocity().z;
-        double horizontalSpeed = Math.sqrt(vx * vx + vz * vz) * 20.0;
-        if (fireworkCooldown == 0
-            && (mc.player.getY() < minHeightSetting.get()
-                || FlightNavLogic.needsThrust(horizontalSpeed, 25.0))) {
+        if (fireworkCooldown == 0) {
             useFirework();
             fireworkCooldown = fireworkTicks();
         }
-
-        // 需要时插航向校正：横向偏差超过 20 格，yaw 强制重新对准目标
-        if (mc.player.getY() > minHeightSetting.get() && mc.player.getY() <= maxHeightSetting.get()
-            && dist > 600 && stateTicks % 40 == 0) {
-            rotateTo(yawTo(flightTargetX, flightTargetZ), 37.72f);
-        }
-
-        if (dist <= 120) {
-            flightPhase = FlightPhase.APPROACH;
+        if (mc.player.getY() >= riseHeightSetting.get()) {
+            flightPhase = FlightPhase.FLYING;
             stateTicks = 0;
-            statusText = "接近目标";
+            statusText = "巡航";
         }
     }
 
-    private void flyApproach() {
+    /** p40 巡航：230 以下才抬头，300 以上才停抬，中间一律 37.72° 俯冲。 */
+    private void flyFlying() {
+        if (!mc.player.isGliding()) {
+            if (mc.player.isOnGround()) {
+                // 半路落地：重新起飞
+                firstFireworkDone = false;
+                flightPhase = FlightPhase.RISING;
+                stateTicks = 0;
+                return;
+            }
+            handleGlideFailure();
+            return;
+        }
+        glideFailTicks = 0;
+        glideRecoverTicks = 0;
+        glideRecovering = false;
+
         double dist = Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ));
-        boolean loaded = isChunkLoaded((int) flightTargetX, (int) flightTargetZ);
-        // 区块没加载就不下降：用箱子 Y+80 估一个目标高度
-        int targetY = loaded
-            ? surfaceY((int) flightTargetX, (int) flightTargetZ) + 40
-            : (int) Math.max(minHeightSetting.get(), currentChest.y() + 80);
-        double dy = mc.player.getY() - targetY;
-        float pitch = (float) Math.min(45.0, Math.max(-45.0, dy * 0.8));
-        rotateTo(yawTo(flightTargetX, flightTargetZ), pitch);
+
+        if (climbing) {
+            if (mc.player.getY() >= maxHeightSetting.get()) climbing = false;
+        } else if (mc.player.getY() <= minHeightSetting.get()) {
+            climbing = true;
+        }
+
+        float pitch = climbing ? -54.77f : 37.72f;
+        if (pitchSmoothSetting.get()) {
+            float step = pitch < smoothedPitch
+                ? pitchRotateUpSetting.get().floatValue()
+                : pitchRotateDownSetting.get().floatValue();
+            smoothedPitch = stepAngle(smoothedPitch, pitch, step);
+            pitch = smoothedPitch;
+        } else {
+            smoothedPitch = pitch;
+        }
+        mc.player.setYaw(stepAngle(mc.player.getYaw(),
+            yawTo(flightTargetX, flightTargetZ), 6.0f));
+        mc.player.setPitch(pitch);
         mc.options.forwardKey.setPressed(true);
 
-        if (dist <= 40) {
-            flightPhase = FlightPhase.TERMINAL;
-            terminalHalfTurns = 0;
-            spiralStartRadius = Math.max(spiralRadiusSetting.get(), dist);
+        if (fireworkBoostCooldown > 0) fireworkBoostCooldown--;
+        if (autoFireworkBoostSetting.get()
+            && fireworkBoostCooldown == 0
+            && dist > 20.0
+            && mc.player.getY() < maxHeightSetting.get()) {
+            boolean tooSlow = climbing
+                && mc.player.getVelocity().y < fireworkVelocityThresholdSetting.get();
+            boolean tooLow = mc.player.getY() < minHeightSetting.get();
+            if (tooSlow || tooLow) {
+                useFirework();
+                fireworkBoostCooldown = Math.max(fireworkBoostCooldownSetting.get(), fireworkTicks());
+            }
+        }
+
+        if (dist <= 3.0) {
+            flightPhase = FlightPhase.LANDING;
             stateTicks = 0;
-            statusText = "螺旋下降";
+            statusText = "进近降落";
         }
     }
 
-    private void flyTerminal() {
-        double cx = flightTargetX;
-        double cz = flightTargetZ;
-        double dx = mc.player.getX() - cx;
-        double dz = mc.player.getZ() - cz;
-        double dist = Math.sqrt(dx * dx + dz * dz);
+    /** 直线进近：只俯冲不抬头，距目标 3 格内松前进缓降。 */
+    private void flyLanding() {
+        double dist = Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ));
+
+        if (landingRecover) {
+            recoverStageTick++;
+            mc.player.setYaw(recoveryYaw);
+            mc.player.setPitch(-54.77f);
+            mc.options.forwardKey.setPressed(true);
+            if (fireworkCooldown > 0) fireworkCooldown--;
+            if (fireworkCooldown == 0) {
+                useFirework();
+                fireworkCooldown = fireworkTicks();
+            }
+            if (mc.player.getY() >= landingTargetY + 25 || recoverStageTick > 600) {
+                landingRecover = false;
+                recoverStageTick = 0;
+                stateTicks = 0;
+                info("已拉升到降落点上方 25 格，重新进近。");
+            }
+            return;
+        }
+
+        if (!mc.player.isOnGround() && mc.player.getY() < landingTargetY - 10) {
+            recoverCount++;
+            if (recoverCount > 3) {
+                pause("多次低于降落点，无法降落");
+                return;
+            }
+            landingRecover = true;
+            recoverStageTick = 0;
+            recoveryYaw = yawTo(flightTargetX, flightTargetZ) + 180.0f;
+            firstFireworkDone = false;
+            info("低于降落点 10 格，反向拉升到上方 25 格。");
+            return;
+        }
 
         if (mc.player.isOnGround()) {
+            recoverCount = 0;
             releaseForward();
             if (dist <= 3.0) {
                 state = State.ARRIVE;
@@ -1052,16 +1177,14 @@ public class FOEnchantedGoldCollector extends Module {
                 statusText = "到达检查";
                 return;
             }
-            // 落在旁边：短距走回井口
             if (stateTicks % 20 == 1) {
                 PathManagers.get().setAllowBreak(false);
                 PathManagers.get().moveToPrecise(
-                    new BlockPos((int) cx, surfaceY((int) cx, (int) cz) + 1, (int) cz));
+                    new BlockPos((int) flightTargetX, (int) landingTargetY + 1, (int) flightTargetZ));
             }
             if (stateTicks > 20 * 20) {
                 PathManagers.get().setAllowBreak(true);
-                state = State.ARRIVE;
-                stateTicks = 0;
+                blacklistCurrentChest(EnchantedGoldStore.REASON_UNREACHABLE);
             }
             return;
         }
@@ -1071,31 +1194,106 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        double heightAbove = mc.player.getY()
-            - (isChunkLoaded((int) cx, (int) cz) ? surfaceY((int) cx, (int) cz) : mc.player.getBlockY());
-
-        if (dist <= 3.0) {
-            // 已经在圆心正上方：小俯角缓降，不按前进键，别把圈冲大
-            rotateTo(yawTo(cx, cz), heightAbove > 30 ? 75.0f : 45.0f);
-            releaseForward();
+        double dy = mc.player.getY() - (landingTargetY + 1);
+        double d3 = horizontalDistanceSq(flightTargetX, flightTargetZ) + dy * dy;
+        if (d3 > 400.0) {
+            mc.player.setYaw(stepAngle(mc.player.getYaw(),
+                yawTo(flightTargetX, flightTargetZ), 6.0f));
+            mc.player.setPitch(55.0f);
+            mc.options.forwardKey.setPressed(true);
             return;
         }
-
-        // 每 20 tick 把目标半径收 2 格，收到 2 格为止；半径外朝圆心收、半径内切向绕
-        if (stateTicks % 20 == 0) terminalHalfTurns++;
-        double radius = Math.max(2.0, spiralStartRadius - terminalHalfTurns * 2.0);
-        float yaw = dist > radius
-            ? yawTo(cx, cz)
-            : FlightNavLogic.spiralYaw(cx, cz, mc.player.getX(), mc.player.getZ());
-        float pitch = FlightNavLogic.spiralPitch(heightAbove);
-        rotateTo(yaw, pitch);
-        mc.options.forwardKey.setPressed(true);
-
-        if (fireworkCooldown > 0) fireworkCooldown--;
-        if (fireworkCooldown == 0 && heightAbove > 20 && dist > 12) {
-            useFirework();
-            fireworkCooldown = fireworkTicks();
+        if (dist > 3.0) {
+            float pitch = (float) Math.min(45.0, Math.max(5.0, dy * 0.8));
+            mc.player.setYaw(stepAngle(mc.player.getYaw(),
+                yawTo(flightTargetX, flightTargetZ), 6.0f));
+            mc.player.setPitch(pitch);
+            mc.options.forwardKey.setPressed(true);
+        } else {
+            releaseForward();
+            mc.player.setPitch(0.0f);
+            if (slowFallBoostSetting.get() && stateTicks % 2 == 0) {
+                mc.player.setYaw(mc.player.getYaw() + 180.0f);
+            }
         }
+    }
+
+    /** 滑翔意外中断：前 20 刻每 4 刻重发，之后抬头 + 烟花恢复，200 刻不行就停。 */
+    private void handleGlideFailure() {
+        glideFailTicks++;
+        if (glideFailTicks <= 20) {
+            if (glideFailTicks % 4 == 0) sendStartGliding();
+            return;
+        }
+        glideRecovering = true;
+        glideRecoverTicks++;
+        mc.player.setPitch(-30.0f);
+        mc.options.forwardKey.setPressed(true);
+        if (glideRecoverTicks % 10 == 0) sendStartGliding();
+        if (glideRecoverTicks % 40 == 0) useFirework();
+        if (glideRecoverTicks > 200) {
+            pause("滑翔 200 刻仍无法恢复，判定服务端拒绝起飞");
+        }
+    }
+
+    /** 起飞点头顶 3×3×4 是否全空气。 */
+    private boolean canTakeOffHere() {
+        BlockPos p = mc.player.getBlockPos();
+        for (int dy = 1; dy <= 4; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (!mc.world.getBlockState(p.add(dx, dy, dz)).isAir()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** 半径 8 内找一个头顶开阔的落脚点。 */
+    private BlockPos findTakeoffSpot() {
+        BlockPos center = mc.player.getBlockPos();
+        for (int r = 1; r <= 8; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;
+                    int x = center.getX() + dx;
+                    int z = center.getZ() + dz;
+                    if (!isChunkLoaded(x, z)) continue;
+                    BlockPos ground = new BlockPos(x, surfaceY(x, z), z);
+                    if (!mc.world.getBlockState(ground).isSolidBlock(mc.world, ground)) continue;
+                    if (!canTakeOffAt(ground.up())) continue;
+                    return ground.up();
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean canTakeOffAt(BlockPos feet) {
+        for (int dy = 0; dy <= 3; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (!mc.world.getBlockState(feet.add(dx, dy, dz)).isAir()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** 烟花不够了：改降落到最近的安全地面。 */
+    private void enterLowFuelLanding() {
+        BlockPos safe = findSafeLandingSpot();
+        if (safe != null) {
+            flightTargetX = safe.getX() + 0.5;
+            flightTargetZ = safe.getZ() + 0.5;
+            landingTargetY = safe.getY();
+        } else {
+            landingTargetY = surfaceY((int) flightTargetX, (int) flightTargetZ);
+        }
+        flightPhase = FlightPhase.LANDING;
+        landingRecover = false;
+        stateTicks = 0;
+        statusText = "烟花不足，就近迫降";
     }
 
     private void onArrive() {
@@ -1184,7 +1382,7 @@ public class FOEnchantedGoldCollector extends Module {
     /** 到目标落地后：先存盒、再修鞘翅、最后补给；都不需要就 0 tick 跳过。 */
     private void onPrepAhead() {
         if (stateTicks == 1) {
-            int packThreshold = Math.max(1, targetApplesSetting.get());
+            int packThreshold = Math.max(1, packThresholdSetting.get());
             boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
             boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
             boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
@@ -1491,10 +1689,10 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        // 出井：到井口地表 +2 就算完成
-        if (mc.player.getY() >= shaftTopY + 2) {
+        // 出井：井口地表 +6 格才算真正出来，之后由飞行段 -85° 继续顶到拉升高度
+        if (mc.player.getY() >= shaftTopY + 6) {
             releaseForward();
-            int packThreshold = Math.max(1, targetApplesSetting.get());
+            int packThreshold = Math.max(1, packThresholdSetting.get());
             boolean needStop = autoPackSetting.get() && countApples() >= packThreshold;
             needStop |= autoRepairSetting.get() && elytraNeedsRepair();
             needStop |= autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get();
@@ -1566,16 +1764,7 @@ public class FOEnchantedGoldCollector extends Module {
     private void onSurfaceStop() {
         if (!mc.player.isOnGround()) {
             if (landForStop) {
-                // 刚出井还在井口正上方：先平飞几格再下降，否则会直坠回 1×1 竖井
-                double dx = shaftColumn == null ? 99 : mc.player.getX() - (shaftColumn.getX() + 0.5);
-                double dz = shaftColumn == null ? 99 : mc.player.getZ() - (shaftColumn.getZ() + 0.5);
-                boolean nearMouth = Math.abs(dx) < 8 && Math.abs(dz) < 8;
-                if (nearMouth && mc.player.isGliding()) {
-                    mc.player.setPitch(5.0f);
-                    mc.options.forwardKey.setPressed(true);
-                    return;
-                }
-                // 井口上方缓降：小俯角 + 前进，别从井口直坠
+                // 出井时已经离井口 6 格以上，小俯角前进缓降即可
                 mc.player.setPitch(15.0f);
                 mc.options.forwardKey.setPressed(true);
             }
@@ -1608,7 +1797,7 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        int packThreshold = Math.max(1, targetApplesSetting.get());
+        int packThreshold = Math.max(1, packThresholdSetting.get());
         boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
         boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
             || countFireworks() < minFireworksSetting.get()
@@ -1636,7 +1825,7 @@ public class FOEnchantedGoldCollector extends Module {
         afterStopState = State.NEXT;
         if (totalCollected >= targetApplesSetting.get()) {
             if (autoPackSetting.get() && countApples() > 0
-                && countApples() >= Math.max(1, targetApplesSetting.get()) && !landForStop) {
+                && countApples() >= Math.max(1, packThresholdSetting.get()) && !landForStop) {
                 landForStop = true;
                 afterStopState = State.DONE;
                 state = State.SURFACE_STOP;
@@ -2272,7 +2461,7 @@ public class FOEnchantedGoldCollector extends Module {
         }
         // 一个潜影盒可能装不下全部苹果（例如盒里已有杂物），再停靠一次把剩下的装完；
         // 但这次一个都没装进去就别再循环了，否则会无限「继续装盒」
-        if (autoPackSetting.get() && countApples() >= Math.max(1, targetApplesSetting.get())
+        if (autoPackSetting.get() && countApples() >= Math.max(1, packThresholdSetting.get())
             && countApples() < stationPackBefore) {
             state = State.SURFACE_STOP;
             stateTicks = 0;
@@ -3013,12 +3202,15 @@ public class FOEnchantedGoldCollector extends Module {
     private void rotateTo(float yaw, float pitch) {
         float p = pitch;
         if (pitchSmoothSetting.get()) {
-            smoothedPitch = stepAngle(smoothedPitch, pitch, 12.0f);
+            float step = pitch < smoothedPitch
+                ? pitchRotateUpSetting.get().floatValue()
+                : pitchRotateDownSetting.get().floatValue();
+            smoothedPitch = stepAngle(smoothedPitch, pitch, step);
             p = smoothedPitch;
         } else {
             smoothedPitch = pitch;
         }
-        mc.player.setYaw(yaw);
+        mc.player.setYaw(stepAngle(mc.player.getYaw(), yaw, 6.0f));
         mc.player.setPitch(p);
     }
 
