@@ -267,6 +267,20 @@ public class FOEnchantedGoldCollector extends Module {
     private int stationApplesBefore;
     private int lootApplesBefore = -1;
     private int lootCooldown;
+
+    /** 放置多候选：一次算好 8 个点，每个点点 2 次不中换下一个。 */
+    private List<BlockPos> placeCandidates = new ArrayList<>();
+    private int placeIndex;
+    private int placeClickAttempts;
+    private int lastPlaceClick;
+    /** 打开箱子前是否已经把「站在箱子上」这件事处理掉了。 */
+    private boolean standingMovedOff;
+    private int ecOpenFailCount;
+    /** 装盒卡槽检测：同一个背包槽连续这么久还被点，说明盒子其实满了。 */
+    private int fillStuckSlot = -1;
+    private int fillStuckTicks;
+    /** 补给时连续这么久没取到东西，就判定拿完了。 */
+    private int supplyEmptyTicks;
     private ItemStack stationOriginalOffhand = ItemStack.EMPTY;
 
     private WLabel statusStage;
@@ -1946,7 +1960,7 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
         if (stationTicks == 1) {
-            BlockPos existing = findNearbyEnderChest(5);
+            BlockPos existing = ecOpenFailCount == 0 ? findNearbyEnderChest(5) : null;
             if (existing != null) {
                 stationEcPos = existing;
                 stationEcOwned = false;
@@ -1976,41 +1990,82 @@ public class FOEnchantedGoldCollector extends Module {
                 return;
             }
             selectItem(ecSlot);
-            BlockPos spot = findPlaceSpot(null);
-            if (spot == null) {
+            placeCandidates = findPlaceSpots(null, 8);
+            if (placeCandidates.isEmpty()) {
                 pause("附近找不到放置末影箱的位置");
                 return;
             }
-            stationEcPos = spot;
-            stationEcOwned = true;
+            placeIndex = 0;
+            placeClickAttempts = 0;
+            lastPlaceClick = -100;
+            stationEcPos = null;
         }
-        if (stationEcPos == null) {
-            pause("末影箱位置丢失");
-            return;
-        }
-        if (mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot()).getItem() != Items.ENDER_CHEST) {
-            int ec = findItemSlot(Items.ENDER_CHEST);
-            if (ec == -1) {
-                pause("末影箱不在背包里");
-                return;
-            }
-            selectItem(ec);
-        }
-        if (mc.world.getBlockState(stationEcPos).getBlock() == Blocks.ENDER_CHEST) {
+        if (stationEcPos != null && mc.world.getBlockState(stationEcPos).getBlock() == Blocks.ENDER_CHEST) {
+            PathManagers.get().stop();
             setStationStep(StationStep.OPEN_EC);
             return;
         }
-        if (stationTicks % 12 == 0) {
-            InteractionUtils.interactBlockSafely(stationEcPos.down(), Direction.UP);
+        if (stationTicks >= 4 && stationTicks - lastPlaceClick >= 8) {
+            if (placeIndex >= placeCandidates.size()) {
+                pause("末影箱放置失败（所有候选位置都试过了）");
+                return;
+            }
+            BlockPos spot = placeCandidates.get(placeIndex);
+            if (mc.player.squaredDistanceTo(spot.getX() + 0.5, spot.getY() + 0.5, spot.getZ() + 0.5) > 16.0) {
+                if (!PathManagers.get().isPathing()) {
+                    PathManagers.get().moveTo(spot, false);
+                }
+                return;
+            }
+            if (mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot()).getItem() != Items.ENDER_CHEST) {
+                int ec = findItemSlot(Items.ENDER_CHEST);
+                if (ec == -1) {
+                    pause("末影箱不在背包里");
+                    return;
+                }
+                selectItem(ec);
+                return;
+            }
+            lastPlaceClick = stationTicks;
+            placeClickAttempts++;
+            stationEcPos = spot;
+            InteractionUtils.interactBlockSafely(spot.down(), Direction.UP);
+            if (placeClickAttempts >= 2) {
+                placeIndex++;
+                placeClickAttempts = 0;
+            }
         }
-        if (stationTicks > 20 * 12) {
-            pause("末影箱放置失败");
+        if (stationTicks > 80) {
+            pause("末影箱放置失败（超时）");
         }
     }
 
     private void stationOpenEc() {
+        if (stationTicks == 1) {
+            if (stationEcPos == null || mc.world.getBlockState(stationEcPos).getBlock() != Blocks.ENDER_CHEST) {
+                setStationStep(StationStep.PLACE_EC);
+                return;
+            }
+            standingMovedOff = false;
+            stationRetry = 0;
+        }
+        if (!standingMovedOff && isStandingOnBlock(stationEcPos)) {
+            BlockPos off = findStandOffSpot(stationEcPos);
+            if (off != null && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveTo(off, false);
+            }
+            if (isStandingOnBlock(stationEcPos)) {
+                return;
+            }
+            standingMovedOff = true;
+        }
+        if (stationRetry < 5 && stationTicks == 1 + stationRetry * 20) {
+            BlockClicker.clickBlockFacingPlayer(stationEcPos, true, Hand.MAIN_HAND);
+            stationRetry++;
+        }
         if (isContainerOpen()) {
-            if (stationTicks < 4) return;
+            if (stationTicks < 3) return;
+            ecOpenFailCount = 0;
             if (stationNeedPack) {
                 setStationStep(StationStep.TAKE_BOX);
             } else {
@@ -2018,15 +2073,16 @@ public class FOEnchantedGoldCollector extends Module {
             }
             return;
         }
-        if (stationEcPos == null || mc.world.getBlockState(stationEcPos).getBlock() != Blocks.ENDER_CHEST) {
+        if (stationTicks > 93) {
+            if (isStandingOnBlock(stationEcPos)) {
+                standingMovedOff = true;
+                stationTicks = 1;
+                return;
+            }
+            warning("打开末影箱失败（已试 5 次），换地方重新放。");
+            ecOpenFailCount++;
+            stationEcPos = null;
             setStationStep(StationStep.PLACE_EC);
-            return;
-        }
-        if (stationTicks % 15 == 1) {
-            BlockClicker.clickBlockFacingPlayer(stationEcPos, true, Hand.MAIN_HAND);
-        }
-        if (stationTicks > 20 * 10) {
-            pause("打开末影箱失败");
         }
     }
 
@@ -2117,53 +2173,93 @@ public class FOEnchantedGoldCollector extends Module {
         }
         if (stationTicks == 1) {
             selectItem(stationBoxSlot);
-            BlockPos spot = findPlaceSpot(stationEcPos);
-            if (spot == null) {
+            // 盒子不能放在末影箱正上方，其它位置都可以试
+            placeCandidates = findPlaceSpots(stationEcPos, 8);
+            if (placeCandidates.isEmpty()) {
                 pause("找不到放置潜影盒的位置");
                 return;
             }
-            stationBoxPos = spot;
+            placeIndex = 0;
+            placeClickAttempts = 0;
+            lastPlaceClick = -100;
+            stationBoxPos = null;
         }
-        if (stationBoxPos == null) {
-            pause("潜影盒位置丢失");
-            return;
-        }
-        if (!isShulkerBox(mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot()))) {
-            int box = stationBoxTakeMode ? findShulkerSlot() : findEmptyShulkerSlot();
-            if (box == -1) {
-                pause(stationBoxTakeMode ? "补给潜影盒不在背包里" : "空潜影盒不在背包里");
-                return;
-            }
-            selectItem(box);
-        }
-        if (mc.world.getBlockState(stationBoxPos).getBlock() instanceof ShulkerBoxBlock) {
+        if (stationBoxPos != null && mc.world.getBlockState(stationBoxPos).getBlock() instanceof ShulkerBoxBlock) {
+            PathManagers.get().stop();
             setStationStep(StationStep.OPEN_BOX);
             return;
         }
-        if (stationTicks % 12 == 0) {
-            InteractionUtils.interactBlockSafely(stationBoxPos.down(), Direction.UP);
+        if (stationTicks >= 4 && stationTicks - lastPlaceClick >= 8) {
+            if (placeIndex >= placeCandidates.size()) {
+                pause("潜影盒放置失败（所有候选位置都试过了）");
+                return;
+            }
+            BlockPos spot = placeCandidates.get(placeIndex);
+            if (mc.player.squaredDistanceTo(spot.getX() + 0.5, spot.getY() + 0.5, spot.getZ() + 0.5) > 16.0) {
+                if (!PathManagers.get().isPathing()) {
+                    PathManagers.get().moveTo(spot, false);
+                }
+                return;
+            }
+            if (!isShulkerBox(mc.player.getInventory().getStack(mc.player.getInventory().getSelectedSlot()))) {
+                int box = stationBoxTakeMode ? findShulkerSlot() : findEmptyShulkerSlot();
+                if (box == -1) {
+                    pause(stationBoxTakeMode ? "补给潜影盒不在背包里" : "空潜影盒不在背包里");
+                    return;
+                }
+                selectItem(box);
+                return;
+            }
+            lastPlaceClick = stationTicks;
+            placeClickAttempts++;
+            stationBoxPos = spot;
+            InteractionUtils.interactBlockSafely(spot.down(), Direction.UP);
+            if (placeClickAttempts >= 2) {
+                placeIndex++;
+                placeClickAttempts = 0;
+            }
         }
-        if (stationTicks > 20 * 12) {
-            pause("潜影盒放置失败");
+        if (stationTicks > 80) {
+            pause("潜影盒放置失败（超时）");
         }
     }
 
     private void stationOpenBox() {
+        if (stationTicks == 1) {
+            if (stationBoxPos == null || !(mc.world.getBlockState(stationBoxPos).getBlock() instanceof ShulkerBoxBlock)) {
+                setStationStep(StationStep.PLACE_BOX);
+                return;
+            }
+            standingMovedOff = false;
+            stationRetry = 0;
+        }
+        if (!standingMovedOff && isStandingOnBlock(stationBoxPos)) {
+            BlockPos off = findStandOffSpot(stationBoxPos);
+            if (off != null && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveTo(off, false);
+            }
+            if (isStandingOnBlock(stationBoxPos)) {
+                return;
+            }
+            standingMovedOff = true;
+        }
+        if (stationRetry < 5 && stationTicks == 1 + stationRetry * 20) {
+            BlockClicker.clickBlockFacingPlayer(stationBoxPos, true, Hand.MAIN_HAND);
+            stationRetry++;
+        }
         if (isContainerOpen() && mc.player.currentScreenHandler instanceof ShulkerBoxScreenHandler) {
-            if (stationTicks < 4) return;
+            if (stationTicks < 3) return;
             stationApplesBefore = countApples();
             setStationStep(StationStep.FILL_BOX);
             return;
         }
-        if (stationBoxPos == null || !(mc.world.getBlockState(stationBoxPos).getBlock() instanceof ShulkerBoxBlock)) {
+        if (stationTicks > 93) {
+            if (isStandingOnBlock(stationBoxPos)) {
+                standingMovedOff = true;
+                stationTicks = 1;
+                return;
+            }
             setStationStep(StationStep.PLACE_BOX);
-            return;
-        }
-        if (stationTicks % 15 == 1) {
-            BlockClicker.clickBlockFacingPlayer(stationBoxPos, true, Hand.MAIN_HAND);
-        }
-        if (stationTicks > 20 * 10) {
-            pause("打开潜影盒失败");
         }
     }
 
@@ -2188,17 +2284,34 @@ public class FOEnchantedGoldCollector extends Module {
         }
         int playerFirst = rows * 9;
         int playerLast = playerFirst + 35;
+        int target = -1;
         for (int i = playerFirst; i <= playerLast; i++) {
             ItemStack stack = sh.getSlot(i).getStack();
             if (stack.isEmpty() || stack.getItem() != Items.ENCHANTED_GOLDEN_APPLE) continue;
-            mc.interactionManager.clickSlot(sh.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-            stationRetry++;
-            if (stationRetry > 20 * 100) {
-                pause("装入潜影盒超时");
-            }
+            target = i;
+            break;
+        }
+        if (target == -1) {
+            setStationStep(StationStep.CLOSE_BOX);
             return;
         }
-        setStationStep(StationStep.CLOSE_BOX);
+        // 同一个槽连续 20 tick 还点得动 → 说明盒子满了，装不进去
+        if (target == fillStuckSlot) {
+            fillStuckTicks++;
+        } else {
+            fillStuckSlot = target;
+            fillStuckTicks = 0;
+        }
+        if (fillStuckTicks >= 20) {
+            warning("潜影盒装不进去，判定为已满。");
+            setStationStep(StationStep.CLOSE_BOX);
+            return;
+        }
+        mc.interactionManager.clickSlot(sh.syncId, target, 0, SlotActionType.QUICK_MOVE, mc.player);
+        stationRetry++;
+        if (stationRetry > 20 * 100) {
+            pause("装入潜影盒超时");
+        }
     }
 
     private void stationCloseBox() {
@@ -2226,16 +2339,20 @@ public class FOEnchantedGoldCollector extends Module {
         BlockState st = mc.world.getBlockState(stationBoxPos);
         if (!(st.getBlock() instanceof ShulkerBoxBlock)) {
             int slot = stationBoxTakeMode ? findShulkerSlot() : findShulkerWithApples();
-            if (slot == -1) {
-                // 可能还在掉落物状态，等一等再找
-                if (stationTicks > 20 * 5) {
-                    pause("潜影盒挖掉后没有捡回来（需要精准采集镐）");
-                }
+            if (slot != -1) {
+                stationBoxSlot = slot;
+                stationSupplyBoxPending = false;
+                setStationStep(stationFromEc ? StationStep.REOPEN_EC : StationStep.FINISH);
                 return;
             }
-            stationBoxSlot = slot;
-            stationSupplyBoxPending = false;
-            setStationStep(stationFromEc ? StationStep.REOPEN_EC : StationStep.FINISH);
+            // 方块没了就是掉落物阶段：等它落地，每 20 tick 走过去捡
+            statusText = "等潜影盒掉落物";
+            if (stationTicks % 20 == 0 && !PathManagers.get().isPathing()) {
+                PathManagers.get().moveTo(stationBoxPos, false);
+            }
+            if (stationTicks > 200) {
+                pause("潜影盒挖掉后没有捡回来（需要精准采集镐）");
+            }
             return;
         }
         int silk = findSilkTouchPickaxeSlot();
@@ -2341,17 +2458,29 @@ public class FOEnchantedGoldCollector extends Module {
             setStationStep(StationStep.OPEN_EC);
             return;
         }
+        // 背包塞满时 QUICK_MOVE 会把东西丢地上，先腾一个格子
+        if (isInventoryFull() && dropJunkForSpace(sh, rows)) {
+            supplyEmptyTicks = 0;
+            return;
+        }
         boolean needBottles = countBottles() < targetBottlesSetting.get();
         boolean needFireworks = countFireworks() < minFireworksSetting.get() * 2;
         boolean needFood = !hasEnoughFood();
+        int target = -1;
         for (int i = 0; i < rows * 9; i++) {
             ItemStack stack = sh.getSlot(i).getStack();
             if (stack.isEmpty()) continue;
             boolean take = (needBottles && stack.getItem() == Items.EXPERIENCE_BOTTLE)
                 || (needFireworks && stack.getItem() == Items.FIREWORK_ROCKET)
                 || (isFood(stack) && !hasEnoughFood());
-            if (!take) continue;
-            mc.interactionManager.clickSlot(sh.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+            if (take) {
+                target = i;
+                break;
+            }
+        }
+        if (target != -1) {
+            mc.interactionManager.clickSlot(sh.syncId, target, 0, SlotActionType.QUICK_MOVE, mc.player);
+            supplyEmptyTicks = 0;
             stationRetry++;
             if (stationRetry > 20 * 60) {
                 pause("从末影箱补给超时");
@@ -2367,8 +2496,31 @@ public class FOEnchantedGoldCollector extends Module {
             setStationStep(StationStep.CLOSE_EC);
             return;
         }
-        mc.player.closeHandledScreen();
-        setStationStep(stationFromEc ? StationStep.MINE_EC : StationStep.FINISH);
+        supplyEmptyTicks++;
+        if (supplyEmptyTicks >= 10) {
+            mc.player.closeHandledScreen();
+            setStationStep(stationFromEc ? StationStep.MINE_EC : StationStep.FINISH);
+        }
+    }
+
+    /** 从背包丢一件杂物腾位；返回 true 表示丢了一件。 */
+    private boolean dropJunkForSpace(ScreenHandler sh, int rows) {
+        int playerFirst = rows * 9;
+        for (int i = playerFirst; i < playerFirst + 36; i++) {
+            ItemStack st = sh.getSlot(i).getStack();
+            if (st.isEmpty()) continue;
+            if (st.getItem() == Items.ENCHANTED_GOLDEN_APPLE) continue;
+            if (st.getItem() == Items.FIREWORK_ROCKET) continue;
+            if (st.getItem() == Items.EXPERIENCE_BOTTLE) continue;
+            if (st.getItem() == Items.ENDER_CHEST) continue;
+            if (st.getItem() == Items.ELYTRA) continue;
+            if (isPickaxe(st.getItem())) continue;
+            if (isShulkerBox(st)) continue;
+            if (isFood(st)) continue;
+            mc.interactionManager.clickSlot(sh.syncId, i, 0, SlotActionType.THROW, mc.player);
+            return true;
+        }
+        return false;
     }
 
     /** 从补给潜影盒里取经验瓶/烟花/食物。 */
@@ -2417,9 +2569,14 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
         if (stationEcPos == null || mc.world.getBlockState(stationEcPos).getBlock() != Blocks.ENDER_CHEST) {
-            // 挖掉后等一下自动拾取，别让末影箱掉在地上就结束
-            if (findItemSlot(Items.ENDER_CHEST) == -1 && stationTicks < 100) {
-                statusText = "等待捡回末影箱";
+            if (findItemSlot(Items.ENDER_CHEST) == -1) {
+                statusText = "等末影箱掉落物";
+                if (stationTicks % 20 == 0 && stationEcPos != null && !PathManagers.get().isPathing()) {
+                    PathManagers.get().moveTo(stationEcPos, false);
+                }
+                if (stationTicks > 200) {
+                    pause("末影箱挖掉后没有捡回来（需要精准采集镐）");
+                }
                 return;
             }
             setStationStep(StationStep.FINISH);
@@ -3275,6 +3432,12 @@ public class FOEnchantedGoldCollector extends Module {
     }
 
     private BlockPos findPlaceSpot(BlockPos exclude) {
+        List<BlockPos> spots = findPlaceSpots(exclude, 8);
+        return spots.isEmpty() ? null : spots.get(0);
+    }
+
+    /** 一次性列出附近所有可放置点，按距离排序。 */
+    private List<BlockPos> findPlaceSpots(BlockPos exclude, int limit) {
         BlockPos center = mc.player.getBlockPos();
         List<BlockPos> spots = new ArrayList<>();
         for (int dx = -3; dx <= 3; dx++) {
@@ -3292,7 +3455,31 @@ public class FOEnchantedGoldCollector extends Module {
         }
         spots.sort(Comparator.comparingDouble(p ->
             mc.player.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
-        return spots.isEmpty() ? null : spots.get(0);
+        if (spots.size() > limit) {
+            return new ArrayList<>(spots.subList(0, limit));
+        }
+        return spots;
+    }
+
+    private boolean isStandingOnBlock(BlockPos pos) {
+        if (pos == null) return false;
+        BlockPos feet = mc.player.getBlockPos();
+        return feet.getX() == pos.getX() && feet.getY() == pos.getY() + 1 && feet.getZ() == pos.getZ();
+    }
+
+    private BlockPos findStandOffSpot(BlockPos pos) {
+        if (pos == null) return null;
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                m.set(pos.getX() + dx, pos.getY() + 1, pos.getZ() + dz);
+                if (!mc.world.getBlockState(m).isReplaceable()) continue;
+                if (mc.world.getBlockState(m.down()).isReplaceable()) continue;
+                return m.toImmutable();
+            }
+        }
+        return null;
     }
 
     private BlockPos findNearbyEnderChest(int radius) {
