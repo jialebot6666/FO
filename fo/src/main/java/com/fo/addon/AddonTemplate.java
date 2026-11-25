@@ -11,6 +11,7 @@ import com.fo.addon.modules.AutoTrash;
 import com.fo.addon.modules.AutoTree;
 import com.fo.addon.modules.ElytraCollector;
 import com.fo.addon.modules.FOEnchantedGoldCollector;
+import com.fo.addon.modules.FOHellFlight;
 import com.fo.addon.modules.FOKillAura;
 import com.fo.addon.modules.FOVaultEsp;
 import com.fo.addon.modules.FOVaultLoot;
@@ -170,6 +171,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new com.fo.addon.modules.FOEatLift());
         Modules.get().add(new FOVaultEsp());
         Modules.get().add(new FOVaultLoot());
+        Modules.get().add(new FOHellFlight());
     }
 
     @Override

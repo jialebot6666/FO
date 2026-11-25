@@ -5,7 +5,11 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "ThreeCNametagsMixin",
-    "VaultLootPacketMixin"
+    "VaultLootPacketMixin",
+    "HellFlightPlayerTravelMixin",
+    "HellFlightClientPlayerTickMixin",
+    "HellFlightFireworkMixin",
+    "HellFlightTimerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
