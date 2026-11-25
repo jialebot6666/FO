@@ -41,10 +41,24 @@ public final class AncientChestStore {
     /** 两者都有。 */
     public static final String LABEL_BOTH = "两者";
 
-    private static final int FORMAT_VERSION = 3;
+    private static final int FORMAT_VERSION = 4;
 
-    /** 一个目标箱子。{@code label} 取 {@link #LABEL_GOLD} / {@link #LABEL_SWIFT} / {@link #LABEL_BOTH}。 */
-    public record Mark(int x, int y, int z, String label) {
+    /**
+     * 一个目标箱子。{@code label} 取 {@link #LABEL_GOLD} / {@link #LABEL_SWIFT} / {@link #LABEL_BOTH}。
+     *
+     * <p>v4 起带 {@code goldCount}：搜索掷骰算出的附魔金苹果实际个数。
+     * 0 表示「未知」（老存档 / 旧格式文件读不到），不是「真的一个都没有」。
+     */
+    public record Mark(int x, int y, int z, String label, int goldCount) {
+        /** 兼容旧调用：数量未知，按 0 处理。 */
+        public Mark(int x, int y, int z, String label) {
+            this(x, y, z, label, 0);
+        }
+
+        /** 是否已知箱内附魔金个数。 */
+        public boolean goldCountKnown() {
+            return goldCount > 0;
+        }
     }
 
     private final Map<String, List<Mark>> byScope = new LinkedHashMap<>();
@@ -76,7 +90,8 @@ public final class AncientChestStore {
         for (int i = 0; i < list.size(); i++) {
             Mark old = list.get(i);
             if (old.x() == mark.x() && old.z() == mark.z()) {
-                if (old.y() == mark.y() && old.label().equals(mark.label())) return false;
+                if (old.y() == mark.y() && old.label().equals(mark.label())
+                    && old.goldCount() == mark.goldCount()) return false;
                 list.set(i, mark);
                 return false;
             }
@@ -206,7 +221,8 @@ public final class AncientChestStore {
                     sb.append("{\"x\":").append(m.x())
                       .append(",\"y\":").append(m.y())
                       .append(",\"z\":").append(m.z())
-                      .append(",\"label\":\"").append(escape(m.label())).append("\"}");
+                      .append(",\"label\":\"").append(escape(m.label()))
+                      .append("\",\"g\":").append(m.goldCount()).append('}');
                 }
             }
             sb.append("],\"opened\":[");
@@ -278,7 +294,8 @@ public final class AncientChestStore {
             Map<String, Object> m = (Map<String, Object>) raw;
             String label = m.get("label") instanceof String s ? s : LABEL_GOLD;
             store.add(scope, new Mark(
-                intOf(m.get("x")), intOf(m.get("y")), intOf(m.get("z")), label));
+                intOf(m.get("x")), intOf(m.get("y")), intOf(m.get("z")), label,
+                Math.max(0, intOf(m.get("g")))));
         }
     }
 

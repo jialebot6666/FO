@@ -4,12 +4,15 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.ancient.core.AncientChestStore;
 import com.fo.addon.ancient.core.EnchantedGoldCityLogic;
 import com.fo.addon.ancient.core.EnchantedGoldStore;
+import com.fo.addon.ancient.core.FatChestLogic;
+import com.fo.addon.ancient.core.FlightNavLogic;
 import com.fo.addon.ancient.core.FluidColumnLogic;
 import com.fo.addon.ancient.core.GearRepairLogic;
 import com.fo.addon.ancient.core.GearSupplyLogic;
 import com.fo.addon.ancient.core.RepairSessionLogic;
 import com.fo.addon.ancient.core.ShaftColumnLogic;
 import com.fo.addon.ancient.core.ShaftFluidLogic;
+import com.fo.addon.ancient.core.ShaftPrecheckLogic;
 import com.fo.addon.ancient.core.SurfaceStopLogic;
 import com.fo.addon.ancient.modules.FOAncientCitySearch;
 import com.fo.addon.pathing.PathManagers;
@@ -34,6 +37,7 @@ import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.block.AmethystClusterBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -78,12 +82,16 @@ public class FOEnchantedGoldCollector extends Module {
 
     /** 主状态机。 */
     private enum State {
-        IDLE, PREPARE, SELECT_CITY, FLY, ARRIVE, SHAFT_APPROACH, SHAFT_DIG, TUNNEL,
-        LOOT, ASCEND, SURFACE_STOP, STATION, REPAIR, NEXT, DONE, PAUSE
+        IDLE, PREPARE, SELECT_CITY, FLY, ARRIVE, PREP_AHEAD,
+        SHAFT_PRECHECK, SHAFT_DIG, LOOT, ASCEND, SURFACE_STOP,
+        STATION, REPAIR, NEXT, DONE, PAUSE
     }
 
-    /** 飞行子阶段（p40）。 */
-    private enum FlightPhase { TAKEOFF, CLIMB, CRUISE, DESCEND }
+    /** 飞行子阶段。 */
+    private enum FlightPhase { TAKEOFF, CLIMB, CRUISE, APPROACH, TERMINAL }
+
+    /** 升井子阶段：对中 → 起跳 → 滑翔上升。 */
+    private enum AscendPhase { CENTER, LAUNCH, GLIDE }
 
     /** 地表停靠的子步骤。 */
     private enum StationStep {
@@ -130,13 +138,14 @@ public class FOEnchantedGoldCollector extends Module {
     private final Setting<Double> fireworkIntervalSetting;
     private final Setting<Boolean> pitchSmoothSetting;
 
-    private final Setting<Integer> shaftMinOffsetSetting;
-    private final Setting<Integer> shaftMaxOffsetSetting;
     private final Setting<Integer> fluidLookaheadSetting;
     private final Setting<Boolean> blacklistOnFluidSetting;
     private final Setting<Boolean> abandonUnderwaterSetting;
-    private final Setting<Integer> shaftReuseDistanceSetting;
     private final Setting<Integer> wardenDistanceSetting;
+    /** 终端螺旋的起始半径（格）。 */
+    private final Setting<Integer> spiralRadiusSetting;
+    /** 升井时竖直速度低于此值就补烟花。 */
+    private final Setting<Double> ascendThrustSetting;
 
     private final Setting<Boolean> autoPackSetting;
     private final Setting<StorageMode> storageModeSetting;
@@ -188,19 +197,37 @@ public class FOEnchantedGoldCollector extends Module {
     private int shaftTopY;
     private int shaftChestY;
     private int shaftDigY;
-    private int tunnelStep;
-    private Direction tunnelDir;
     private boolean needRepairAfterAscent;
     private boolean pauseAfterAscent;
     private boolean surfaceEvaluated;
 
+    /** 井道 5 列预检：每个箱子只做一次。 */
+    private boolean precheckDone;
+    private ShaftPrecheckLogic.Verdict precheckVerdict;
+
+    /** 升井子阶段与连发计数。 */
+    private AscendPhase ascendPhase = AscendPhase.CENTER;
+    private int ascendBurst;
+    private int ascendTicks;
+
     private FlightPhase flightPhase = FlightPhase.TAKEOFF;
+    private FlightNavLogic.Layer flightLayer = FlightNavLogic.Layer.CRUISE;
     private float smoothedPitch;
     private int fireworkCooldown;
     private int landingFailures;
     private int flightTicksTotal;
     private double flightTargetX;
     private double flightTargetZ;
+    private double lastTargetDistance = Double.MAX_VALUE;
+    private int growStreak;
+    private int terminalHalfTurns;
+    private double spiralStartRadius;
+
+    /** 升井后若需存盒/修复，先落地处理；不需要就空中直接转场。 */
+    private boolean landForStop;
+
+    /** 停靠/修复结束后要回到的状态：落地后处理回预检，升井后停靠回 NEXT。 */
+    private State afterStopState = State.NEXT;
 
     private StationStep stationStep = StationStep.NONE;
     private BlockPos stationEcPos;
@@ -210,6 +237,7 @@ public class FOEnchantedGoldCollector extends Module {
     private int stationBoxSlot = -1;
     private boolean stationNeedPack;
     private boolean stationNeedSupply;
+    private int stationPackBefore;
     private boolean stationFromEc;
     private boolean stationEcOwned;
     private boolean stationBoxTakeMode;
@@ -273,26 +301,42 @@ public class FOEnchantedGoldCollector extends Module {
 
         minHeightSetting = sgFlight.add(new IntSetting.Builder()
             .name("巡航最低高度")
-            .description("低于此高度改用抬头爬升（p40 默认 160）")
-            .defaultValue(160)
-            .min(-32).max(300)
-            .sliderMin(0).sliderMax(300)
+            .description("低于此高度改用抬头爬升；死守 230，再低就可能撞山")
+            .defaultValue(230)
+            .min(-32).max(320)
+            .sliderMin(0).sliderMax(320)
             .build());
 
         maxHeightSetting = sgFlight.add(new IntSetting.Builder()
             .name("巡航最高高度")
-            .description("高于此高度改用滑翔下降（p40 默认 220）")
-            .defaultValue(220)
+            .description("高于此高度改用滑翔下降；默认 300（世界顶 320）")
+            .defaultValue(300)
             .min(0).max(320)
             .sliderMin(0).sliderMax(320)
             .build());
 
         riseHeightSetting = sgFlight.add(new IntSetting.Builder()
             .name("提升高度")
-            .description("起飞后先爬到此高度再巡航（p40 默认 230）")
-            .defaultValue(230)
+            .description("起飞后先爬到此高度再巡航（默认 300）")
+            .defaultValue(300)
             .min(0).max(320)
             .sliderMin(0).sliderMax(320)
+            .build());
+
+        spiralRadiusSetting = sgFlight.add(new IntSetting.Builder()
+            .name("螺旋起始半径")
+            .description("终端盘旋下降的起始半径（格），每转半圈缩 2 格，最小 2")
+            .defaultValue(12)
+            .min(4).max(32)
+            .sliderMin(4).sliderMax(24)
+            .build());
+
+        ascendThrustSetting = sgFlight.add(new DoubleSetting.Builder()
+            .name("升井补烟花速度")
+            .description("竖井内垂直上升速度低于此值就补烟花（一次补 2 发）")
+            .defaultValue(0.3)
+            .min(0.0).max(1.5)
+            .sliderMin(0.0).sliderMax(1.0)
             .build());
 
         minFireworksSetting = sgFlight.add(new IntSetting.Builder()
@@ -325,22 +369,6 @@ public class FOEnchantedGoldCollector extends Module {
             .defaultValue(true)
             .build());
 
-        shaftMinOffsetSetting = sgShaft.add(new IntSetting.Builder()
-            .name("竖井最小偏移")
-            .description("竖井列离目标箱子的最小水平距离（格），绝不取箱子正上方")
-            .defaultValue(2)
-            .min(1).max(6)
-            .sliderMin(1).sliderMax(6)
-            .build());
-
-        shaftMaxOffsetSetting = sgShaft.add(new IntSetting.Builder()
-            .name("竖井最大偏移")
-            .description("竖井列离目标箱子的最大水平距离（格）")
-            .defaultValue(4)
-            .min(1).max(8)
-            .sliderMin(1).sliderMax(8)
-            .build());
-
         fluidLookaheadSetting = sgShaft.add(new IntSetting.Builder()
             .name("流体前瞻格数")
             .description("每下挖一格，额外向下检查多少格")
@@ -359,14 +387,6 @@ public class FOEnchantedGoldCollector extends Module {
             .name("水下古城自动放弃")
             .description("从城顶到地表整列被水淹时，整城拉黑放弃")
             .defaultValue(true)
-            .build());
-
-        shaftReuseDistanceSetting = sgShaft.add(new IntSetting.Builder()
-            .name("同城竖井复用距离")
-            .description("同城下一个箱子离上一口井不超过此距离时优先复用；0 表示关闭")
-            .defaultValue(32)
-            .min(0).max(128)
-            .sliderMin(0).sliderMax(128)
             .build());
 
         wardenDistanceSetting = sgShaft.add(new IntSetting.Builder()
@@ -421,8 +441,8 @@ public class FOEnchantedGoldCollector extends Module {
 
         repairTargetSetting = sgRepair.add(new DoubleSetting.Builder()
             .name("修复目标")
-            .description("修到此百分比以上停止投瓶")
-            .defaultValue(90.0)
+            .description("修到此百分比以上停止投瓶（默认 100：鞘翅低于 20% 就一次修满）")
+            .defaultValue(100.0)
             .min(30.0).max(100.0)
             .sliderMin(30.0).sliderMax(100.0)
             .build());
@@ -646,8 +666,8 @@ public class FOEnchantedGoldCollector extends Module {
         if (stageTimeoutSetting.get() > 0
             && stateTicks > stageTimeoutSetting.get() * 20
             && state != State.SELECT_CITY && state != State.FLY && state != State.ARRIVE
-            && state != State.SHAFT_DIG && state != State.TUNNEL
-            && state != State.SHAFT_APPROACH && state != State.LOOT
+            && state != State.PREP_AHEAD && state != State.SHAFT_PRECHECK
+            && state != State.SHAFT_DIG && state != State.LOOT
             && state != State.ASCEND && state != State.STATION && state != State.REPAIR) {
             pause("阶段 " + statusText + " 超时，已暂停");
             return;
@@ -659,9 +679,9 @@ public class FOEnchantedGoldCollector extends Module {
                 case SELECT_CITY -> onSelectCity();
                 case FLY -> onFly();
                 case ARRIVE -> onArrive();
-                case SHAFT_APPROACH -> onShaftApproach();
+                case PREP_AHEAD -> onPrepAhead();
+                case SHAFT_PRECHECK -> onShaftPrecheck();
                 case SHAFT_DIG -> onShaftDig();
-                case TUNNEL -> onTunnel();
                 case LOOT -> onLoot();
                 case ASCEND -> onAscend();
                 case SURFACE_STOP -> onSurfaceStop();
@@ -819,11 +839,14 @@ public class FOEnchantedGoldCollector extends Module {
         List<AncientChestStore.Mark> usable = EnchantedGoldCityLogic.filterTargets(currentCity.marks(), m ->
             !searchModule.isChestOpened(m.x(), m.z())
                 && !store.isChestBlacklisted(scope, m.x(), m.y(), m.z()));
-        usable.sort(Comparator.comparingDouble(m -> {
-            double dx = m.x() + 0.5 - mc.player.getX();
-            double dz = m.z() + 0.5 - mc.player.getZ();
-            return dx * dx + dz * dz;
-        }));
+        // 肥箱优先：已知附魔金个数多的先飞，数量未知的排最后；同档按距离
+        usable.sort(Comparator
+            .comparingInt(AncientChestStore.Mark::goldCount).reversed()
+            .thenComparingDouble(m -> {
+                double dx = m.x() + 0.5 - mc.player.getX();
+                double dz = m.z() + 0.5 - mc.player.getZ();
+                return dx * dx + dz * dz;
+            }));
         if (usable.isEmpty()) return false;
         currentChest = usable.get(0);
         return true;
@@ -864,15 +887,22 @@ public class FOEnchantedGoldCollector extends Module {
         PathManagers.get().setAllowBreak(true);
         flightTargetX = currentChest.x() + 0.5;
         flightTargetZ = currentChest.z() + 0.5;
-        flightPhase = FlightPhase.TAKEOFF;
+        // 刚出井就在滑翔：直接进爬升，不要在地面起跳
+        flightPhase = mc.player.isGliding() ? FlightPhase.CLIMB : FlightPhase.TAKEOFF;
+        flightLayer = FlightNavLogic.Layer.CRUISE;
+        lastTargetDistance = Double.MAX_VALUE;
+        growStreak = 0;
+        terminalHalfTurns = 0;
+        spiralStartRadius = 0;
         smoothedPitch = mc.player.getPitch();
         fireworkCooldown = 0;
         landingFailures = 0;
         flightTicksTotal = 0;
         state = State.FLY;
         stateTicks = 0;
-        statusText = "飞向古城";
-        info("目标城市已选定，本箱水平距离 " + (int) Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ)) + " 格。");
+        statusText = "飞向目标";
+        info("目标箱已选定，水平距离 "
+            + (int) Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ)) + " 格。");
     }
 
     private void onFly() {
@@ -881,22 +911,15 @@ public class FOEnchantedGoldCollector extends Module {
             pause("飞行超过 10 分钟仍未到达，已暂停");
             return;
         }
-        if (mc.player.isOnGround() && flightPhase == FlightPhase.DESCEND) {
-            releaseForward();
-            state = State.ARRIVE;
-            stateTicks = 0;
-            statusText = "到达检查";
-            return;
-        }
 
-        // 飞行途中每 20 tick 看一次鞘翅，低于安全线立即迫降
+        // 途中每 20 tick 看一次鞘翅与烟花
         if (stateTicks % 20 == 0) {
             ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
             if (chest.getItem() == Items.ELYTRA) {
                 if (GearRepairLogic.belowSafety(chest.getMaxDamage(), chest.getDamage(),
                     minSafeDurabilitySetting.get())) {
                     warning("鞘翅剩余耐久低于安全线，立即迫降。");
-                    flightPhase = FlightPhase.DESCEND;
+                    flightPhase = FlightPhase.TERMINAL;
                 } else if (GearRepairLogic.needsRepair(chest.getMaxDamage(), chest.getDamage(),
                     elytraThresholdSetting.get())) {
                     warning("鞘翅耐久低于修复阈值，降落后处理。");
@@ -905,11 +928,11 @@ public class FOEnchantedGoldCollector extends Module {
             }
             if (countFireworks() < 4) {
                 warning("烟花剩余 " + countFireworks() + " 发，提前降落。");
-                flightPhase = FlightPhase.DESCEND;
+                flightPhase = FlightPhase.TERMINAL;
             }
         }
 
-        // 撞山/被服务器打断后滑翔会中断：先尝试重新展开，别直接掉下去
+        // 撞山/被打断后滑翔中断：先尝试重新展开，别直接掉下去
         if (flightPhase != FlightPhase.TAKEOFF && !mc.player.isGliding() && !mc.player.isOnGround()) {
             if (stateTicks % 4 == 0) sendStartGliding();
             if (stateTicks % 20 == 0) useFirework();
@@ -922,7 +945,8 @@ public class FOEnchantedGoldCollector extends Module {
             case TAKEOFF -> flyTakeoff();
             case CLIMB -> flyClimb();
             case CRUISE -> flyCruise();
-            case DESCEND -> flyDescend();
+            case APPROACH -> flyApproach();
+            case TERMINAL -> flyTerminal();
         }
     }
 
@@ -950,7 +974,7 @@ public class FOEnchantedGoldCollector extends Module {
         rotateTo(yawTo(flightTargetX, flightTargetZ), -54.77f);
         mc.options.forwardKey.setPressed(true);
         if (fireworkCooldown > 0) fireworkCooldown--;
-        // 只按冷却投；不能写成「冷却到 0 或低于最低高度」——后者在低空会每 tick 投一发，瞬间烧完整组
+        // 只在冷却到 0 时投；不能写成「冷却到 0 或低于最低高度」，后者会在低空每 tick 投一发
         if (fireworkCooldown == 0) {
             useFirework();
             fireworkCooldown = fireworkTicks();
@@ -963,55 +987,115 @@ public class FOEnchantedGoldCollector extends Module {
     }
 
     private void flyCruise() {
-        double distSq = horizontalDistanceSq(flightTargetX, flightTargetZ);
-        rotateTo(yawTo(flightTargetX, flightTargetZ), flyPitch());
+        double dist = Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ));
+        rotateTo(yawTo(flightTargetX, flightTargetZ),
+            FlightNavLogic.cruisePitch(mc.player.getY(), minHeightSetting.get(), maxHeightSetting.get()));
         mc.options.forwardKey.setPressed(true);
+
         if (fireworkCooldown > 0) fireworkCooldown--;
-        if (mc.player.getY() < minHeightSetting.get() && fireworkCooldown == 0) {
+        double vx = mc.player.getVelocity().x;
+        double vz = mc.player.getVelocity().z;
+        double horizontalSpeed = Math.sqrt(vx * vx + vz * vz) * 20.0;
+        if (fireworkCooldown == 0
+            && (mc.player.getY() < minHeightSetting.get()
+                || FlightNavLogic.needsThrust(horizontalSpeed, 25.0))) {
             useFirework();
             fireworkCooldown = fireworkTicks();
         }
-        int targetSurface = surfaceY((int) flightTargetX, (int) flightTargetZ);
-        boolean targetLoaded = isChunkLoaded((int) flightTargetX, (int) flightTargetZ);
-        if (distSq <= 40 * 40 || (targetLoaded && mc.player.getY() < targetSurface + 8)) {
-            flightPhase = FlightPhase.DESCEND;
+
+        // 需要时插航向校正：横向偏差超过 20 格，yaw 强制重新对准目标
+        if (mc.player.getY() > minHeightSetting.get() && mc.player.getY() <= maxHeightSetting.get()
+            && dist > 600 && stateTicks % 40 == 0) {
+            rotateTo(yawTo(flightTargetX, flightTargetZ), 37.72f);
+        }
+
+        if (dist <= 120) {
+            flightPhase = FlightPhase.APPROACH;
             stateTicks = 0;
-            statusText = "降落";
+            statusText = "接近目标";
         }
     }
 
-    private float flyPitch() {
-        double y = mc.player.getY();
-        if (y < minHeightSetting.get()) return -54.77f;
-        if (y > maxHeightSetting.get()) return 30.0f;
-        return 37.72f;
+    private void flyApproach() {
+        double dist = Math.sqrt(horizontalDistanceSq(flightTargetX, flightTargetZ));
+        boolean loaded = isChunkLoaded((int) flightTargetX, (int) flightTargetZ);
+        // 区块没加载就不下降：用箱子 Y+80 估一个目标高度
+        int targetY = loaded
+            ? surfaceY((int) flightTargetX, (int) flightTargetZ) + 40
+            : (int) Math.max(minHeightSetting.get(), currentChest.y() + 80);
+        double dy = mc.player.getY() - targetY;
+        float pitch = (float) Math.min(45.0, Math.max(-45.0, dy * 0.8));
+        rotateTo(yawTo(flightTargetX, flightTargetZ), pitch);
+        mc.options.forwardKey.setPressed(true);
+
+        if (dist <= 40) {
+            flightPhase = FlightPhase.TERMINAL;
+            terminalHalfTurns = 0;
+            spiralStartRadius = Math.max(spiralRadiusSetting.get(), dist);
+            stateTicks = 0;
+            statusText = "螺旋下降";
+        }
     }
 
-    private void flyDescend() {
+    private void flyTerminal() {
+        double cx = flightTargetX;
+        double cz = flightTargetZ;
+        double dx = mc.player.getX() - cx;
+        double dz = mc.player.getZ() - cz;
+        double dist = Math.sqrt(dx * dx + dz * dz);
+
         if (mc.player.isOnGround()) {
             releaseForward();
-            state = State.ARRIVE;
-            stateTicks = 0;
-            statusText = "到达检查";
+            if (dist <= 3.0) {
+                state = State.ARRIVE;
+                stateTicks = 0;
+                statusText = "到达检查";
+                return;
+            }
+            // 落在旁边：短距走回井口
+            if (stateTicks % 20 == 1) {
+                PathManagers.get().setAllowBreak(false);
+                PathManagers.get().moveToPrecise(
+                    new BlockPos((int) cx, surfaceY((int) cx, (int) cz) + 1, (int) cz));
+            }
+            if (stateTicks > 20 * 20) {
+                PathManagers.get().setAllowBreak(true);
+                state = State.ARRIVE;
+                stateTicks = 0;
+            }
             return;
         }
+
         if (!mc.player.isGliding()) {
             sendStartGliding();
             return;
         }
-        double distSq = horizontalDistanceSq(flightTargetX, flightTargetZ);
-        double dy = mc.player.getY() - (surfaceY((int) flightTargetX, (int) flightTargetZ) + 1);
-        float yaw = yawTo(flightTargetX, flightTargetZ);
-        float pitch = (float) Math.min(50.0, Math.max(3.0, dy * 0.8));
-        if (distSq <= 9.0) {
-            // 已经在目标上方：保持前进 + 较大俯角盘旋下降，直到落地；
-            // 不能松开前进键（松开后滑翔几乎不掉高，会在目标上方飘很久）。
-            rotateTo(yaw, 60.0f);
-            mc.options.forwardKey.setPressed(true);
+
+        double heightAbove = mc.player.getY()
+            - (isChunkLoaded((int) cx, (int) cz) ? surfaceY((int) cx, (int) cz) : mc.player.getBlockY());
+
+        if (dist <= 3.0) {
+            // 已经在圆心正上方：小俯角缓降，不按前进键，别把圈冲大
+            rotateTo(yawTo(cx, cz), heightAbove > 30 ? 75.0f : 45.0f);
+            releaseForward();
             return;
         }
+
+        // 每 20 tick 把目标半径收 2 格，收到 2 格为止；半径外朝圆心收、半径内切向绕
+        if (stateTicks % 20 == 0) terminalHalfTurns++;
+        double radius = Math.max(2.0, spiralStartRadius - terminalHalfTurns * 2.0);
+        float yaw = dist > radius
+            ? yawTo(cx, cz)
+            : FlightNavLogic.spiralYaw(cx, cz, mc.player.getX(), mc.player.getZ());
+        float pitch = FlightNavLogic.spiralPitch(heightAbove);
         rotateTo(yaw, pitch);
         mc.options.forwardKey.setPressed(true);
+
+        if (fireworkCooldown > 0) fireworkCooldown--;
+        if (fireworkCooldown == 0 && heightAbove > 20 && dist > 12) {
+            useFirework();
+            fireworkCooldown = fireworkTicks();
+        }
     }
 
     private void onArrive() {
@@ -1034,9 +1118,6 @@ public class FOEnchantedGoldCollector extends Module {
             }
             return;
         }
-        if (!mc.player.isOnGround()) {
-            return;
-        }
         landingFailures = 0;
         if (currentChest == null) {
             state = State.NEXT;
@@ -1051,14 +1132,40 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        // 水下古城：从箱子 Y+1 到地表整列都是流体；
-        // 另外从「城顶附近（箱子 +40）」到地表整列水淹也算——古城内部有空气腔时，
-        // 只看箱子到地表会被空气/石头隔断，导致每箱都挖到水才失败。
-        int top = surfaceY(currentChest.x(), currentChest.z());
+        // 落点必须对准箱子正上方：井就开在这里，偏了就用 Baritone 走回来
+        double dx = mc.player.getX() - (currentChest.x() + 0.5);
+        double dz = mc.player.getZ() - (currentChest.z() + 0.5);
+        double offSq = dx * dx + dz * dz;
+        if (offSq > 2.25) {
+            statusText = "对准箱子上方";
+            if (stateTicks % 20 == 1) {
+                PathManagers.get().setAllowBreak(false);
+                PathManagers.get().moveToPrecise(
+                    new BlockPos(currentChest.x(), surfaceY(currentChest.x(), currentChest.z()) + 1,
+                        currentChest.z()));
+            }
+            if (stateTicks > 20 * 20) {
+                PathManagers.get().setAllowBreak(true);
+                blacklistCurrentChest(EnchantedGoldStore.REASON_UNREACHABLE);
+            }
+            return;
+        }
+        PathManagers.get().stop();
+        PathManagers.get().setAllowBreak(false);
+
+        shaftColumn = new BlockPos(currentChest.x(), 0, currentChest.z());
+        shaftTopY = surfaceY(currentChest.x(), currentChest.z());
+        shaftChestY = currentChest.y();
+        shaftDigY = shaftTopY;
+        lastShaftColumn = shaftColumn;
+        lastShaftTopY = shaftTopY;
+        precheckDone = false;
+        precheckVerdict = null;
+
+        // 水下古城：整列水淹直接整城放弃（5 列预检也会抓水，这里是兜底）
+        int top = shaftTopY;
         boolean[] column = sampleFluidColumn(currentChest.x(), currentChest.y() + 1, top, currentChest.z());
-        boolean[] cityTopColumn = sampleFluidColumn(currentChest.x(), currentChest.y() + 40, top, currentChest.z());
-        if (abandonUnderwaterSetting.get()
-            && (FluidColumnLogic.isUnderwaterCity(column) || FluidColumnLogic.isUnderwaterCity(cityTopColumn))) {
+        if (abandonUnderwaterSetting.get() && FluidColumnLogic.isUnderwaterCity(column)) {
             if (currentCity != null) {
                 store.blacklistCity(scope(), currentCity.centerX(), currentCity.centerZ(),
                     EnchantedGoldStore.REASON_UNDERWATER_CITY);
@@ -1068,97 +1175,126 @@ public class FOEnchantedGoldCollector extends Module {
             rotateToNextCity();
             return;
         }
-        // 小水塘：箱子上方任意一格流体就拉黑该箱
-        if (FluidColumnLogic.hasFluid(column)) {
-            blacklistCurrentChest(EnchantedGoldStore.REASON_POND_ABOVE);
-            return;
-        }
 
-        // 选井口
-        List<ShaftColumnLogic.Column> candidates = ShaftColumnLogic.sortedByDistance(
-            ShaftColumnLogic.candidates(currentChest.x(), currentChest.z(),
-                shaftMinOffsetSetting.get(), shaftMaxOffsetSetting.get()),
-            mc.player.getX(), mc.player.getZ());
-        ShaftColumnLogic.Column chosen = null;
-        int reuse = shaftReuseDistanceSetting.get();
-        if (reuse > 0 && lastShaftColumn != null && lastShaftTopY > currentChest.y() + 8) {
-            double dx = lastShaftColumn.getX() + 0.5 - (currentChest.x() + 0.5);
-            double dz = lastShaftColumn.getZ() + 0.5 - (currentChest.z() + 0.5);
-            if (dx * dx + dz * dz <= (double) reuse * reuse
-                && isUsableShaftColumn(lastShaftColumn.getX(), lastShaftColumn.getZ(), currentChest.y())) {
-                chosen = new ShaftColumnLogic.Column(lastShaftColumn.getX(), lastShaftColumn.getZ(),
-                    (int) Math.round(Math.sqrt(dx * dx + dz * dz)));
-                info("复用上一口竖井的位置（同城距离 " + reuse + " 格内）。");
-            }
-        }
-        if (chosen == null) {
-            for (ShaftColumnLogic.Column c : candidates) {
-                if (!isChunkLoaded(c.x(), c.z())) continue;
-                if (!isUsableShaftColumn(c.x(), c.z(), currentChest.y())) continue;
-                chosen = c;
-                break;
-            }
-        }
-        if (chosen == null) {
-            blacklistCurrentChest(EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
-            return;
-        }
-
-        shaftColumn = new BlockPos(chosen.x(), 0, chosen.z());
-        shaftTopY = surfaceY(chosen.x(), chosen.z());
-        lastShaftColumn = shaftColumn;
-        lastShaftTopY = shaftTopY;
-        shaftChestY = currentChest.y();
-        shaftDigY = shaftTopY;
-        tunnelStep = 0;
-        tunnelDir = null;
-        state = State.SHAFT_APPROACH;
+        state = State.PREP_AHEAD;
         stateTicks = 0;
-        statusText = "走向井口";
+        statusText = "落地后处理";
     }
 
-    private void onShaftApproach() {
-        if (shaftColumn == null) {
-            state = State.ARRIVE;
-            return;
-        }
-        BlockPos stand = new BlockPos(shaftColumn.getX(), shaftTopY + 1, shaftColumn.getZ());
-        double distSq = mc.player.squaredDistanceTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5);
-        if (distSq <= 2.5 && mc.player.isOnGround()) {
-            PathManagers.get().stop();
-            PathManagers.get().setAllowBreak(false);
-            state = State.SHAFT_DIG;
-            stateTicks = 0;
-            statusText = "下挖竖井";
-            return;
-        }
+    /** 到目标落地后：先存盒、再修鞘翅、最后补给；都不需要就 0 tick 跳过。 */
+    private void onPrepAhead() {
         if (stateTicks == 1) {
-            PathManagers.get().setAllowBreak(false);
-            PathManagers.get().moveToPrecise(stand);
+            int packThreshold = Math.max(1, targetApplesSetting.get());
+            boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
+            boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
+            boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
+                || countFireworks() < minFireworksSetting.get()
+                || !hasEnoughFood();
+            if (pack || supply) {
+                stationNeedPack = pack;
+                stationNeedSupply = supply;
+                afterStopState = State.SHAFT_PRECHECK;
+                startStation();
+                return;
+            }
+            if (repair) {
+                afterStopState = State.SHAFT_PRECHECK;
+                state = State.REPAIR;
+                stateTicks = 0;
+                statusText = "修复鞘翅";
+                return;
+            }
         }
-        if (stateTicks > 20 * 45) {
-            PathManagers.get().setAllowBreak(true);
-            blacklistCurrentChest(EnchantedGoldStore.REASON_UNREACHABLE);
+        state = State.SHAFT_PRECHECK;
+        stateTicks = 0;
+        statusText = "井道预检";
+    }
+
+    /** 扫一列：从井口地表到箱子层，返回最严重的阻断类型。 */
+    private ShaftPrecheckLogic.ColumnScan scanColumn(int x, int z) {
+        if (currentChest == null) return ShaftPrecheckLogic.ColumnScan.clean();
+        int from = Math.min(shaftTopY, currentChest.y());
+        int to = Math.max(shaftTopY, currentChest.y());
+        ShaftPrecheckLogic.Blocker worst = ShaftPrecheckLogic.Blocker.NONE;
+        int worstY = 0;
+        for (int y = from; y <= to; y++) {
+            BlockPos p = new BlockPos(x, y, z);
+            BlockState st = mc.world.getBlockState(p);
+            ShaftPrecheckLogic.Blocker b = ShaftPrecheckLogic.Blocker.NONE;
+            if (isFluid(p)) {
+                b = ShaftPrecheckLogic.Blocker.FLUID;
+            } else if (isUnbreakable(p, st)) {
+                b = ShaftPrecheckLogic.Blocker.UNBREAKABLE;
+            } else if (st.getBlock() == Blocks.SCULK_SHRIEKER) {
+                b = ShaftPrecheckLogic.Blocker.SHRIEKER;
+            } else if (st.getBlock() instanceof FallingBlock) {
+                b = ShaftPrecheckLogic.Blocker.FALLING;
+            } else if (st.getBlock() == Blocks.BUDDING_AMETHYST
+                || st.getBlock() == Blocks.AMETHYST_BLOCK
+                || st.getBlock() instanceof AmethystClusterBlock) {
+                b = ShaftPrecheckLogic.Blocker.AMETHYST;
+            }
+            if (b != ShaftPrecheckLogic.Blocker.NONE
+                && ShaftPrecheckLogic.worst(java.util.List.of(worst, b)) == b) {
+                worst = b;
+                worstY = y;
+            }
         }
+        return new ShaftPrecheckLogic.ColumnScan(worst, worstY);
+    }
+
+    /** 挖之前一次性扫 5 列：正下方 + 前后左右，见流体/不可破/尖啸体就拉黑该箱。 */
+    private void onShaftPrecheck() {
+        if (currentChest == null || shaftColumn == null) {
+            state = State.NEXT;
+            return;
+        }
+        if (!isChunkLoaded(shaftColumn.getX(), shaftColumn.getZ())) {
+            statusText = "等待区块加载";
+            return;
+        }
+        if (!precheckDone) {
+            precheckDone = true;
+            precheckVerdict = ShaftPrecheckLogic.evaluate(
+                scanColumn(shaftColumn.getX(), shaftColumn.getZ()),
+                scanColumn(shaftColumn.getX(), shaftColumn.getZ() - 1),
+                scanColumn(shaftColumn.getX(), shaftColumn.getZ() + 1),
+                scanColumn(shaftColumn.getX() - 1, shaftColumn.getZ()),
+                scanColumn(shaftColumn.getX() + 1, shaftColumn.getZ()));
+            if (!precheckVerdict.pass()) {
+                warning(precheckVerdict.reason());
+                String reason = precheckVerdict.blocker() == ShaftPrecheckLogic.Blocker.FLUID
+                    ? EnchantedGoldStore.REASON_SHAFT_FLUID
+                    : EnchantedGoldStore.REASON_NO_SAFE_MOUTH;
+                blacklistCurrentChest(reason);
+                return;
+            }
+        }
+        shaftDigY = shaftTopY;
+        state = State.SHAFT_DIG;
+        stateTicks = 0;
+        statusText = "下挖竖井（箱子正上方）";
     }
 
     private void onShaftDig() {
-        if (shaftColumn == null) {
-            state = State.ARRIVE;
+        if (currentChest == null || shaftColumn == null) {
+            state = State.NEXT;
             return;
         }
-        if (shaftDigY < shaftChestY) {
-            if (mc.player.getBlockY() > shaftChestY + 1) {
-                statusText = "等待落到井底";
-                return;
-            }
+        int chestY = currentChest.y();
+
+        // 到箱子正上方一格就停手，绝不挖箱子
+        if (mc.player.getBlockY() <= chestY + 1 && mc.player.isOnGround()) {
+            releaseForward();
             PathManagers.get().stop();
-            PathManagers.get().setAllowBreak(false);
-            state = State.TUNNEL;
+            state = State.LOOT;
             stateTicks = 0;
-            statusText = "挖横向通道";
+            lootApplesBefore = -1;
+            lootCooldown = 0;
+            statusText = "开箱";
             return;
         }
+
         if (stateTicks % 40 == 0 && isWardenNear()) {
             abortShaft("监守者靠近", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
             return;
@@ -1167,15 +1303,17 @@ public class FOEnchantedGoldCollector extends Module {
             abortShaft("井内已经进水/岩浆", true, EnchantedGoldStore.REASON_SHAFT_FLUID);
             return;
         }
+
+        // 严格 1×1：偏出箱子 X/Z 就先用前进键回到井中心
         if (mc.player.getBlockX() != shaftColumn.getX() || mc.player.getBlockZ() != shaftColumn.getZ()) {
-            if (stateTicks % 20 == 1) {
-                PathManagers.get().moveToPrecise(
-                    new BlockPos(shaftColumn.getX(), shaftDigY + 1, shaftColumn.getZ()));
-            }
+            statusText = "回到井中心";
+            mc.player.setYaw(yawTo(shaftColumn.getX() + 0.5, shaftColumn.getZ() + 0.5));
+            mc.options.forwardKey.setPressed(true);
             return;
         }
+        releaseForward();
 
-        // 镐子耐久：低于安全线 + 余量就升井修，绝不让它在井里挖坏
+        if (stateTicks % 20 == 1) ensurePickaxeInInventory();
         int pickSlot = findPickaxeSlot();
         if (pickSlot == -1) {
             pause("镐子不见了，停止下挖");
@@ -1189,18 +1327,26 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        BlockPos digPos = new BlockPos(shaftColumn.getX(), shaftDigY, shaftColumn.getZ());
+        BlockPos digPos = mc.player.getBlockPos().down();
         BlockState st = mc.world.getBlockState(digPos);
         if (st.isAir()) {
-            if (mc.player.getBlockY() <= shaftDigY) shaftDigY--;
+            statusText = "下挖竖井 Y=" + digPos.getY();
             return;
         }
-
+        if (st.getBlock() instanceof ChestBlock) {
+            releaseForward();
+            state = State.LOOT;
+            stateTicks = 0;
+            lootApplesBefore = -1;
+            lootCooldown = 0;
+            statusText = "到达箱子层";
+            return;
+        }
         if (isUnbreakable(digPos, st)) {
             abortShaft("遇到不可破坏方块", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
             return;
         }
-        if (isShriekerNear(digPos)) {
+        if (st.getBlock() == Blocks.SCULK_SHRIEKER) {
             abortShaft("遇到幽匿尖啸体", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
             return;
         }
@@ -1216,83 +1362,7 @@ public class FOEnchantedGoldCollector extends Module {
         }
 
         if (mineBlock(digPos, pickSlot)) {
-            // 等玩家真的落到这一层，再继续下一格；避免悬空时误判
-            if (mc.player.getBlockY() <= shaftDigY && mc.player.isOnGround()) {
-                shaftDigY--;
-                statusText = "下挖竖井 Y=" + shaftDigY;
-            }
-        }
-    }
-
-    private void onTunnel() {
-        if (shaftColumn == null || currentChest == null) {
-            state = State.LOOT;
-            return;
-        }
-        if (tunnelDir == null) {
-            tunnelDir = directionFromShaftToChest();
-        }
-        if (stateTicks % 40 == 0 && isWardenNear()) {
-            abortShaft("通道内监守者靠近", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
-            return;
-        }
-        if (mc.player.isTouchingWater() || mc.player.isInLava()) {
-            abortShaft("通道内进水/岩浆", true, EnchantedGoldStore.REASON_TUNNEL_FLUID);
-            return;
-        }
-        BlockPos chestPos = new BlockPos(currentChest.x(), currentChest.y(), currentChest.z());
-        BlockPos feet = new BlockPos(shaftColumn.getX(), shaftChestY, shaftColumn.getZ())
-            .offset(tunnelDir, tunnelStep);
-        BlockPos head = feet.up();
-        // 只有真的站到「紧贴箱子」的那一格才开箱；提前一格的空气不能算到，
-        // 否则最后一格通道还没挖，玩家隔着方块点箱子必然失败。
-        if (feet.offset(tunnelDir).equals(chestPos) && mc.player.getBlockPos().equals(feet)) {
-            state = State.LOOT;
-            stateTicks = 0;
-            lootApplesBefore = -1;
-            lootCooldown = 0;
-            statusText = "开箱";
-            return;
-        }
-
-        // 先挖脚/头两格，再走过去
-        int pickSlot = findPickaxeSlot();
-        if (pickSlot == -1) {
-            pause("镐子不见了，停止挖通道");
-            return;
-        }
-        for (BlockPos p : new BlockPos[]{feet, head}) {
-            BlockState st = mc.world.getBlockState(p);
-            if (st.isAir()) continue;
-            if (isUnbreakable(p, st)) {
-                abortShaft("通道遇到不可破坏方块", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
-                return;
-            }
-            if (st.getBlock() instanceof FallingBlock) {
-                abortShaft("通道遇到沙子/沙砾，可能塌方", false, EnchantedGoldStore.REASON_NO_SAFE_MOUTH);
-                return;
-            }
-            ShaftFluidLogic.Risk risk = assessTunnelRisk(p);
-            if (ShaftFluidLogic.mustStop(risk)) {
-                abortShaft("通道" + ShaftFluidLogic.reasonText(risk), true, EnchantedGoldStore.REASON_TUNNEL_FLUID);
-                return;
-            }
-            mineBlock(p, pickSlot);
-        }
-
-        if (mc.world.getBlockState(feet).isAir() && mc.world.getBlockState(head).isAir()) {
-            // 必须真的走进这一格才推进；用「方块坐标相等」而不是距离，
-            // 否则站在上一格时离下一格中心只有 1 格，会被误判为已到达而连跳好几步。
-            if (mc.player.getBlockPos().equals(feet) && mc.player.isOnGround()) {
-                releaseForward();
-                tunnelStep++;
-            } else {
-                mc.player.setYaw(yawTo(feet.getX() + 0.5, feet.getZ() + 0.5));
-                mc.options.forwardKey.setPressed(true);
-            }
-        }
-        if (tunnelStep > 8) {
-            abortShaft("通道超长，疑似标记失真", false, EnchantedGoldStore.REASON_TARGET_MISSING);
+            statusText = "下挖竖井 Y=" + digPos.getY();
         }
     }
 
@@ -1314,6 +1384,21 @@ public class FOEnchantedGoldCollector extends Module {
             blacklistCurrentChest(EnchantedGoldStore.REASON_TARGET_MISSING);
             return;
         }
+
+        // 站在箱子正上方开箱（井就开在这里，不用绕到旁边）
+        BlockPos stand = chestPos.up();
+        if (!mc.player.getBlockPos().equals(stand)) {
+            statusText = "站到箱子上方";
+            double d2 = mc.player.squaredDistanceTo(
+                stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5);
+            if (d2 > 1.0) {
+                mc.player.setYaw(yawTo(stand.getX() + 0.5, stand.getZ() + 0.5));
+                mc.options.forwardKey.setPressed(true);
+                return;
+            }
+        }
+        releaseForward();
+        mc.player.setPitch(60.0f);
 
         if (isContainerOpen()) {
             ScreenHandler sh = mc.player.currentScreenHandler;
@@ -1353,24 +1438,6 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
 
-        // 距离不够先走到箱子旁边；绝不站正上方
-        double distSq = mc.player.squaredDistanceTo(chestPos.getX() + 0.5, chestPos.getY() + 0.5, chestPos.getZ() + 0.5);
-        boolean standingOnChest = mc.player.getBlockPos().equals(chestPos.up());
-        if (distSq > 18.0 || standingOnChest) {
-            BlockPos stand = findChestStandSpot(chestPos);
-            if (stand == null) {
-                pause("箱子周围找不到可站立的开箱点");
-                return;
-            }
-            if (stateTicks % 20 == 1) {
-                PathManagers.get().setAllowBreak(false);
-                PathManagers.get().moveToPrecise(stand);
-            }
-            if (stateTicks > 20 * 20) {
-                blacklistCurrentChest(EnchantedGoldStore.REASON_UNREACHABLE);
-            }
-            return;
-        }
         if (stateTicks % 10 == 1) {
             BlockClicker.clickBlockFacingPlayer(chestPos, true, Hand.MAIN_HAND);
         }
@@ -1396,89 +1463,118 @@ public class FOEnchantedGoldCollector extends Module {
     }
 
     private void afterLoot() {
-        if (totalCollected >= targetApplesSetting.get()) {
-            info("已达到目标 " + targetApplesSetting.get() + " 个，准备收工。");
-            state = State.ASCEND;
-            stateTicks = 0;
-            statusText = "升井";
-            return;
-        }
-        boolean full = isInventoryFull();
-        SurfaceStopLogic.Needs needs = SurfaceStopLogic.evaluate(
-            totalCollected, targetApplesSetting.get(), full && returnWhenFullSetting.get(),
-            elytraNeedsRepair(), pickaxeNeedsRepair(),
-            countBottles() < minBottlesSetting.get(),
-            countFireworks() < minFireworksSetting.get(),
-            false);
-        // 无论要不要存盒/修复，取完都必须先回地表：下一箱要么飞过去，要么走新竖井，
-        // 绝不能在地底直接切 FLY（旧版这里直接 NEXT，会从竖井里尝试起飞）。
+        // 取完就原地升井：不垫脚、不走横向通道；存盒/修复放到下一个目标落地后
+        ascendPhase = AscendPhase.CENTER;
+        ascendBurst = 0;
+        ascendTicks = 0;
+        releaseForward();
         state = State.ASCEND;
         stateTicks = 0;
-        statusText = needs.any() ? "升井停靠" : "升井前往下一目标";
-        if (!needs.any()) {
-            info("本箱处理完，升井前往下一个目标。");
-        }
+        statusText = "原地升井";
     }
 
+    /**
+     * 原地升井：抬头 -90°，起跳展开鞘翅，靠烟花垂直冲出井口。
+     *
+     * <p>不做：垫脚方块、向上挖、走横向通道。竖井是 1×1 笔直的，人没离开过井中心，
+     * 所以设计上不会失败；万一滑翔中断就重展开 + 补 2 发。
+     */
     private void onAscend() {
-        if (mc.player.getBlockY() >= shaftTopY + 1 || mc.player.getY() >= shaftTopY + 1.2) {
-            releaseForward();
-            state = State.SURFACE_STOP;
-            stateTicks = 0;
-            surfaceEvaluated = false;
-            statusText = "地表停靠";
+        ascendTicks++;
+        if (ascendTicks > 20 * 180) {
+            pause("升井超时，已暂停");
             return;
         }
         if (shaftColumn == null) {
-            state = State.SURFACE_STOP;
+            state = State.NEXT;
+            stateTicks = 0;
             return;
         }
-        // 取完箱站在横向通道尽头，不能就地垫脚（通道只有 2 格高，会把头顶封死）。
-        // 先沿通道走回竖井底，再垂直上升。
-        if (mc.player.getBlockX() != shaftColumn.getX() || mc.player.getBlockZ() != shaftColumn.getZ()) {
-            BlockPos base = new BlockPos(shaftColumn.getX(), shaftChestY, shaftColumn.getZ());
-            mc.player.setYaw(yawTo(base.getX() + 0.5, base.getZ() + 0.5));
-            mc.options.forwardKey.setPressed(true);
-            if (stateTicks > 20 * 60) {
-                pause("无法沿通道走回竖井底");
+
+        // 出井：到井口地表 +2 就算完成
+        if (mc.player.getY() >= shaftTopY + 2) {
+            releaseForward();
+            int packThreshold = Math.max(1, targetApplesSetting.get());
+            boolean needStop = autoPackSetting.get() && countApples() >= packThreshold;
+            needStop |= autoRepairSetting.get() && elytraNeedsRepair();
+            needStop |= autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get();
+            needStop |= countFireworks() < minFireworksSetting.get();
+            needStop |= !hasEnoughFood();
+            if (needStop) {
+                landForStop = true;
+                afterStopState = State.NEXT;
+                state = State.SURFACE_STOP;
+                statusText = "落地停靠";
+            } else {
+                state = State.NEXT;
+                statusText = "空中转场";
             }
+            stateTicks = 0;
             return;
         }
-        releaseForward();
-        if (!mc.player.isOnGround()) {
-            // 跳跃中：在脚下垫方块（标准垫脚上升）
-            if (mc.player.getVelocity().y <= 0) {
-                BlockPos place = mc.player.getBlockPos().down();
-                if (mc.world.getBlockState(place).isAir()
-                    && mc.player.getY() - (place.getY() + 1.0) > 0.05
-                    && mc.world.getBlockState(place.down()).isSolidBlock(mc.world, place.down())) {
-                    int slot = findPlaceableBlockSlot();
-                    if (slot == -1) {
-                        pause("没有垫脚方块，无法升井");
-                        return;
-                    }
-                    selectItem(slot);
-                    InteractionUtils.interactBlockSafely(place.down(), Direction.UP);
+
+        switch (ascendPhase) {
+            case CENTER -> {
+                double dx = mc.player.getX() - (shaftColumn.getX() + 0.5);
+                double dz = mc.player.getZ() - (shaftColumn.getZ() + 0.5);
+                if (Math.abs(dx) <= 0.15 && Math.abs(dz) <= 0.15) {
+                    releaseForward();
+                    ascendPhase = AscendPhase.LAUNCH;
+                    return;
+                }
+                mc.player.setYaw(yawTo(shaftColumn.getX() + 0.5, shaftColumn.getZ() + 0.5));
+                mc.options.forwardKey.setPressed(true);
+                if (ascendTicks > 20 * 10) {
+                    releaseForward();
+                    ascendPhase = AscendPhase.LAUNCH;
                 }
             }
-            return;
-        }
-        int slot = findPlaceableBlockSlot();
-        if (slot == -1) {
-            pause("没有垫脚方块，无法升井");
-            return;
-        }
-        selectItem(slot);
-        mc.player.jump();
-        if (stateTicks > 20 * 240) {
-            pause("升井超时，已暂停");
+            case LAUNCH -> {
+                releaseForward();
+                mc.player.setPitch(-90.0f);
+                if (mc.player.isOnGround()) {
+                    mc.player.jump();
+                    return;
+                }
+                if (!mc.player.isGliding()) {
+                    sendStartGliding();
+                    return;
+                }
+                useFirework();
+                ascendPhase = AscendPhase.GLIDE;
+            }
+            case GLIDE -> {
+                mc.player.setPitch(-90.0f);
+                mc.options.forwardKey.setPressed(true);
+                if (!mc.player.isGliding() && !mc.player.isOnGround()) {
+                    sendStartGliding();
+                    return;
+                }
+                if (ascendBurst > 0) {
+                    useFirework();
+                    ascendBurst--;
+                    return;
+                }
+                if (mc.player.getVelocity().y < ascendThrustSetting.get()) {
+                    // 掉速就一次补 2 发
+                    ascendBurst = 2;
+                }
+            }
         }
     }
 
     private void onSurfaceStop() {
         if (!mc.player.isOnGround()) {
+            if (landForStop) {
+                // 井口上方缓降：小俯角 + 前进，别从井口直坠
+                mc.player.setPitch(15.0f);
+                mc.options.forwardKey.setPressed(true);
+            }
             return;
         }
+        releaseForward();
+        PathManagers.get().stop();
+
         if (pauseAfterAscent) {
             pauseAfterAscent = false;
             pause("竖井/通道遇到流体，已安全升井；按设置未拉黑，任务暂停");
@@ -1493,26 +1589,24 @@ public class FOEnchantedGoldCollector extends Module {
                 warning("同一座城连续 3 个目标失真，判定假城，整城拉黑。");
             }
             fakeCityFailures = 0;
+            landForStop = false;
             rotateToNextCity();
             return;
         }
-        if (surfaceEvaluated) {
-            // 本轮停靠已经评估过，避免无限循环
-            state = State.NEXT;
+        if (!landForStop) {
+            state = afterStopState;
             stateTicks = 0;
             return;
         }
-        surfaceEvaluated = true;
 
-        boolean pack = autoPackSetting.get() && countApples() > 0
-            && (totalCollected >= targetApplesSetting.get()
-                || countApples() >= targetApplesSetting.get()
-                || (returnWhenFullSetting.get() && isInventoryFull()));
+        int packThreshold = Math.max(1, targetApplesSetting.get());
+        boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
         boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
             || countFireworks() < minFireworksSetting.get()
             || !hasEnoughFood();
-        boolean repair = autoRepairSetting.get() && elytraNeedsRepairOrPickaxe();
+        boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
 
+        landForStop = false;
         if (pack || supply) {
             stationNeedPack = pack;
             stationNeedSupply = supply;
@@ -1522,15 +1616,25 @@ public class FOEnchantedGoldCollector extends Module {
         if (repair) {
             state = State.REPAIR;
             stateTicks = 0;
-            statusText = "修复装备";
+            statusText = "修复鞘翅";
             return;
         }
-        state = State.NEXT;
+        state = afterStopState;
         stateTicks = 0;
     }
 
     private void onNext() {
+        afterStopState = State.NEXT;
         if (totalCollected >= targetApplesSetting.get()) {
+            if (autoPackSetting.get() && countApples() > 0
+                && countApples() >= Math.max(1, targetApplesSetting.get()) && !landForStop) {
+                landForStop = true;
+                afterStopState = State.DONE;
+                state = State.SURFACE_STOP;
+                stateTicks = 0;
+                statusText = "收工存盒";
+                return;
+            }
             info("任务完成：共取到 " + totalCollected + " 个附魔金苹果。");
             state = State.DONE;
             statusText = "完成";
@@ -1546,13 +1650,13 @@ public class FOEnchantedGoldCollector extends Module {
         }
         rotateToNextCity();
     }
-
     // ==================== 地表停靠：存盒 / 补给 ====================
 
     private void startStation() {
         stationStep = StationStep.PLACE_EC;
         stationTicks = 0;
         stationRetry = 0;
+        stationPackBefore = countApples();
         stationEcPos = null;
         stationEcOwned = false;
         stationBoxTakeMode = false;
@@ -2157,15 +2261,18 @@ public class FOEnchantedGoldCollector extends Module {
             statusText = "修复装备";
             return;
         }
-        // 一个潜影盒可能装不下全部苹果（例如盒里已有杂物），再停靠一次把剩下的装完
-        if (autoPackSetting.get() && totalCollected >= targetApplesSetting.get() && countApples() > 0) {
+        // 一个潜影盒可能装不下全部苹果（例如盒里已有杂物），再停靠一次把剩下的装完；
+        // 但这次一个都没装进去就别再循环了，否则会无限「继续装盒」
+        if (autoPackSetting.get() && countApples() >= Math.max(1, targetApplesSetting.get())
+            && countApples() < stationPackBefore) {
             state = State.SURFACE_STOP;
             stateTicks = 0;
             surfaceEvaluated = false;
             statusText = "继续装盒";
             return;
         }
-        state = State.NEXT;
+        state = afterStopState;
+        afterStopState = State.NEXT;
         stateTicks = 0;
         statusText = "下一个目标";
     }
@@ -2333,7 +2440,8 @@ public class FOEnchantedGoldCollector extends Module {
             case CONTINUE -> "继续";
         };
         info("本次修复投瓶 " + repairUsed + " 个（" + result + "）。");
-        state = State.NEXT;
+        state = afterStopState;
+        afterStopState = State.NEXT;
         stateTicks = 0;
         statusText = "下一个目标";
     }
@@ -2548,8 +2656,8 @@ public class FOEnchantedGoldCollector extends Module {
         failedTotal++;
         warning("拉黑当前箱子（" + reason + "），换下一个目标。");
         currentChest = null;
-        boolean underground = (state == State.SHAFT_DIG || state == State.TUNNEL
-            || state == State.LOOT || state == State.ASCEND)
+        boolean underground = (state == State.SHAFT_DIG || state == State.LOOT
+            || state == State.ASCEND)
             && shaftColumn != null && shaftTopY > mc.world.getBottomY()
             && mc.player.getBlockY() < shaftTopY - 1;
         if (EnchantedGoldStore.REASON_TARGET_MISSING.equals(reason)) {
@@ -2584,9 +2692,14 @@ public class FOEnchantedGoldCollector extends Module {
         if (currentChest == null) return null;
         BlockPos exact = new BlockPos(currentChest.x(), currentChest.y(), currentChest.z());
         if (mc.world.getBlockState(exact).getBlock() instanceof ChestBlock) return exact;
-        for (int dy = -2; dy <= 2; dy++) {
+        // 优先看自己脚下这一格：井就挖在箱子正上方，人在箱子上面时它必然在脚下
+        BlockPos below = mc.player.getBlockPos().down();
+        if (mc.world.getBlockState(below).getBlock() instanceof ChestBlock) return below;
+        // 只找 ±1 格，避免把隔壁箱子误认成目标
+        for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
                     BlockPos p = exact.add(dx, dy, dz);
                     if (mc.world.getBlockState(p).getBlock() instanceof ChestBlock) return p;
                 }
@@ -2701,7 +2814,8 @@ public class FOEnchantedGoldCollector extends Module {
     }
 
     private boolean isInventoryFull() {
-        for (int i = 9; i < 36; i++) {
+        // 快捷栏 0-8 也算：旧版只扫 9-35，快捷栏满了仍判「没满」，会把苹果塞到副手/丢地上
+        for (int i = 0; i < 36; i++) {
             if (mc.player.getInventory().getStack(i).isEmpty()) return false;
         }
         return true;
@@ -2753,7 +2867,29 @@ public class FOEnchantedGoldCollector extends Module {
         if (hasElytraEquipped()) return;
         int slot = findElytraSlot();
         if (slot == -1) return;
+        ItemStack chestArmor = mc.player.getEquippedStack(EquipmentSlot.CHEST);
+        // 护甲栏有别的胸甲时 toArmor(2) 会直接失败，先把胸甲挪到背包再穿
+        if (!chestArmor.isEmpty()) {
+            int empty = findEmptyInventorySlot();
+            if (empty != -1) {
+                InvUtils.move().fromArmor(2).to(empty);
+            } else {
+                // 没空格就互换：鞘翅进护甲栏，胸甲回到鞘翅原来那格
+                InvUtils.move().from(slot).toArmor(2);
+                return;
+            }
+        }
         InvUtils.move().from(slot).toArmor(2);
+    }
+
+    /** 副手拿着唯一的镐时，先把它换回背包，避免「找不到镐」中止挖井。 */
+    private void ensurePickaxeInInventory() {
+        ItemStack off = mc.player.getEquippedStack(EquipmentSlot.OFFHAND);
+        if (!isPickaxe(off.getItem())) return;
+        if (findPickaxeSlot() != -1) return;
+        int empty = findEmptyInventorySlot();
+        if (empty == -1) return;
+        setOffhand(empty);
     }
 
     private boolean isPickaxe(Item item) {
@@ -3047,9 +3183,11 @@ public class FOEnchantedGoldCollector extends Module {
             int empty = findEmptyInventorySlot();
             if (empty != -1) setOffhand(empty);
         } else {
+            ItemStack want = stationOriginalOffhand;
             for (int i = 0; i < 36; i++) {
                 ItemStack s = mc.player.getInventory().getStack(i);
-                if (s.getItem() == stationOriginalOffhand.getItem()) {
+                // 按「同一个物品 + 同样数量」找，避免组数错位后拿回另一组
+                if (s.getItem() == want.getItem() && s.getCount() == want.getCount()) {
                     setOffhand(i);
                     break;
                 }

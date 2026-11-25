@@ -219,6 +219,15 @@ public final class AncientLootEvaluator {
         return false;
     }
 
+    /** 箱内附魔金苹果总个数（同 id 的 count 累加）；用于「肥箱优先」与「附魔金×N」显示。 */
+    public static int countEnchantedGoldenApple(List<ItemStack> items) {
+        int n = 0;
+        for (ItemStack s : items) {
+            if ("minecraft:enchanted_golden_apple".equals(s.id())) n += s.count();
+        }
+        return n;
+    }
+
     /** 是否开出指定等级的迅捷潜行附魔书。 */
     public static boolean hasSwiftSneak(List<ItemStack> items, int level) {
         for (ItemStack s : items) {

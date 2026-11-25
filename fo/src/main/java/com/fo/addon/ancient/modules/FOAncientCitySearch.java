@@ -163,6 +163,12 @@ public class FOAncientCitySearch extends Module {
     private final SettingGroup sgStats = settings.createGroup("累计统计");
 
     private final Setting<LootTarget> searchTypeSetting;
+    /** 聊天结果与 Xaero 航点名字是否带「附魔金×N」。 */
+    private final Setting<Boolean> showGoldCountSetting;
+    /** 只搜「肥箱」：附魔金个数 ≥ 阈值 的箱子才保留，其余连标记都不写。 */
+    private final Setting<Boolean> onlyFatChestSetting;
+    /** 肥箱阈值（默认 3，判定是 ≥阈值）。 */
+    private final Setting<Integer> fatChestThresholdSetting;
     private final Setting<GameVersionOption> gameVersionSetting;
     private final Setting<Integer> searchRadiusSetting;
     private final Setting<Boolean> showDistanceSetting;
@@ -215,8 +221,12 @@ public class FOAncientCitySearch extends Module {
     /** 本轮搜索零结果：需要客户端线程清掉旧标记（整体替换语义）。 */
     private volatile boolean clearPending;
 
-    /** 一个待应用的命中点（坐标 + 标签 + 预生成的路径点名字）。 */
-    private record PendingMark(int x, int y, int z, String label, String waypointName) {
+    /** 一个待应用的命中点（坐标 + 标签 + 预生成的路径点名字 + 附魔金个数）。 */
+    private record PendingMark(int x, int y, int z, String label, String waypointName, int goldCount) {
+        /** 兼容旧调用：数量未知，按 0 处理。 */
+        PendingMark(int x, int y, int z, String label, String waypointName) {
+            this(x, y, z, label, waypointName, 0);
+        }
     }
 
     /** 已找到的目标箱子记录（按作用域分组）。 */
@@ -325,6 +335,26 @@ public class FOAncientCitySearch extends Module {
             .name("显示距离")
             .description("在结果中显示距离信息")
             .defaultValue(true)
+            .build());
+
+        showGoldCountSetting = sgGeneral.add(new BoolSetting.Builder()
+            .name("显示附魔金数量")
+            .description("聊天结果和 Xaero 航点名字带「附魔金×N」，一眼看出哪箱肥")
+            .defaultValue(true)
+            .build());
+
+        onlyFatChestSetting = sgGeneral.add(new BoolSetting.Builder()
+            .name("只挖肥箱")
+            .description("开启后只保留附魔金个数≥阈值的箱子，其余箱子不标记、不写航点")
+            .defaultValue(false)
+            .build());
+
+        fatChestThresholdSetting = sgGeneral.add(new IntSetting.Builder()
+            .name("肥箱阈值")
+            .description("附魔金个数达到这个数算肥箱（判定是≥此值，默认 3）")
+            .defaultValue(3)
+            .min(1).max(32)
+            .sliderMin(1).sliderMax(16)
             .build());
 
         autoSearchSetting = sgGeneral.add(new BoolSetting.Builder()
@@ -1034,7 +1064,10 @@ public class FOAncientCitySearch extends Module {
         List<PendingMark> batch = new ArrayList<>();
         for (int i = 0; i < alive.size(); i++) {
             AncientChestStore.Mark m = alive.get(i);
-            batch.add(new PendingMark(m.x(), m.y(), m.z(), m.label(), m.label() + " #" + (i + 1)));
+            String goldText = showGoldCountSetting.get() && m.goldCount() > 0
+                ? " 附魔金×" + m.goldCount() : "";
+            batch.add(new PendingMark(m.x(), m.y(), m.z(), m.label(),
+                m.label() + goldText + " #" + (i + 1), m.goldCount()));
         }
         writeWaypoints(batch);
     }
@@ -1414,6 +1447,14 @@ public class FOAncientCitySearch extends Module {
                 && AncientLootEvaluator.hasEnchantedGoldenApple(items);
             boolean hasSwift = target != LootTarget.ENCHANTED_GOLDEN_APPLE
                 && AncientLootEvaluator.hasSwiftSneak(items, 3);
+            int goldCount = AncientLootEvaluator.countEnchantedGoldenApple(items);
+            // 「只挖肥箱」：有附魔金但数量不够的箱子直接忽略，连标记都不写
+            if (onlyFatChestSetting.get() && hasGold
+                && goldCount < fatChestThresholdSetting.get()) {
+                debug("箱子 " + chest.x() + "," + chest.y() + "," + chest.z()
+                    + " 附魔金仅 " + goldCount + " 个，低于阈值 " + fatChestThresholdSetting.get() + "，忽略");
+                continue;
+            }
             if (!hasGold && !hasSwift) {
                 debug("箱子 " + chest.x() + "," + chest.y() + "," + chest.z()
                     + " 判定: 附魔金=" + hasGold + " 迅捷3=" + hasSwift + "（无目标物品，跳过）");
@@ -1426,8 +1467,9 @@ public class FOAncientCitySearch extends Module {
                     + Math.pow(chest.z() - playerPos.getZ(), 2));
             String label = hasGold && hasSwift ? AncientChestStore.LABEL_BOTH
                 : hasGold ? AncientChestStore.LABEL_GOLD : AncientChestStore.LABEL_SWIFT;
-            results.add(new FoundChest(new BlockPos(chest.x(), chest.y(), chest.z()), dist, label));
-            debug("箱子命中: " + chest.x() + "," + chest.y() + "," + chest.z() + " -> " + label);
+            results.add(new FoundChest(new BlockPos(chest.x(), chest.y(), chest.z()), dist, label, goldCount));
+            debug("箱子命中: " + chest.x() + "," + chest.y() + "," + chest.z() + " -> " + label
+                + " 附魔金×" + goldCount);
         }
         return results;
     }
@@ -1446,11 +1488,13 @@ public class FOAncientCitySearch extends Module {
         // 落盘与 Xaero 写入都交给客户端线程（onTickPost），避免与渲染线程抢共享状态。
         for (int i = 0; i < results.size(); i++) {
             FoundChest fc = results.get(i);
+            String goldText = showGoldCountSetting.get() && fc.goldCount > 0
+                ? " 附魔金×" + fc.goldCount : "";
             String name = showDistanceSetting.get()
-                ? String.format("%s #%d (%.0fm)", fc.label, i + 1, fc.distance)
-                : String.format("%s #%d", fc.label, i + 1);
+                ? String.format("%s%s #%d (%.0fm)", fc.label, goldText, i + 1, fc.distance)
+                : String.format("%s%s #%d", fc.label, goldText, i + 1);
             pendingMarks.add(new PendingMark(
-                fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.label, name));
+                fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.label, name, fc.goldCount));
         }
 
         info("=".repeat(50));
@@ -1458,12 +1502,14 @@ public class FOAncientCitySearch extends Module {
         info("=".repeat(50));
         for (int i = 0; i < results.size(); i++) {
             FoundChest fc = results.get(i);
+            String goldText = showGoldCountSetting.get() && fc.goldCount > 0
+                ? " 附魔金×" + fc.goldCount : "";
             if (showDistanceSetting.get()) {
-                info(String.format("[#%d][%s] 位置: %d, %d, %d (距离: %.0f 米)",
-                    i + 1, fc.label, fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.distance));
+                info(String.format("[#%d][%s%s] 位置: %d, %d, %d (距离: %.0f 米)",
+                    i + 1, fc.label, goldText, fc.pos.getX(), fc.pos.getY(), fc.pos.getZ(), fc.distance));
             } else {
-                info(String.format("[#%d][%s] 位置: %d, %d, %d",
-                    i + 1, fc.label, fc.pos.getX(), fc.pos.getY(), fc.pos.getZ()));
+                info(String.format("[#%d][%s%s] 位置: %d, %d, %d",
+                    i + 1, fc.label, goldText, fc.pos.getX(), fc.pos.getY(), fc.pos.getZ()));
             }
         }
         info("=".repeat(50));
@@ -1529,7 +1575,8 @@ public class FOAncientCitySearch extends Module {
                     skippedOpened++;
                     continue;
                 }
-                if (chestStore.add(scope, new AncientChestStore.Mark(m.x(), m.y(), m.z(), m.label()))) {
+                if (chestStore.add(scope, new AncientChestStore.Mark(
+                    m.x(), m.y(), m.z(), m.label(), m.goldCount()))) {
                     recorded++;
                     toWrite.add(m);
                 }
