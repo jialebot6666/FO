@@ -1566,6 +1566,15 @@ public class FOEnchantedGoldCollector extends Module {
     private void onSurfaceStop() {
         if (!mc.player.isOnGround()) {
             if (landForStop) {
+                // 刚出井还在井口正上方：先平飞几格再下降，否则会直坠回 1×1 竖井
+                double dx = shaftColumn == null ? 99 : mc.player.getX() - (shaftColumn.getX() + 0.5);
+                double dz = shaftColumn == null ? 99 : mc.player.getZ() - (shaftColumn.getZ() + 0.5);
+                boolean nearMouth = Math.abs(dx) < 8 && Math.abs(dz) < 8;
+                if (nearMouth && mc.player.isGliding()) {
+                    mc.player.setPitch(5.0f);
+                    mc.options.forwardKey.setPressed(true);
+                    return;
+                }
                 // 井口上方缓降：小俯角 + 前进，别从井口直坠
                 mc.player.setPitch(15.0f);
                 mc.options.forwardKey.setPressed(true);
