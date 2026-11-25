@@ -4,6 +4,12 @@ import com.fo.addon.AddonTemplate;
 import com.fo.addon.ancient.core.AncientChestStore;
 import com.fo.addon.ancient.core.EnchantedGoldCityLogic;
 import com.fo.addon.ancient.core.EnchantedGoldStore;
+import com.fo.addon.ancient.core.FatFilterLogic;
+import com.fo.addon.ancient.core.FireworkPolicyLogic;
+import com.fo.addon.ancient.core.FlightHysteresisLogic;
+import com.fo.addon.ancient.core.LandingPitchLogic;
+import com.fo.addon.ancient.core.PackGateLogic;
+import com.fo.addon.ancient.core.TakeoffClearanceLogic;
 import com.fo.addon.ancient.core.FatChestLogic;
 import com.fo.addon.ancient.core.FluidColumnLogic;
 import com.fo.addon.ancient.core.GearRepairLogic;
@@ -920,7 +926,7 @@ public class FOEnchantedGoldCollector extends Module {
         boolean onlyFat = searchModule.isOnlyFatChest();
         int fatThreshold = Math.max(1, searchModule.getFatChestThreshold());
         List<AncientChestStore.Mark> usable = EnchantedGoldCityLogic.filterTargets(currentCity.marks(), m ->
-            (!onlyFat || m.goldCount() >= fatThreshold)
+            FatFilterLogic.keep(m.goldCount(), onlyFat, fatThreshold)
                 && !searchModule.isChestOpened(m.x(), m.z())
                 && !store.isChestBlacklisted(scope, m.x(), m.y(), m.z()));
         // 肥箱优先：已知附魔金个数多的先飞，数量未知的排最后；同档按距离
@@ -1125,8 +1131,10 @@ public class FOEnchantedGoldCollector extends Module {
         } else if (mc.player.getY() <= minHeightSetting.get()) {
             climbing = true;
         }
+        climbing = FlightHysteresisLogic.nextClimbing(mc.player.getY(),
+            minHeightSetting.get(), maxHeightSetting.get(), climbing);
 
-        float pitch = climbing ? -54.77f : 37.72f;
+        float pitch = FlightHysteresisLogic.pitch(climbing);
         if (pitchSmoothSetting.get()) {
             float step = pitch < smoothedPitch
                 ? pitchRotateUpSetting.get().floatValue()
@@ -1235,7 +1243,7 @@ public class FOEnchantedGoldCollector extends Module {
             return;
         }
         if (dist > 3.0) {
-            float pitch = (float) Math.min(45.0, Math.max(5.0, dy * 0.8));
+            float pitch = LandingPitchLogic.pitchFor(dy, dist);
             mc.player.setYaw(stepAngle(mc.player.getYaw(),
                 yawTo(flightTargetX, flightTargetZ), 6.0f));
             mc.player.setPitch(pitch);
@@ -1270,14 +1278,16 @@ public class FOEnchantedGoldCollector extends Module {
     /** 起飞点头顶 3×3×4 是否全空气。 */
     private boolean canTakeOffHere() {
         BlockPos p = mc.player.getBlockPos();
+        boolean[] blocks = new boolean[36];
+        int i = 0;
         for (int dy = 1; dy <= 4; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
-                    if (!mc.world.getBlockState(p.add(dx, dy, dz)).isAir()) return false;
+                    blocks[i++] = mc.world.getBlockState(p.add(dx, dy, dz)).isAir();
                 }
             }
         }
-        return true;
+        return TakeoffClearanceLogic.canTakeOff(blocks);
     }
 
     /** 半径 8 内找一个头顶开阔的落脚点。 */
@@ -1414,7 +1424,7 @@ public class FOEnchantedGoldCollector extends Module {
     private void onPrepAhead() {
         if (stateTicks == 1) {
             int packThreshold = Math.max(1, packThresholdSetting.get());
-            boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
+            boolean pack = autoPackSetting.get() && PackGateLogic.shouldPack(countApples(), packThreshold);
             boolean repair = autoRepairSetting.get() && elytraNeedsRepair();
             boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
                 || countFireworks() < minFireworksSetting.get()
@@ -1724,7 +1734,7 @@ public class FOEnchantedGoldCollector extends Module {
         if (mc.player.getY() >= shaftTopY + 6) {
             releaseForward();
             int packThreshold = Math.max(1, packThresholdSetting.get());
-            boolean needStop = autoPackSetting.get() && countApples() >= packThreshold;
+            boolean needStop = autoPackSetting.get() && PackGateLogic.shouldPack(countApples(), packThreshold);
             needStop |= autoRepairSetting.get() && elytraNeedsRepair();
             needStop |= autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get();
             needStop |= countFireworks() < minFireworksSetting.get();
@@ -1829,7 +1839,7 @@ public class FOEnchantedGoldCollector extends Module {
         }
 
         int packThreshold = Math.max(1, packThresholdSetting.get());
-        boolean pack = autoPackSetting.get() && countApples() >= packThreshold;
+        boolean pack = autoPackSetting.get() && PackGateLogic.shouldPack(countApples(), packThreshold);
         boolean supply = (autoSupplyBottlesSetting.get() && countBottles() < minBottlesSetting.get())
             || countFireworks() < minFireworksSetting.get()
             || !hasEnoughFood();
@@ -1856,7 +1866,7 @@ public class FOEnchantedGoldCollector extends Module {
         afterStopState = State.NEXT;
         if (totalCollected >= targetApplesSetting.get()) {
             if (autoPackSetting.get() && countApples() > 0
-                && countApples() >= Math.max(1, packThresholdSetting.get()) && !landForStop) {
+                && PackGateLogic.shouldPack(countApples(), packThresholdSetting.get()) && !landForStop) {
                 landForStop = true;
                 afterStopState = State.DONE;
                 state = State.SURFACE_STOP;
@@ -2635,7 +2645,7 @@ public class FOEnchantedGoldCollector extends Module {
         }
         // 一个潜影盒可能装不下全部苹果（例如盒里已有杂物），再停靠一次把剩下的装完；
         // 但这次一个都没装进去就别再循环了，否则会无限「继续装盒」
-        if (autoPackSetting.get() && countApples() >= Math.max(1, packThresholdSetting.get())
+        if (autoPackSetting.get() && PackGateLogic.shouldPack(countApples(), packThresholdSetting.get())
             && countApples() < stationPackBefore) {
             state = State.SURFACE_STOP;
             stateTicks = 0;
