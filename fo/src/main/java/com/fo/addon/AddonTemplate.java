@@ -5,6 +5,7 @@ import com.fo.addon.ancient.core.StealStatsFile;
 import com.fo.addon.ancient.modules.FOAncientCitySearch;
 import com.fo.addon.gui.EnchantLevelMapSettingScreen;
 import com.fo.addon.modules.AutoLog;
+import com.fo.addon.modules.FOVaultCorridor;
 import com.fo.addon.modules.AutoMineSand;
 import com.fo.addon.modules.AutoMining;
 import com.fo.addon.modules.AutoTrash;
@@ -171,6 +172,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new com.fo.addon.modules.FOEatLift());
         Modules.get().add(new FOVaultEsp());
         Modules.get().add(new FOVaultLoot());
+        Modules.get().add(new FOVaultCorridor());
         Modules.get().add(new FOHellFlight());
     }
 
